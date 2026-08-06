@@ -30,14 +30,14 @@ everything else on the host stays out of reach.
 ## Requirements
 
 - Linux with rootless Podman configured
-- [go-task](https://taskfile.dev) for `task install` (or copy the two files manually)
+- `make` for `make install` (or copy the two files manually)
 
 ## Install
 
 ```sh
-task install                    # -> ~/.local/bin/agent-capsule
+make install                    # -> ~/.local/bin/agent-capsule
                                 #    ~/.local/share/agent-capsule/Dockerfile
-task install PREFIX=/usr/local  # alternative destination
+make install PREFIX=/usr/local  # alternative destination
 ```
 
 The container image builds automatically on first run and rebuilds whenever the
