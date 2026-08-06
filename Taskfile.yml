@@ -1,0 +1,50 @@
+# Installs the agent-capsule script into ~/.local/bin and its Dockerfile into
+# ~/.local/share/agent-capsule.
+#
+#   task install      # copy agent-capsule -> ~/.local/bin/agent-capsule (0755)
+#                     # copy Dockerfile  -> ~/.local/share/agent-capsule/Dockerfile (0644)
+#   task uninstall    # remove both
+#
+# Override the destination if needed:
+#   task install PREFIX=/usr/local     # -> /usr/local/bin/agent-capsule
+
+version: '3'
+
+silent: true
+
+vars:
+  # Task does not expand $HOME here; it resolves in the shell commands below.
+  PREFIX: $HOME/.local
+  BINDIR: "{{.PREFIX}}/bin"
+  SHAREDIR: "{{.PREFIX}}/share/agent-capsule"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  install:
+    desc: Install agent-capsule and its Dockerfile
+    cmds:
+      - install -d "{{.BINDIR}}"
+      - install -m 0755 agent-capsule "{{.BINDIR}}/agent-capsule"
+      - install -d "{{.SHAREDIR}}"
+      - install -m 0644 Dockerfile "{{.SHAREDIR}}/Dockerfile"
+      - echo "Installed {{.BINDIR}}/agent-capsule"
+      - echo "Installed {{.SHAREDIR}}/Dockerfile"
+      - |
+        case ":$PATH:" in
+          *":{{.BINDIR}}:"*) ;;
+          *) echo "WARNING: {{.BINDIR}} is not on your PATH, add it, e.g.:"
+             echo "  export PATH=\"{{.BINDIR}}:\$PATH\"" ;;
+        esac
+
+  uninstall:
+    desc: Remove the installed script and Dockerfile
+    cmds:
+      - rm -f "{{.BINDIR}}/agent-capsule"
+      - rm -f "{{.SHAREDIR}}/Dockerfile"
+      - rmdir "{{.SHAREDIR}}" 2>/dev/null || true
+      - echo "Removed {{.BINDIR}}/agent-capsule"
+      - echo "Removed {{.SHAREDIR}}/Dockerfile"

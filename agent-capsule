@@ -1,0 +1,926 @@
+#!/usr/bin/env bash
+#
+# agent-capsule: Run Claude Code in a ROOTLESS Podman container, sharing a
+# project folder with your host.
+#
+#   * Rootless podman: container root maps to YOUR host UID, so files Claude
+#     writes in /workspace are owned by you on the host by default.
+#   * Optional --keep-id or AGENT_CAPSULE_KEEPID=1: run as your UID inside
+#     the container too, needed for claude --dangerously-skip-permissions.
+#   * Claude auth is stored once in a shared auth home. The OAuth credentials
+#     file is live-shared (read-write) into every session, so a single
+#     --auth-login keeps all sessions logged in, including token refreshes.
+#   * Each project/task/session gets its own isolated /home/dev.
+#   * A shared global CLAUDE.md is mounted at /home/dev/.claude/CLAUDE.md.
+#   * Claude's per-project memory is shared across sessions on the same repo
+#     (see "Shared per-project memory" below).
+#   * The Go toolchain is available inside the container.
+#   * Extra tools (SuperClaude, hunkdiff) are opt-in with --with.
+#   * Herdr-friendly: use --session or AGENT_CAPSULE_SESSION for parallel agents.
+#
+# Usage:
+#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [-d] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <claude args>]
+#
+# Examples:
+#   agent-capsule
+#   agent-capsule ~/code/myapp
+#   agent-capsule --shell .
+#   agent-capsule --build .
+#   agent-capsule --offline --shell .
+#   agent-capsule --auth-login
+#   agent-capsule --session amf-fix-auth ~/code/amf
+#   agent-capsule --with superclaude,hunkdiff ~/code/myapp
+#   agent-capsule . -- --help
+#
+# Extra mounts:
+#   agent-capsule --mount ~/code/shared-lib .
+#   agent-capsule --mount ~/data:/data .
+#   agent-capsule --mount ~/docs:/docs:ro .
+#
+# Optional extra tools (--with):
+#   Every image ships Claude Code, the Go toolchain and golangci-lint. Anything
+#   else is opt-in and baked in at build time:
+#     --with superclaude            SuperClaude slash commands
+#     --with hunkdiff               hunkdiff CLI
+#     --with superclaude,hunkdiff   several at once (--with a --with b also works)
+#     --with list                   print the known extras and exit
+#   Each selection gets its own image tag (<image>:base with no extras,
+#   <image>:<hash> otherwise), so switching selections never rebuilds over the
+#   other variant. AGENT_CAPSULE_IMAGE must therefore be a bare name with no
+#   tag. Drop variants you no longer need with `podman rmi`.
+#
+# Documentation vault (-d, --documentation):
+#   Cross-cutting knowledge (how tools connect, why-decisions, runbooks) is
+#   documented in an Obsidian vault, NOT in this script. Pass -d to mount the
+#   vault read-write at /vault so Claude can record such knowledge while working
+#   — pointers, not copies (tool detail stays in its own repo/header). The vault
+#   host path defaults to ~/Documents/Obsidian/Docs-automated; override with
+#   AGENT_CAPSULE_VAULT (and the in-container path with AGENT_CAPSULE_VAULT_DEST).
+#   See the vault's "Conventions for Claude" note for what to write and where.
+#
+# Shared auth:
+#   $HOME/.agent-capsule/auth-home
+#   Authenticate once with `agent-capsule --auth-login`. The resulting OAuth
+#   token ($AUTH_HOME/.claude/.credentials.json) is bind-mounted read-write
+#   into every session, so all sessions share one login and in-container token
+#   refreshes are written straight back. Everything else in the session home
+#   (.claude.json, sessions, history) stays per-session isolated.
+#
+# Per-session homes:
+#   $HOME/.agent-capsule/homes/<session>
+#
+# Shared global Claude memory:
+#   $HOME/.agent-capsule/CLAUDE.md
+#   Mounted inside the container as:
+#   /home/dev/.claude/CLAUDE.md
+#
+# Shared per-project memory (default ON, read-write):
+#   Claude Code's file-based memory (/home/dev/.claude/projects/<slug>/memory) is
+#   shared across every session working on the SAME project, so parallel agents
+#   pool what they learn instead of each re-discovering it. Kept per-project, so
+#   different repos never see each other's memory; transcripts and .claude.json
+#   stay per-session isolated.
+#     Host dir: $HOME/.agent-capsule/project-memory/<project-hash>
+#   Tradeoff: with read-write sharing, one agent's mistaken "learned fact" can be
+#   recalled by its siblings, and memory grows faster with no pruning.
+#     --shared-memory-ro    share read-only (curated one-way broadcast)
+#     --no-shared-memory    restore full per-session isolation
+#     AGENT_CAPSULE_SHARED_MEMORY_ENABLED=0 / _READONLY=1  (env equivalents)
+#
+# Override base dir:
+#   AGENT_CAPSULE_HOME=/some/path
+#
+# Disable auth copying:
+#   AGENT_CAPSULE_SHARE_AUTH=0 agent-capsule --session test .
+#
+# Disable shared global CLAUDE.md:
+#   agent-capsule --no-shared-claude-md --session test .
+#
+# Use custom shared CLAUDE.md:
+#   agent-capsule --shared-claude-md ~/.config/claude/CLAUDE.md --session test .
+#
+# Allow Claude to edit shared global CLAUDE.md:
+#   agent-capsule --shared-claude-md-rw --session memory-edit .
+#
+# Herdr usage:
+#   HERDR_AGENT=claude AGENT_CAPSULE_SESSION=amf-fix-auth agent-capsule ~/code/amf
+#
+# SELinux:
+#   If enabled, volumes are relabeled with :z automatically.
+#   Override with AGENT_CAPSULE_VOLOPT, for example:
+#     AGENT_CAPSULE_VOLOPT=""
+#     AGENT_CAPSULE_VOLOPT=":Z"
+#
+set -euo pipefail
+
+# ----------------------------------------------------------------------------
+# Config
+# ----------------------------------------------------------------------------
+VERSION="0.1.0"
+
+IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
+NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
+GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
+
+# Extra tools that --with can bake into the image (none by default). Keep in
+# sync with the case branches in the Dockerfile's EXTRAS step. This order is
+# also the canonical order of the selection, so the derived image tag does not
+# depend on how the user spelled it out.
+KNOWN_EXTRAS=(hunkdiff superclaude)
+
+CONFIG_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
+BUILD_DIR="$CONFIG_DIR/build"
+AUTH_HOME_DIR="$CONFIG_DIR/auth-home"
+
+SHARED_CLAUDE_MD="${AGENT_CAPSULE_SHARED_CLAUDE_MD:-$CONFIG_DIR/CLAUDE.md}"
+SHARED_CLAUDE_MD_ENABLED="${AGENT_CAPSULE_SHARED_CLAUDE_MD_ENABLED:-1}"
+SHARED_CLAUDE_MD_READONLY="${AGENT_CAPSULE_SHARED_CLAUDE_MD_READONLY:-1}"
+
+# Shared per-project memory. Claude Code's file-based memory lives under
+# /home/dev/.claude/projects/<slug>/memory. The <slug> is derived from the cwd,
+# which is always /workspace inside the capsule, so the container path is fixed
+# (version-fragile: a Claude Code change to the slug scheme would move it).
+# Keyed by project (not session) so parallel agents on the same repo pool what
+# they learn, while transcripts and .claude.json stay per-session isolated.
+# Default: enabled, read-write (agents must write to share learnings). Set
+# read-only for a curated one-way broadcast; disable to restore full isolation.
+SHARED_MEMORY_ENABLED="${AGENT_CAPSULE_SHARED_MEMORY_ENABLED:-1}"
+SHARED_MEMORY_READONLY="${AGENT_CAPSULE_SHARED_MEMORY_READONLY:-0}"
+CONTAINER_MEMORY_PATH="/home/dev/.claude/projects/-workspace/memory"
+
+DEFAULT_MEMORY="${AGENT_CAPSULE_MEMORY:-8g}"
+DEFAULT_CPUS="${AGENT_CAPSULE_CPUS:-4}"
+DEFAULT_PIDS_LIMIT="${AGENT_CAPSULE_PIDS_LIMIT:-512}"
+
+SHARE_AUTH="${AGENT_CAPSULE_SHARE_AUTH:-1}"
+
+# Documentation vault (Obsidian). Mounted read-write at $VAULT_DEST when -d is
+# given, so Claude can record cross-cutting docs. Override the host path with
+# AGENT_CAPSULE_VAULT.
+VAULT_DIR="${AGENT_CAPSULE_VAULT:-$HOME/Documents/Obsidian/Docs-automated}"
+VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+usage() {
+  awk 'NR==1{next} !/^#/{exit} {sub(/^# ?/,""); print}' "$0"
+}
+
+sanitize_name() {
+  local raw="${1:-}"
+  local cleaned
+
+  cleaned="$(printf '%s' "$raw" | tr -cd 'a-zA-Z0-9_.-')"
+  printf '%s' "$cleaned"
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$1 is not installed or not on PATH." >&2
+    exit 1
+  }
+}
+
+ensure_minimal_gitconfig() {
+  local target_home="$1"
+  local gitconfig="$target_home/.gitconfig"
+
+  if [[ -f "$gitconfig" ]]; then
+    return 0
+  fi
+
+  touch "$gitconfig"
+
+  if command -v git >/dev/null 2>&1; then
+    git config --file "$gitconfig" init.defaultBranch main
+
+    local git_name
+    local git_email
+
+    git_name="$(git config --global user.name 2>/dev/null || true)"
+    git_email="$(git config --global user.email 2>/dev/null || true)"
+
+    [[ -n "$git_name" ]] && git config --file "$gitconfig" user.name "$git_name"
+    [[ -n "$git_email" ]] && git config --file "$gitconfig" user.email "$git_email"
+  else
+    cat > "$gitconfig" <<'GITCONFIG'
+[init]
+	defaultBranch = main
+GITCONFIG
+  fi
+
+  # Do not let the last conditional's exit status leak out: with no global
+  # git email the trailing [[ -n "" ]] returns 1 and, under set -e, would
+  # abort the whole script on a fresh session home.
+  return 0
+}
+
+copy_path_if_present() {
+  local from_home="$1"
+  local to_home="$2"
+  local rel_path="$3"
+
+  if [[ ! -e "$from_home/$rel_path" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$to_home/$(dirname "$rel_path")"
+  cp -a "$from_home/$rel_path" "$to_home/$rel_path"
+}
+
+session_has_claude_state() {
+  local target_home="$1"
+
+  [[ -e "$target_home/.claude" ]] && return 0
+  [[ -e "$target_home/.claude.json" ]] && return 0
+
+  return 1
+}
+
+copy_claude_auth_from_auth_home() {
+  local auth_home="$1"
+  local session_home="$2"
+
+  [[ "$SHARE_AUTH" == "1" ]] || return 0
+  [[ "$session_home" != "$auth_home" ]] || return 0
+
+  if session_has_claude_state "$session_home"; then
+    return 0
+  fi
+
+  if ! session_has_claude_state "$auth_home"; then
+    echo ">> Auth    : no shared auth found yet. Run: agent-capsule --auth-login" >&2
+    return 0
+  fi
+
+  copy_path_if_present "$auth_home" "$session_home" ".claude"
+  copy_path_if_present "$auth_home" "$session_home" ".claude.json"
+
+  # Don't leave the OAuth token sprawled across every session home: the live
+  # credentials are bind-mounted read-write at runtime (see SHARED_CRED_MOUNT),
+  # so the copy above is redundant and would strand a stale token on disk.
+  rm -f "$session_home/.claude/.credentials.json"
+
+  echo ">> Auth    : copied shared Claude auth into this session"
+}
+
+resolve_file_path() {
+  local path="$1"
+  local must_exist="${2:-0}"
+  local dir
+  local base
+
+  dir="$(dirname "$path")"
+  base="$(basename "$path")"
+
+  # A path that exists but is not a regular file (typically a directory) must
+  # never be mounted where a file is expected.
+  if [[ -e "$path" && ! -f "$path" ]]; then
+    echo "Not a regular file: $path" >&2
+    exit 1
+  fi
+
+  if [[ ! -e "$path" ]]; then
+    # An explicitly requested file that is missing is almost always a typo;
+    # only auto-create the built-in default.
+    if [[ "$must_exist" == "1" ]]; then
+      echo "File not found: $path" >&2
+      exit 1
+    fi
+    mkdir -p "$dir"
+    touch "$path"
+  fi
+
+  dir="$(cd "$dir" 2>/dev/null && pwd)" || {
+    echo "Cannot resolve directory for file: $path" >&2
+    exit 1
+  }
+
+  printf '%s/%s' "$dir" "$base"
+}
+
+resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}"
+  local dir
+
+  while [[ -h "$src" ]]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+resolve_dockerfile() {
+  if [[ -n "${AGENT_CAPSULE_DOCKERFILE:-}" ]]; then
+    [[ -f "$AGENT_CAPSULE_DOCKERFILE" ]] || {
+      echo "Dockerfile not found: $AGENT_CAPSULE_DOCKERFILE" >&2
+      exit 1
+    }
+    printf '%s' "$AGENT_CAPSULE_DOCKERFILE"
+    return
+  fi
+
+  local script_dir
+  script_dir="$(resolve_script_dir)"
+
+  local candidates=(
+    "$script_dir/Dockerfile"
+    "$script_dir/../share/agent-capsule/Dockerfile"
+  )
+
+  local c
+  for c in "${candidates[@]}"; do
+    [[ -f "$c" ]] && {
+      printf '%s' "$c"
+      return
+    }
+  done
+
+  echo "Cannot find Dockerfile (looked in: ${candidates[*]})." >&2
+  echo "Set AGENT_CAPSULE_DOCKERFILE to point at it explicitly." >&2
+  exit 1
+}
+
+# ----------------------------------------------------------------------------
+# Parse args
+# ----------------------------------------------------------------------------
+FORCE_BUILD=0
+SHELL_MODE=0
+ARGS_ONLY=0
+AUTH_LOGIN=0
+KEEP_ID="${AGENT_CAPSULE_KEEPID:-0}"
+OFFLINE="${AGENT_CAPSULE_OFFLINE:-0}"
+SESSION_NAME="${AGENT_CAPSULE_SESSION:-}"
+DISABLE_SHARED_CLAUDE_MD=0
+SHARED_CLAUDE_MD_EXPLICIT=0
+SESSION_EXPLICIT=0
+MOUNT_VAULT=0
+MOUNT_SPECS=()
+EXTRAS_REQUESTED=()
+
+while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
+  case "$1" in
+    --build)
+      FORCE_BUILD=1
+      shift
+      ;;
+    --shell)
+      SHELL_MODE=1
+      shift
+      ;;
+    --keep-id)
+      KEEP_ID=1
+      shift
+      ;;
+    --offline)
+      OFFLINE=1
+      shift
+      ;;
+    --auth-login)
+      AUTH_LOGIN=1
+      shift
+      ;;
+    --session)
+      [[ -n "${2:-}" ]] || {
+        echo "--session requires a name." >&2
+        exit 1
+      }
+      SESSION_NAME="$2"
+      SESSION_EXPLICIT=1
+      shift 2
+      ;;
+    --session=*)
+      SESSION_NAME="${1#--session=}"
+      SESSION_EXPLICIT=1
+      shift
+      ;;
+    --shared-claude-md)
+      [[ -n "${2:-}" ]] || {
+        echo "--shared-claude-md requires a file path." >&2
+        exit 1
+      }
+      SHARED_CLAUDE_MD="$2"
+      SHARED_CLAUDE_MD_ENABLED=1
+      SHARED_CLAUDE_MD_EXPLICIT=1
+      shift 2
+      ;;
+    --shared-claude-md=*)
+      SHARED_CLAUDE_MD="${1#--shared-claude-md=}"
+      SHARED_CLAUDE_MD_ENABLED=1
+      SHARED_CLAUDE_MD_EXPLICIT=1
+      shift
+      ;;
+    --no-shared-claude-md)
+      DISABLE_SHARED_CLAUDE_MD=1
+      shift
+      ;;
+    --shared-claude-md-rw)
+      SHARED_CLAUDE_MD_READONLY=0
+      shift
+      ;;
+    --no-shared-memory)
+      SHARED_MEMORY_ENABLED=0
+      shift
+      ;;
+    --shared-memory-ro)
+      SHARED_MEMORY_READONLY=1
+      shift
+      ;;
+    --with)
+      [[ -n "${2:-}" ]] || {
+        echo "--with requires a tool list (or 'list'). Known: ${KNOWN_EXTRAS[*]}" >&2
+        exit 1
+      }
+      [[ "$2" == "list" ]] && {
+        printf '%s\n' "${KNOWN_EXTRAS[@]}"
+        exit 0
+      }
+      EXTRAS_REQUESTED+=("$2")
+      shift 2
+      ;;
+    --with=*)
+      [[ "${1#--with=}" == "list" ]] && {
+        printf '%s\n' "${KNOWN_EXTRAS[@]}"
+        exit 0
+      }
+      EXTRAS_REQUESTED+=("${1#--with=}")
+      shift
+      ;;
+    -m|--mount)
+      [[ -n "${2:-}" ]] || {
+        echo "--mount requires an argument: SRC[:DEST][:ro]" >&2
+        exit 1
+      }
+      MOUNT_SPECS+=("$2")
+      shift 2
+      ;;
+    --mount=*)
+      MOUNT_SPECS+=("${1#--mount=}")
+      shift
+      ;;
+    -d|--documentation)
+      MOUNT_VAULT=1
+      shift
+      ;;
+    --version)
+      echo "agent-capsule $VERSION"
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      ARGS_ONLY=1
+      shift
+      break
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$DISABLE_SHARED_CLAUDE_MD" == "1" ]]; then
+  SHARED_CLAUDE_MD_ENABLED=0
+fi
+
+# --auth-login runs in its own dedicated home, so an explicit --session would
+# be silently ignored. Reject the combination instead.
+if [[ "$AUTH_LOGIN" == "1" && "$SESSION_EXPLICIT" == "1" ]]; then
+  echo "--auth-login uses its own session; do not combine it with --session." >&2
+  exit 1
+fi
+
+if [[ "$ARGS_ONLY" == "1" ]]; then
+  PROJECT_DIR="$PWD"
+else
+  PROJECT_DIR="${1:-$PWD}"
+  if [[ -n "${1:-}" ]]; then shift; fi
+  if [[ -n "${1:-}" && "$1" != "--" ]]; then
+    echo "Unexpected argument: $1 (pass claude args after --)" >&2
+    exit 1
+  fi
+  [[ "${1:-}" == "--" ]] && shift
+fi
+
+CLAUDE_ARGS=("$@")
+
+# --shell replaces the whole command with bash, so any claude args after --
+# would be silently discarded. Fail instead of ignoring them.
+if [[ "$SHELL_MODE" == "1" && "${#CLAUDE_ARGS[@]}" -gt 0 ]]; then
+  echo "--shell does not take claude args (got: ${CLAUDE_ARGS[*]})" >&2
+  exit 1
+fi
+
+# ----------------------------------------------------------------------------
+# Validate environment
+# ----------------------------------------------------------------------------
+require_cmd podman
+require_cmd sha256sum
+require_cmd awk
+require_cmd tr
+require_cmd cut
+
+# ----------------------------------------------------------------------------
+# Resolve the requested extras and the image variant they select
+# ----------------------------------------------------------------------------
+# Accept repeated flags and comma-separated lists, then rebuild the selection in
+# KNOWN_EXTRAS order so it is deduplicated and canonical: --with a,b and
+# --with b --with a --with a must resolve to the same image tag.
+EXTRAS=""
+if [[ "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
+  read -r -a requested <<<"$(printf '%s ' "${EXTRAS_REQUESTED[@]}" | tr 'A-Z,' 'a-z ')"
+
+  for req in "${requested[@]}"; do
+    known=0
+    for extra in "${KNOWN_EXTRAS[@]}"; do
+      [[ "$req" == "$extra" ]] && known=1 && break
+    done
+    [[ "$known" == "1" ]] || {
+      echo "Unknown extra tool: $req (known: ${KNOWN_EXTRAS[*]})" >&2
+      exit 1
+    }
+  done
+
+  for extra in "${KNOWN_EXTRAS[@]}"; do
+    for req in "${requested[@]}"; do
+      [[ "$req" == "$extra" ]] && {
+        EXTRAS="${EXTRAS:+$EXTRAS,}$extra"
+        break
+      }
+    done
+  done
+fi
+
+# One image per selection, so switching --with does not rebuild over the other
+# variant. The tag carries that meaning, hence a pre-tagged override cannot work.
+if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
+  echo "AGENT_CAPSULE_IMAGE must not include a tag (got: $IMAGE_NAME);" >&2
+  echo "the tag encodes the --with selection." >&2
+  exit 1
+fi
+
+if [[ -z "$EXTRAS" ]]; then
+  IMAGE_VARIANT="base"
+else
+  IMAGE_VARIANT="$(printf '%s' "$EXTRAS" | sha256sum | cut -c1-7)"
+fi
+IMAGE_REF="$IMAGE_NAME:$IMAGE_VARIANT"
+
+# Resolve physically (-P): a repo reached via a symlink and via its real path
+# must hash to the same PROJECT_HASH, or shared per-project memory splits in two.
+RESOLVED_DIR="$(cd -P "$PROJECT_DIR" 2>/dev/null && pwd)" || {
+  echo "Directory not found: $PROJECT_DIR" >&2
+  exit 1
+}
+PROJECT_DIR="$RESOLVED_DIR"
+
+PROJECT_HASH="$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-12)"
+PROJECT_BASENAME="$(sanitize_name "$(basename "$PROJECT_DIR")")"
+[[ -n "$PROJECT_BASENAME" ]] || PROJECT_BASENAME="project"
+
+if [[ "$AUTH_LOGIN" == "1" ]]; then
+  SESSION_NAME="_auth"
+elif [[ -z "$SESSION_NAME" ]]; then
+  SESSION_NAME="${PROJECT_BASENAME}-${PROJECT_HASH}"
+fi
+
+SESSION_NAME="$(sanitize_name "$SESSION_NAME")"
+[[ -n "$SESSION_NAME" ]] || SESSION_NAME="$PROJECT_HASH"
+
+# sanitize_name strips slashes but keeps dots, so a name of "." or ".." would
+# make HOME_DIR resolve to homes/ or the whole config dir and mount every
+# sibling session, the auth home and all project memory into the container.
+if [[ "$SESSION_NAME" == "." || "$SESSION_NAME" == ".." ]]; then
+  echo "Invalid session name: '$SESSION_NAME' (resolves outside the session home)." >&2
+  exit 1
+fi
+
+if [[ "$AUTH_LOGIN" == "1" ]]; then
+  HOME_DIR="$AUTH_HOME_DIR"
+else
+  HOME_DIR="$CONFIG_DIR/homes/$SESSION_NAME"
+fi
+
+# Shared memory lives outside the per-session home, keyed by project so every
+# session on the same repo converges on it. Not meaningful for --auth-login.
+PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_HASH"
+[[ "$AUTH_LOGIN" == "1" ]] && SHARED_MEMORY_ENABLED=0
+
+CONTAINER_SUFFIX="${SESSION_NAME:0:48}"
+
+# ----------------------------------------------------------------------------
+# SELinux volume option
+# ----------------------------------------------------------------------------
+if [[ -n "${AGENT_CAPSULE_VOLOPT+x}" ]]; then
+  VOL_OPT="$AGENT_CAPSULE_VOLOPT"
+elif command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
+  VOL_OPT=":z"
+else
+  VOL_OPT=""
+fi
+
+if [[ -n "$VOL_OPT" && "$VOL_OPT" != :* ]]; then
+  VOL_OPT=":$VOL_OPT"
+fi
+
+# Mounts shared across concurrent sessions (credentials, CLAUDE.md, project
+# memory, vault) must use :z (shared relabel), never :Z (private per-container
+# label): with :Z the second session would lose access.
+SHARED_VOL_OPT="$VOL_OPT"
+[[ "$SHARED_VOL_OPT" == ":Z" ]] && SHARED_VOL_OPT=":z"
+
+# ----------------------------------------------------------------------------
+# Prepare persistent dirs
+# ----------------------------------------------------------------------------
+mkdir -p "$BUILD_DIR" "$AUTH_HOME_DIR" "$HOME_DIR"
+chmod 700 "$CONFIG_DIR" "$AUTH_HOME_DIR" "$HOME_DIR" 2>/dev/null || true
+
+ensure_minimal_gitconfig "$HOME_DIR"
+
+copy_claude_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR"
+
+# Prepare /home/dev/.claude so the nested CLAUDE.md mount has a target parent.
+if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
+  mkdir -p "$HOME_DIR/.claude"
+  RESOLVED_SHARED_CLAUDE_MD="$(resolve_file_path "$SHARED_CLAUDE_MD" "$SHARED_CLAUDE_MD_EXPLICIT")"
+  chmod 600 "$RESOLVED_SHARED_CLAUDE_MD" 2>/dev/null || true
+fi
+
+# Prepare the shared memory dir and its in-container parent. Creating the parent
+# host-side (rather than letting podman auto-create the mountpoint as root) keeps
+# ownership correct under --keep-id, same as the .claude parent above.
+if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
+  mkdir -p "$PROJECT_MEMORY_DIR"
+  chmod 700 "$PROJECT_MEMORY_DIR" 2>/dev/null || true
+  mkdir -p "$HOME_DIR/.claude/projects/-workspace"
+fi
+
+# ----------------------------------------------------------------------------
+# Write build context
+# ----------------------------------------------------------------------------
+DOCKERFILE_SRC="$(resolve_dockerfile)"
+cp -f "$DOCKERFILE_SRC" "$BUILD_DIR/Dockerfile"
+
+# ----------------------------------------------------------------------------
+# Build image if needed
+# ----------------------------------------------------------------------------
+# Fold the injected build args into the hash: the tags and the extras are not
+# baked into the Dockerfile, so changing them must still trigger a rebuild.
+HASH="$(printf '%s\n%s\n%s\n%s\n' "$NODE_TAG" "$GO_TAG" "$EXTRAS" \
+  "$(sha256sum "$BUILD_DIR/Dockerfile" | cut -d' ' -f1)" | sha256sum | cut -d' ' -f1)"
+# One hash file per image variant, so the variants track their own freshness.
+HASH_FILE="$BUILD_DIR/.last_build_hash-$IMAGE_VARIANT"
+NEED_BUILD=0
+
+[[ "$FORCE_BUILD" == "1" ]] && NEED_BUILD=1
+podman image exists "$IMAGE_REF" || NEED_BUILD=1
+[[ -f "$HASH_FILE" && "$(cat "$HASH_FILE" 2>/dev/null)" == "$HASH" ]] || NEED_BUILD=1
+
+if [[ "$NEED_BUILD" == "1" ]]; then
+  echo ">> Building $IMAGE_REF..."
+  podman build \
+    --build-arg "NODE_TAG=$NODE_TAG" \
+    --build-arg "GO_TAG=$GO_TAG" \
+    --build-arg "EXTRAS=$EXTRAS" \
+    -t "$IMAGE_REF" "$BUILD_DIR"
+  echo "$HASH" > "$HASH_FILE"
+fi
+
+# ----------------------------------------------------------------------------
+# Command
+# ----------------------------------------------------------------------------
+RUN_CMD=(claude "${CLAUDE_ARGS[@]}")
+[[ "$SHELL_MODE" == "1" ]] && RUN_CMD=(bash)
+
+# ----------------------------------------------------------------------------
+# Environment passed to container
+# ----------------------------------------------------------------------------
+EXTRA=()
+
+# Do not place the secret value directly in the podman command line.
+[[ -n "${ANTHROPIC_API_KEY:-}" ]] && EXTRA+=(-e ANTHROPIC_API_KEY)
+
+# Herdr wrapper hint. The host foreground process is podman, while Claude runs
+# inside the container.
+export HERDR_AGENT="${HERDR_AGENT:-claude}"
+EXTRA+=(-e "HERDR_AGENT=$HERDR_AGENT")
+
+# ----------------------------------------------------------------------------
+# Extra mounts: SRC[:DEST][:ro] -> -v SRC:DEST[:opts]
+# ----------------------------------------------------------------------------
+MOUNT_ARGS=()
+
+for spec in "${MOUNT_SPECS[@]}"; do
+  src="${spec%%:*}"
+  rest="${spec#"$src"}"
+  rest="${rest#:}"
+
+  ro=0
+  if [[ "$rest" == *:ro || "$rest" == "ro" ]]; then
+    ro=1
+    rest="${rest%ro}"
+    rest="${rest%:}"
+  fi
+
+  dest="$rest"
+
+  resolved="$(cd -P "$src" 2>/dev/null && pwd)" || {
+    echo "Mount source not found: $src" >&2
+    exit 1
+  }
+  src="$resolved"
+
+  if [[ -z "$dest" ]]; then
+    dest="/mnt/$(basename "$src")"
+  fi
+
+  if [[ "$dest" != /* ]]; then
+    echo "Mount destination must be absolute: $dest" >&2
+    exit 1
+  fi
+
+  opts="${VOL_OPT#:}"
+  [[ "$ro" == "1" ]] && opts="${opts:+$opts,}ro"
+
+  MOUNT_ARGS+=(-v "$src:$dest${opts:+:$opts}")
+
+  if [[ "$ro" == "1" ]]; then
+    echo ">> Mount   : $src  ->  $dest (read-only)"
+  else
+    echo ">> Mount   : $src  ->  $dest"
+  fi
+done
+
+# ----------------------------------------------------------------------------
+# Documentation vault mount (-d / --documentation)
+# ----------------------------------------------------------------------------
+VAULT_MOUNT=()
+
+if [[ "$MOUNT_VAULT" == "1" ]]; then
+  RESOLVED_VAULT="$(cd -P "$VAULT_DIR" 2>/dev/null && pwd)" || {
+    echo "Documentation vault not found: $VAULT_DIR" >&2
+    echo "Create it or set AGENT_CAPSULE_VAULT to your vault's path." >&2
+    exit 1
+  }
+
+  vault_opts="${SHARED_VOL_OPT#:}"
+  VAULT_MOUNT+=(-v "$RESOLVED_VAULT:$VAULT_DEST${vault_opts:+:$vault_opts}")
+fi
+
+# ----------------------------------------------------------------------------
+# Shared global CLAUDE.md mount
+# ----------------------------------------------------------------------------
+SHARED_CLAUDE_MD_MOUNT=()
+
+if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
+  memory_opts="${SHARED_VOL_OPT#:}"
+
+  if [[ "$SHARED_CLAUDE_MD_READONLY" == "1" ]]; then
+    memory_opts="${memory_opts:+$memory_opts,}ro"
+  fi
+
+  SHARED_CLAUDE_MD_MOUNT+=(
+    -v "$RESOLVED_SHARED_CLAUDE_MD:/home/dev/.claude/CLAUDE.md${memory_opts:+:$memory_opts}"
+  )
+fi
+
+# ----------------------------------------------------------------------------
+# Shared per-project memory mount
+# ----------------------------------------------------------------------------
+SHARED_MEMORY_MOUNT=()
+
+if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
+  mem_opts="${SHARED_VOL_OPT#:}"
+
+  if [[ "$SHARED_MEMORY_READONLY" == "1" ]]; then
+    mem_opts="${mem_opts:+$mem_opts,}ro"
+  fi
+
+  SHARED_MEMORY_MOUNT+=(
+    -v "$PROJECT_MEMORY_DIR:$CONTAINER_MEMORY_PATH${mem_opts:+:$mem_opts}"
+  )
+fi
+
+# ----------------------------------------------------------------------------
+# Shared credentials live mount
+# ----------------------------------------------------------------------------
+# Bind-mount the ONE shared OAuth token (rw) into this session so a single
+# `--auth-login` serves every session and in-container token refreshes write
+# straight back to the shared file. Everything else in /home/dev stays isolated.
+#
+# Concurrency note: two sessions refreshing at the exact same instant race on
+# this file (last-writer-wins). If the refresh rotates the refresh token, one
+# session may need to refresh again. Acceptable for the herdr workflow; no lock.
+SHARED_CRED_MOUNT=()
+AUTH_CRED_FILE="$AUTH_HOME_DIR/.claude/.credentials.json"
+
+if [[ "$SHARE_AUTH" == "1" && "$AUTH_LOGIN" != "1" ]]; then
+  if [[ -s "$AUTH_CRED_FILE" ]]; then
+    mkdir -p "$HOME_DIR/.claude"          # target parent must exist for the mount
+    cred_opts="${SHARED_VOL_OPT#:}"
+    SHARED_CRED_MOUNT+=(
+      -v "$AUTH_CRED_FILE:/home/dev/.claude/.credentials.json${cred_opts:+:$cred_opts}"
+    )
+  else
+    echo ">> Auth    : no shared credentials yet. Run: agent-capsule --auth-login" >&2
+  fi
+fi
+
+# ----------------------------------------------------------------------------
+# User namespace
+# ----------------------------------------------------------------------------
+USER_ARGS=(--user "0:0")
+
+if [[ "$KEEP_ID" == "1" ]]; then
+  USER_ARGS=(
+    --userns=keep-id
+    --user "$(id -u):$(id -g)"
+    -e HOME=/home/dev
+  )
+fi
+
+# ----------------------------------------------------------------------------
+# Security defaults
+# ----------------------------------------------------------------------------
+SECURITY_ARGS=(
+  --security-opt=no-new-privileges
+  --cap-drop=ALL
+  --pids-limit="$DEFAULT_PIDS_LIMIT"
+  --memory="$DEFAULT_MEMORY"
+  --cpus="$DEFAULT_CPUS"
+)
+
+NETWORK_ARGS=()
+if [[ "$OFFLINE" == "1" ]]; then
+  NETWORK_ARGS=(--network=none)
+fi
+
+# Allocate a pseudo-TTY only when stdin is one; a bare -t breaks piped or
+# batch runs (CI, herdr), e.g. `agent-capsule . -- -p "question" < prompt.txt`.
+TTY_ARGS=(-i)
+[[ -t 0 ]] && TTY_ARGS=(-it)
+
+# ----------------------------------------------------------------------------
+# Run
+# ----------------------------------------------------------------------------
+echo ">> Project : $PROJECT_DIR  ->  /workspace"
+echo ">> Session : $SESSION_NAME"
+echo ">> State   : $HOME_DIR"
+echo ">> Auth    : $AUTH_HOME_DIR"
+if [[ "${#SHARED_CRED_MOUNT[@]}" -gt 0 ]]; then
+  echo ">> Creds   : $AUTH_CRED_FILE -> /home/dev/.claude/.credentials.json (shared, read-write)"
+fi
+echo ">> Agent   : $HERDR_AGENT"
+
+if [[ -n "$EXTRAS" ]]; then
+  echo ">> Extras  : ${EXTRAS//,/, } ($IMAGE_REF)"
+else
+  echo ">> Extras  : none ($IMAGE_REF)"
+fi
+
+if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
+  md_mode="read-write"
+  [[ "$SHARED_CLAUDE_MD_READONLY" == "1" ]] && md_mode="read-only"
+  echo ">> Memory  : $RESOLVED_SHARED_CLAUDE_MD -> /home/dev/.claude/CLAUDE.md ($md_mode)"
+else
+  echo ">> Memory  : disabled"
+fi
+
+if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
+  mem_mode="read-write"
+  [[ "$SHARED_MEMORY_READONLY" == "1" ]] && mem_mode="read-only"
+  echo ">> ProjMem : $PROJECT_MEMORY_DIR -> $CONTAINER_MEMORY_PATH (shared per-project, $mem_mode)"
+fi
+
+if [[ "$MOUNT_VAULT" == "1" ]]; then
+  echo ">> Docs    : $RESOLVED_VAULT -> $VAULT_DEST (read-write)"
+fi
+
+[[ "$AUTH_LOGIN" == "1" ]] && echo ">> Mode    : auth login"
+[[ "$OFFLINE" == "1" ]] && echo ">> Network : disabled"
+
+exec podman run "${TTY_ARGS[@]}" --rm --init \
+  "${USER_ARGS[@]}" \
+  "${SECURITY_ARGS[@]}" \
+  "${NETWORK_ARGS[@]}" \
+  --name "capsule-${CONTAINER_SUFFIX}-$$" \
+  --label "ai.agent=claude" \
+  --label "ai.session=$SESSION_NAME" \
+  -e TERM="${TERM:-xterm-256color}" \
+  "${EXTRA[@]}" \
+  -v "$PROJECT_DIR:/workspace$SHARED_VOL_OPT" \
+  -v "$HOME_DIR:/home/dev$VOL_OPT" \
+  "${SHARED_CLAUDE_MD_MOUNT[@]}" \
+  "${SHARED_MEMORY_MOUNT[@]}" \
+  "${SHARED_CRED_MOUNT[@]}" \
+  "${VAULT_MOUNT[@]}" \
+  "${MOUNT_ARGS[@]}" \
+  -w /workspace \
+  "$IMAGE_REF" "${RUN_CMD[@]}"
