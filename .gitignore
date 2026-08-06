@@ -1,0 +1,11 @@
+# IDE and editor config
+.idea/
+.vscode/
+.fleet/
+.zed/
+.settings/
+.project
+nbproject/
+*.sublime-project
+*.sublime-workspace
+

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="agent-capsule logo" width="200">
+</p>
+
 # agent-capsule
 
 [![lint](https://github.com/OWNER/agent-capsule/actions/workflows/lint.yml/badge.svg)](https://github.com/OWNER/agent-capsule/actions/workflows/lint.yml)
@@ -52,19 +56,19 @@ agent-capsule . -- -p "explain this repo"       # args after -- go to claude
 
 ## Flags at a glance
 
-| Flag | Effect |
-| --- | --- |
-| `--build` | force a rebuild of the container image |
-| `--shell` | start bash instead of claude |
-| `--keep-id` | run as your UID inside too (needed for `--dangerously-skip-permissions`) |
-| `--offline` | no network inside the container |
-| `--session NAME` | named per-session home, for parallel agents on one repo |
-| `--with TOOL[,TOOL]` | opt in to extra image tools (`superclaude`, `hunkdiff`); `--with list` prints them |
-| `--mount SRC[:DEST][:ro]` | extra bind mounts (repeatable) |
-| `-d`, `--documentation` | mount the Obsidian docs vault read-write at `/vault` |
-| `--shared-memory-ro`, `--no-shared-memory` | restrict or disable pooled per-project memory |
-| `--shared-claude-md-rw`, `--no-shared-claude-md` | writable or disabled global CLAUDE.md |
-| `--version` | print the version and exit |
+| Flag                                             | Effect                                                                             |
+|--------------------------------------------------|------------------------------------------------------------------------------------|
+| `--build`                                        | force a rebuild of the container image                                             |
+| `--shell`                                        | start bash instead of claude                                                       |
+| `--keep-id`                                      | run as your UID inside too (needed for `--dangerously-skip-permissions`)           |
+| `--offline`                                      | no network inside the container                                                    |
+| `--session NAME`                                 | named per-session home, for parallel agents on one repo                            |
+| `--with TOOL[,TOOL]`                             | opt in to extra image tools (`superclaude`, `hunkdiff`); `--with list` prints them |
+| `--mount SRC[:DEST][:ro]`                        | extra bind mounts (repeatable)                                                     |
+| `-d`, `--documentation`                          | mount the Obsidian docs vault read-write at `/vault`                               |
+| `--shared-memory-ro`, `--no-shared-memory`       | restrict or disable pooled per-project memory                                      |
+| `--shared-claude-md-rw`, `--no-shared-claude-md` | writable or disabled global CLAUDE.md                                              |
+| `--version`                                      | print the version and exit                                                         |
 
 ## State layout
 
@@ -89,6 +93,9 @@ base tags, resource limits, paths, volume options).
 
 MIT, see [LICENSE](LICENSE).
 
-## Thanks
+## Contributors
 
-This script is based on a first draft by @linouxis9, with reviews by @alcelafranque.
+| Name                                               | Contribution  |
+|----------------------------------------------------|---------------|
+| [@linouxis9](https://github.com/linouxis9)         | Initial draft |
+| [@alcelafranque](https://github.com/alcelafranque) | Reviews       |
