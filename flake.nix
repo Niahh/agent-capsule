@@ -1,0 +1,97 @@
+{
+  description = "Run Claude Code inside a rootless Podman container that shares one project directory with the host";
+
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+
+  outputs =
+    { self, nixpkgs }:
+    let
+      # Rootless Podman is Linux-only, and so is the script.
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+
+      # Keep the package version in sync with VERSION= in the script.
+      version =
+        builtins.head (builtins.match ''.*VERSION="([^"]+)".*'' (builtins.readFile ./agent-capsule));
+    in
+    {
+      packages = forAllSystems (pkgs: rec {
+        agent-capsule = pkgs.stdenvNoCC.mkDerivation {
+          pname = "agent-capsule";
+          inherit version;
+          src = self;
+
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+
+          dontBuild = true;
+
+          # The script looks for its Dockerfile at ../share/agent-capsule/
+          # relative to its own (symlink-resolved) location, so the standard
+          # prefix layout works unchanged.
+          installPhase = ''
+            runHook preInstall
+            install -Dm755 agent-capsule $out/bin/agent-capsule
+            install -Dm644 Dockerfile $out/share/agent-capsule/Dockerfile
+            runHook postInstall
+          '';
+
+          # podman is intentionally not pinned here: rootless Podman needs
+          # host-level configuration (subuid/subgid, storage), so the host's
+          # podman must be on PATH. Everything else is provided as a fallback.
+          postFixup = ''
+            wrapProgram $out/bin/agent-capsule \
+              --suffix PATH : ${
+                nixpkgs.lib.makeBinPath (
+                  with pkgs;
+                  [
+                    coreutils
+                    gawk
+                    git
+                  ]
+                )
+              }
+          '';
+
+          meta = {
+            description = "Run Claude Code in a rootless Podman container sharing one project directory";
+            homepage = "https://github.com/Niahh/agent-capsule";
+            license = nixpkgs.lib.licenses.mit;
+            platforms = systems;
+            mainProgram = "agent-capsule";
+          };
+        };
+        default = agent-capsule;
+      });
+
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          packages = with pkgs; [
+            shellcheck
+            hadolint
+            go-task
+          ];
+        };
+      });
+
+      # Mirrors .github/workflows/lint.yml, plus a build of the package
+      # itself (`nix flake check` only evaluates `packages`, it does not
+      # build them unless they are also listed here).
+      checks = forAllSystems (pkgs: {
+        package = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-capsule;
+        shellcheck =
+          pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+            shellcheck ${self}/agent-capsule
+            touch $out
+          '';
+        hadolint = pkgs.runCommand "hadolint" { nativeBuildInputs = [ pkgs.hadolint ]; } ''
+          hadolint --config ${self}/.hadolint.yaml ${self}/Dockerfile
+          touch $out
+        '';
+      });
+
+      formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
+    };
+}
