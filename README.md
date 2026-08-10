@@ -25,8 +25,8 @@ everything else on the host stays out of reach.
 - Shared knowledge: a global `CLAUDE.md` is mounted into every session, and Claude's
   per-project memory is pooled across sessions working on the same repo.
 - Batteries in the image: Go toolchain, golangci-lint. Extra tools (SuperClaude slash
-  commands, hunkdiff, an Obsidian MCP server) are opt-in with `--with`, each selection
-  getting its own image tag.
+  commands, hunkdiff, an Obsidian MCP server, a document-to-Markdown skill) are opt-in
+  with `--with`, each selection getting its own image tag.
 - Defaults you keep: a config file holds your usual add-ons so they are not retyped
   on every run.
 
@@ -67,7 +67,7 @@ agent-capsule . -- -p "explain this repo"       # args after -- go to claude
 | `--keep-id`                                      | run as your UID inside too (needed for `--dangerously-skip-permissions`)           |
 | `--offline`                                      | no network inside the container                                                    |
 | `--session NAME`                                 | named per-session home, for parallel agents on one repo                            |
-| `--with TOOL[,TOOL]`                             | opt in to extra image tools (`superclaude`, `hunkdiff`, `mcpvault`); `list`, `none` |
+| `--with TOOL[,TOOL]`                             | opt in to extra image tools (`superclaude`, `hunkdiff`, `mcpvault`, `anydoc`); `list`, `none` |
 | `--mount SRC[:DEST][:ro]`                        | extra bind mounts (repeatable)                                                     |
 | `--vault[=PATH]`                                 | mount the Obsidian vault read-write at `/vault`; `=PATH` picks the vault for one run |
 | `--no-vault`                                     | skip the vault for one run, overriding the config file                             |

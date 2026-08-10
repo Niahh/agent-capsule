@@ -15,7 +15,7 @@
 #   * Claude's per-project memory is shared across sessions on the same repo
 #     (see "Shared per-project memory" below).
 #   * The Go toolchain is available inside the container.
-#   * Extra tools (SuperClaude, hunkdiff, mcpvault) are opt-in with --with.
+#   * Extra tools (SuperClaude, hunkdiff, mcpvault, anydoc) are opt-in with --with.
 #   * Defaults can live in a config file instead of being retyped every run.
 #   * Herdr-friendly: use --session or AGENT_CAPSULE_SESSION for parallel agents.
 #
@@ -46,6 +46,7 @@
 #     --with superclaude            SuperClaude slash commands
 #     --with hunkdiff               hunkdiff CLI
 #     --with mcpvault               Obsidian vault MCP server, requires --vault
+#     --with anydoc                 skill converting Office/PDF/EPUB files to Markdown
 #     --with superclaude,hunkdiff   several at once (--with a --with b also works)
 #     --with list                   print the known extras and exit
 #     --with none                   select nothing, overriding the config file
@@ -247,7 +248,7 @@ GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
 # depend on how the user spelled it out. Kept alphabetical by convention; the
 # tag hash covers only the selected extras, so any placement that preserves
 # the relative order of the existing entries keeps old tags stable.
-KNOWN_EXTRAS=(hunkdiff mcpvault superclaude)
+KNOWN_EXTRAS=(anydoc hunkdiff mcpvault superclaude)
 
 BUILD_DIR="$CONFIG_DIR/build"
 AUTH_HOME_DIR="$CONFIG_DIR/auth-home"

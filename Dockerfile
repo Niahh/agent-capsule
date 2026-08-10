@@ -43,14 +43,18 @@ RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANG
 # Optional extra tools, selected per run with `agent-capsule --with`. Empty by
 # default, so the base image stays lean. Keep the case branches in sync with
 # KNOWN_EXTRAS in agent-capsule.
-# SuperClaude's slash commands are baked into a non-masked path: at runtime
-# /home/dev is bind-mounted from the host session home, so ~/.claude/commands
-# would be hidden; instead we install under /opt/superclaude and seed the
-# session home via the entrypoint.
+# Extras that ship files for ~/.claude (SuperClaude commands, the anydoc skill)
+# are baked into a non-masked path: at runtime /home/dev is bind-mounted from
+# the host session home, which would hide them; instead they install under
+# /opt/<extra> and the entrypoint seeds the session home from there.
 ARG EXTRAS=""
 RUN set -eu; \
     for extra in $(printf '%s' "$EXTRAS" | tr ',' ' '); do \
       case "$extra" in \
+        anydoc) \
+          npm install -g @firecrawl/anydoc; \
+          HOME=/opt/anydoc npx -y skills add firecrawl/anydoc -g -a claude-code -y; \
+          rm -rf /opt/anydoc/.npm /opt/anydoc/.agents ;; \
         superclaude) \
           npm install -g @bifrost_inc/superclaude; \
           HOME=/opt/superclaude superclaude install --force ;; \
@@ -64,23 +68,26 @@ RUN set -eu; \
     done; \
     npm cache clean --force
 
-# On first start of a session, seed /home/dev/.claude from the baked SuperClaude
-# commands (guarded by a marker so steady-state launches stay fast), then exec.
-# The -d "$SEED" test makes this a no-op when the superclaude extra was not
-# selected, so the same entrypoint serves every image variant.
+# On first start of a session, seed /home/dev/.claude from every /opt/<extra>/.claude
+# baked into the image, then exec. One marker per extra keeps steady-state launches
+# fast and still seeds a home first used with a smaller image variant. With no seed
+# dirs the loop matches nothing, so the same entrypoint serves every variant.
 # Written via printf (single-quoted lines stay literal) so it works on builders
 # without Dockerfile heredoc support.
 RUN printf '%s\n' \
       '#!/usr/bin/env bash' \
       'set -e' \
-      'SEED=/opt/superclaude/.claude' \
       'DEST="${HOME:-/home/dev}/.claude"' \
-      'if [[ -d "$SEED" && ! -e "$DEST/.superclaude-seeded" ]]; then' \
-      '  mkdir -p "$DEST"' \
-      '  # -n: never clobber user files or the read-only CLAUDE.md/credentials mounts.' \
-      '  cp -an "$SEED/." "$DEST/" 2>/dev/null || true' \
-      '  touch "$DEST/.superclaude-seeded" 2>/dev/null || true' \
-      'fi' \
+      'for seed in /opt/*/.claude; do' \
+      '  [[ -d "$seed" ]] || continue' \
+      '  name="${seed%/.claude}"; name="${name##*/}"' \
+      '  if [[ ! -e "$DEST/.$name-seeded" ]]; then' \
+      '    mkdir -p "$DEST"' \
+      '    # -n: never clobber user files or the read-only CLAUDE.md/credentials mounts.' \
+      '    cp -an "$seed/." "$DEST/" 2>/dev/null || true' \
+      '    touch "$DEST/.$name-seeded" 2>/dev/null || true' \
+      '  fi' \
+      'done' \
       'exec "$@"' \
       > /usr/local/bin/agent-capsule-entrypoint.sh \
     && chmod +x /usr/local/bin/agent-capsule-entrypoint.sh
