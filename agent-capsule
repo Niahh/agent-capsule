@@ -16,6 +16,7 @@
 #     (see "Shared per-project memory" below).
 #   * The Go toolchain is available inside the container.
 #   * Extra tools (SuperClaude, hunkdiff) are opt-in with --with.
+#   * Defaults can live in a config file instead of being retyped every run.
 #   * Herdr-friendly: use --session or AGENT_CAPSULE_SESSION for parallel agents.
 #
 # Usage:
@@ -44,10 +45,13 @@
 #     --with hunkdiff               hunkdiff CLI
 #     --with superclaude,hunkdiff   several at once (--with a --with b also works)
 #     --with list                   print the known extras and exit
+#     --with none                   select nothing, overriding the config file
 #   Each selection gets its own image tag (<image>:base with no extras,
 #   <image>:<hash> otherwise), so switching selections never rebuilds over the
 #   other variant. AGENT_CAPSULE_IMAGE must therefore be a bare name with no
 #   tag. Drop variants you no longer need with `podman rmi`.
+#   A --with on the command line replaces AGENT_CAPSULE_WITH rather than adding
+#   to it, so a config default can be narrowed for a single run.
 #
 # Documentation vault (-d, --documentation):
 #   Cross-cutting knowledge (how tools connect, why-decisions, runbooks) is
@@ -57,6 +61,19 @@
 #   host path defaults to ~/Documents/Obsidian/Docs-automated; override with
 #   AGENT_CAPSULE_VAULT (and the in-container path with AGENT_CAPSULE_VAULT_DEST).
 #   See the vault's "Conventions for Claude" note for what to write and where.
+#
+# Config file:
+#   $HOME/.agent-capsule/config, or AGENT_CAPSULE_CONFIG=/some/path.
+#   Persistent defaults, so a preferred set of add-ons is not retyped every run:
+#     # ~/.agent-capsule/config
+#     AGENT_CAPSULE_WITH=superclaude
+#     AGENT_CAPSULE_KEEPID=1
+#   One KEY=value per line, # comments and blank lines ignored. Only AGENT_CAPSULE_*
+#   keys are accepted, and the file is parsed, never sourced, so it cannot run
+#   commands. Precedence: command-line flag > environment > config file > built-in
+#   default; exporting a variable empty therefore forces the built-in default.
+#   AGENT_CAPSULE_HOME and AGENT_CAPSULE_CONFIG select the file itself, so they
+#   are ignored inside it.
 #
 # Shared auth:
 #   $HOME/.agent-capsule/auth-home
@@ -118,6 +135,82 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 VERSION="0.1.0"
 
+# Resolved before everything else: the config file lives under it, and the file
+# supplies the defaults every AGENT_CAPSULE_* assignment below reads.
+CONFIG_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
+
+# ----------------------------------------------------------------------------
+# Config file
+# ----------------------------------------------------------------------------
+# Persistent defaults for the AGENT_CAPSULE_* knobs, so a preferred set of extras
+# and mounts does not have to be retyped on every run. Parsed, never sourced: the
+# keys are validated and assigned with export, so the file cannot run commands.
+# A value already present in the environment always wins, which keeps the
+# precedence CLI flag > environment > config file > built-in default.
+load_config_file() {
+  local file="$1"
+  local explicit="$2"
+  local line key val
+
+  if [[ ! -e "$file" ]]; then
+    # An explicitly requested file that is missing is almost always a typo.
+    [[ "$explicit" == "1" ]] || return 1
+    echo "Config file not found: $file" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$file" ]]; then
+    echo "Not a regular file: $file" >&2
+    exit 1
+  fi
+
+  # The final line counts even without a trailing newline.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == "#"* ]] && continue
+
+    if [[ "$line" != *=* ]]; then
+      echo ">> Config  : ignoring line without '=': $line" >&2
+      continue
+    fi
+
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"
+
+    if [[ ! "$key" =~ ^AGENT_CAPSULE_[A-Z0-9_]+$ ]]; then
+      echo ">> Config  : ignoring unsupported key: $key" >&2
+      continue
+    fi
+
+    # These two select the config file itself, so reading them from it is circular.
+    case "$key" in
+      AGENT_CAPSULE_HOME | AGENT_CAPSULE_CONFIG)
+        echo ">> Config  : $key must come from the environment, ignoring it here" >&2
+        continue
+        ;;
+    esac
+
+    if [[ "$val" == \"*\" || "$val" == \'*\' ]]; then
+      val="${val:1:${#val}-2}"
+    fi
+
+    [[ -n "${!key+x}" ]] && continue
+    export "${key}=${val}"
+  done < "$file"
+
+  return 0
+}
+
+CONFIG_FILE="${AGENT_CAPSULE_CONFIG:-$CONFIG_DIR/config}"
+CONFIG_FILE_LOADED=0
+load_config_file "$CONFIG_FILE" "${AGENT_CAPSULE_CONFIG:+1}" && CONFIG_FILE_LOADED=1
+
+# ----------------------------------------------------------------------------
+# Defaults (config file and environment already applied)
+# ----------------------------------------------------------------------------
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
 NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
@@ -128,7 +221,6 @@ GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
 # depend on how the user spelled it out.
 KNOWN_EXTRAS=(hunkdiff superclaude)
 
-CONFIG_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 BUILD_DIR="$CONFIG_DIR/build"
 AUTH_HOME_DIR="$CONFIG_DIR/auth-home"
 
@@ -359,7 +451,13 @@ SHARED_CLAUDE_MD_EXPLICIT=0
 SESSION_EXPLICIT=0
 MOUNT_VAULT=0
 MOUNT_SPECS=()
+
+# Seeded from the config file or the environment. The first CLI --with replaces
+# that seed instead of adding to it, otherwise a default extra could never be
+# dropped for a single run (--with none then selects nothing at all).
 EXTRAS_REQUESTED=()
+[[ -n "${AGENT_CAPSULE_WITH:-}" ]] && EXTRAS_REQUESTED=("$AGENT_CAPSULE_WITH")
+WITH_EXPLICIT=0
 
 while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
   case "$1" in
@@ -431,13 +529,15 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       ;;
     --with)
       [[ -n "${2:-}" ]] || {
-        echo "--with requires a tool list (or 'list'). Known: ${KNOWN_EXTRAS[*]}" >&2
+        echo "--with requires a tool list (or 'list'/'none'). Known: ${KNOWN_EXTRAS[*]}" >&2
         exit 1
       }
       [[ "$2" == "list" ]] && {
         printf '%s\n' "${KNOWN_EXTRAS[@]}"
         exit 0
       }
+      [[ "$WITH_EXPLICIT" == "0" ]] && EXTRAS_REQUESTED=()
+      WITH_EXPLICIT=1
       EXTRAS_REQUESTED+=("$2")
       shift 2
       ;;
@@ -446,6 +546,8 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
         printf '%s\n' "${KNOWN_EXTRAS[@]}"
         exit 0
       }
+      [[ "$WITH_EXPLICIT" == "0" ]] && EXTRAS_REQUESTED=()
+      WITH_EXPLICIT=1
       EXTRAS_REQUESTED+=("${1#--with=}")
       shift
       ;;
@@ -534,9 +636,28 @@ require_cmd cut
 # KNOWN_EXTRAS order so it is deduplicated and canonical: --with a,b and
 # --with b --with a --with a must resolve to the same image tag.
 EXTRAS=""
+SELECT_NONE=0
 if [[ "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
   read -r -a requested <<<"$(printf '%s ' "${EXTRAS_REQUESTED[@]}" | tr 'A-Z,' 'a-z ')"
 
+  # `none` selects nothing, the escape hatch from a config-file default.
+  for req in "${requested[@]}"; do
+    [[ "$req" == "none" ]] && SELECT_NONE=1
+  done
+
+  # Combining `none` with real tools is contradictory; silently dropping the
+  # tools would look like they were selected.
+  if [[ "$SELECT_NONE" == "1" ]]; then
+    for req in "${requested[@]}"; do
+      [[ "$req" == "none" ]] || {
+        echo "--with none cannot be combined with other tools (got: $req)" >&2
+        exit 1
+      }
+    done
+  fi
+fi
+
+if [[ "$SELECT_NONE" == "0" && "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
   for req in "${requested[@]}"; do
     known=0
     for extra in "${KNOWN_EXTRAS[@]}"; do
@@ -870,6 +991,7 @@ TTY_ARGS=(-i)
 # ----------------------------------------------------------------------------
 # Run
 # ----------------------------------------------------------------------------
+[[ "$CONFIG_FILE_LOADED" == "1" ]] && echo ">> Config  : $CONFIG_FILE"
 echo ">> Project : $PROJECT_DIR  ->  /workspace"
 echo ">> Session : $SESSION_NAME"
 echo ">> State   : $HOME_DIR"

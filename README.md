@@ -26,6 +26,8 @@ everything else on the host stays out of reach.
   per-project memory is pooled across sessions working on the same repo.
 - Batteries in the image: Go toolchain, golangci-lint. Extra tools (SuperClaude slash
   commands, hunkdiff) are opt-in with `--with`, each selection getting its own image tag.
+- Defaults you keep: a config file holds your usual add-ons so they are not retyped
+  on every run.
 
 ## Requirements
 
@@ -63,18 +65,37 @@ agent-capsule . -- -p "explain this repo"       # args after -- go to claude
 | `--keep-id`                                      | run as your UID inside too (needed for `--dangerously-skip-permissions`)           |
 | `--offline`                                      | no network inside the container                                                    |
 | `--session NAME`                                 | named per-session home, for parallel agents on one repo                            |
-| `--with TOOL[,TOOL]`                             | opt in to extra image tools (`superclaude`, `hunkdiff`); `--with list` prints them |
+| `--with TOOL[,TOOL]`                             | opt in to extra image tools (`superclaude`, `hunkdiff`); `list`, `none`            |
 | `--mount SRC[:DEST][:ro]`                        | extra bind mounts (repeatable)                                                     |
 | `-d`, `--documentation`                          | mount the Obsidian docs vault read-write at `/vault`                               |
 | `--shared-memory-ro`, `--no-shared-memory`       | restrict or disable pooled per-project memory                                      |
 | `--shared-claude-md-rw`, `--no-shared-claude-md` | writable or disabled global CLAUDE.md                                              |
 | `--version`                                      | print the version and exit                                                         |
 
+## Configuration file
+
+`~/.agent-capsule/config` (or `AGENT_CAPSULE_CONFIG=/some/path`) holds defaults, so the
+add-ons you always want are not retyped on every run:
+
+```
+# ~/.agent-capsule/config
+AGENT_CAPSULE_WITH=superclaude
+AGENT_CAPSULE_KEEPID=1
+```
+
+One `KEY=value` per line, `#` comments and blank lines ignored. Only `AGENT_CAPSULE_*`
+keys are accepted, and the file is parsed rather than sourced, so it cannot run commands.
+
+Precedence is command-line flag > environment > config file > built-in default. A
+command-line `--with` replaces the configured list instead of adding to it, and
+`--with none` selects nothing.
+
 ## State layout
 
 Everything lives under `~/.agent-capsule/`:
 
 ```
+config                   optional defaults for the AGENT_CAPSULE_* settings
 auth-home/               shared login (created by --auth-login)
 homes/<session>/         one isolated /home/dev per session
 project-memory/<hash>/   per-project memory pooled across sessions
