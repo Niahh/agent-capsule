@@ -20,7 +20,7 @@
 #   * Herdr-friendly: use --session or AGENT_CAPSULE_SESSION for parallel agents.
 #
 # Usage:
-#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [-d] [--vault[=PATH]] [--no-documentation] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <claude args>]
+#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [--vault[=PATH]] [--no-vault] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <claude args>]
 #
 # Examples:
 #   agent-capsule
@@ -60,39 +60,38 @@
 #   Installs https://github.com/bitbonsai/mcpvault in the image and registers it
 #   as the MCP server "obsidian" against the mounted vault, so Claude can search
 #   and edit notes through tools instead of raw file reads. Two things are
-#   required, and the run is rejected without them: the vault mount (--vault or
-#   -d), since the server reads the vault off the filesystem, and an explicit
-#   vault path (--vault=PATH or AGENT_CAPSULE_VAULT), since the built-in default
-#   path is a placeholder and the server may write anywhere under it. With
-#   AGENT_CAPSULE_VAULT and AGENT_CAPSULE_DOCUMENTATION=1 in the config file, no
+#   required, and the run is rejected without them: the vault mount (--vault),
+#   since the server reads the vault off the filesystem, and an explicit vault
+#   path (--vault=PATH or AGENT_CAPSULE_VAULT), since the built-in default path
+#   is a placeholder and the server may write anywhere under it. With
+#   AGENT_CAPSULE_VAULT and AGENT_CAPSULE_MOUNT_VAULT=1 in the config file, no
 #   flag at all is needed. The generated config is written to the session home
 #   and passed to claude with --mcp-config, so a project's own .mcp.json keeps
 #   working alongside it. Under --shell no claude runs; the printed command
 #   starts one by hand.
 #
-# Documentation vault (-d, --documentation, --vault[=PATH]):
+# Obsidian vault (--vault[=PATH], --no-vault):
 #   Cross-cutting knowledge (how tools connect, why-decisions, runbooks) is
-#   documented in an Obsidian vault, NOT in this script. Pass -d or a bare
-#   --vault to mount the vault read-write at /vault so Claude can record such
-#   knowledge while working: pointers, not copies (tool detail stays in its own
-#   repo/header). The vault host path comes from AGENT_CAPSULE_VAULT (config
-#   file or environment), falling back to ~/Documents/Obsidian/Docs-automated;
-#   --vault=PATH overrides it for one run. The path override is only the equals
-#   form: a bare --vault followed by a directory reads that directory as
-#   PROJECT_DIR, never as the vault. The shell does not expand ~ after "=", so
-#   write --vault="$HOME/Notes", not --vault=~/Notes. The in-container path is
-#   AGENT_CAPSULE_VAULT_DEST. See the vault's "Conventions for Claude" note for
-#   what to write and where.
-#   AGENT_CAPSULE_DOCUMENTATION=1 makes the mount the default; --no-documentation
-#   turns it off for a single run. Plain -d/--vault falls back to the built-in
-#   path, but --with mcpvault refuses to and insists on a chosen one.
+#   documented in an Obsidian vault, NOT in this script. --vault mounts it
+#   read-write at /vault (in-container path: AGENT_CAPSULE_VAULT_DEST) so Claude
+#   can record such knowledge while working: pointers, not copies (tool detail
+#   stays in its own repo/header). See the vault's "Conventions for Claude" note
+#   for what to write and where.
+#   The host path comes from AGENT_CAPSULE_VAULT (config file or environment),
+#   falling back to ~/Documents/Obsidian/Docs-automated; --vault=PATH overrides
+#   it for one run. Only the equals form takes a path: a bare --vault followed
+#   by a directory reads that directory as PROJECT_DIR, never as the vault. The
+#   shell does not expand ~ after "=", so write --vault="$HOME/Notes", not
+#   --vault=~/Notes.
+#   AGENT_CAPSULE_MOUNT_VAULT=1 makes the mount the default; --no-vault turns it
+#   off for a single run.
 #
 # Config file:
 #   $HOME/.agent-capsule/config, or AGENT_CAPSULE_CONFIG=/some/path.
 #   Persistent defaults, so a preferred set of add-ons is not retyped every run:
 #     # ~/.agent-capsule/config
 #     AGENT_CAPSULE_WITH=superclaude,mcpvault
-#     AGENT_CAPSULE_DOCUMENTATION=1
+#     AGENT_CAPSULE_MOUNT_VAULT=1
 #     AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
 #     AGENT_CAPSULE_KEEPID=1
 #   One KEY=value per line, # comments and blank lines ignored. Only AGENT_CAPSULE_*
@@ -275,8 +274,8 @@ DEFAULT_PIDS_LIMIT="${AGENT_CAPSULE_PIDS_LIMIT:-512}"
 
 SHARE_AUTH="${AGENT_CAPSULE_SHARE_AUTH:-1}"
 
-# Documentation vault (Obsidian). Mounted read-write at $VAULT_DEST when -d is
-# given, so Claude can record cross-cutting docs. Override the host path with
+# Obsidian vault. Mounted read-write at $VAULT_DEST when --vault is given, so
+# Claude can record cross-cutting docs. Override the host path with
 # AGENT_CAPSULE_VAULT.
 VAULT_DIR="${AGENT_CAPSULE_VAULT:-$HOME/Documents/Obsidian/Docs-automated}"
 VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
@@ -490,7 +489,7 @@ SESSION_NAME="${AGENT_CAPSULE_SESSION:-}"
 DISABLE_SHARED_CLAUDE_MD=0
 SHARED_CLAUDE_MD_EXPLICIT=0
 SESSION_EXPLICIT=0
-MOUNT_VAULT="${AGENT_CAPSULE_DOCUMENTATION:-0}"
+MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
 MOUNT_SPECS=()
 
 # Seeded from the config file or the environment. The first CLI --with replaces
@@ -604,19 +603,15 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       MOUNT_SPECS+=("${1#--mount=}")
       shift
       ;;
-    -d|--documentation)
-      MOUNT_VAULT=1
-      shift
-      ;;
-    --no-documentation)
-      MOUNT_VAULT=0
-      shift
-      ;;
     --vault)
       # Bare form only: a space-separated optional path would be ambiguous with
       # the positional PROJECT_DIR (--vault ~/code/app must keep meaning
       # "default vault, project app"). Overrides use --vault=PATH.
       MOUNT_VAULT=1
+      shift
+      ;;
+    --no-vault)
+      MOUNT_VAULT=0
       shift
       ;;
     --vault=*)
@@ -797,7 +792,7 @@ PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_HASH"
 [[ "$AUTH_LOGIN" == "1" ]] && SHARED_MEMORY_ENABLED=0
 
 # The vault is equally meaningless for --auth-login, and a config-file default
-# (AGENT_CAPSULE_DOCUMENTATION=1) pointing at a missing path must not block
+# (AGENT_CAPSULE_MOUNT_VAULT=1) pointing at a missing path must not block
 # logging in.
 [[ "$AUTH_LOGIN" == "1" ]] && MOUNT_VAULT=0
 
@@ -814,8 +809,8 @@ MCPVAULT_ENABLED=0
 
 if [[ ",$EXTRAS," == *,mcpvault,* && "$AUTH_LOGIN" != "1" ]]; then
   if [[ "$MOUNT_VAULT" != "1" ]]; then
-    echo "--with mcpvault needs the documentation vault mounted." >&2
-    echo "Add --vault (or -d), or set AGENT_CAPSULE_DOCUMENTATION=1 in $CONFIG_FILE." >&2
+    echo "--with mcpvault needs the vault mounted." >&2
+    echo "Add --vault, or set AGENT_CAPSULE_MOUNT_VAULT=1 in $CONFIG_FILE." >&2
     exit 1
   fi
 
@@ -1002,13 +997,13 @@ for spec in "${MOUNT_SPECS[@]}"; do
 done
 
 # ----------------------------------------------------------------------------
-# Documentation vault mount (-d / --documentation)
+# Obsidian vault mount (--vault)
 # ----------------------------------------------------------------------------
 VAULT_MOUNT=()
 
 if [[ "$MOUNT_VAULT" == "1" ]]; then
   RESOLVED_VAULT="$(cd -P "$VAULT_DIR" 2>/dev/null && pwd)" || {
-    echo "Documentation vault not found: $VAULT_DIR" >&2
+    echo "Vault not found: $VAULT_DIR" >&2
     echo "Create it or set AGENT_CAPSULE_VAULT to your vault's path." >&2
     exit 1
   }
@@ -1144,7 +1139,7 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
 fi
 
 if [[ "$MOUNT_VAULT" == "1" ]]; then
-  echo ">> Docs    : $RESOLVED_VAULT -> $VAULT_DEST (read-write)"
+  echo ">> Vault   : $RESOLVED_VAULT -> $VAULT_DEST (read-write)"
 fi
 
 if [[ "$MCPVAULT_ENABLED" == "1" ]]; then

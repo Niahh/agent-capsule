@@ -69,46 +69,40 @@ agent-capsule . -- -p "explain this repo"       # args after -- go to claude
 | `--session NAME`                                 | named per-session home, for parallel agents on one repo                            |
 | `--with TOOL[,TOOL]`                             | opt in to extra image tools (`superclaude`, `hunkdiff`, `mcpvault`); `list`, `none` |
 | `--mount SRC[:DEST][:ro]`                        | extra bind mounts (repeatable)                                                     |
-| `-d`, `--documentation`                          | mount the Obsidian docs vault read-write at `/vault`                               |
-| `--vault[=PATH]`                                 | same mount; bare uses the configured path, `=PATH` overrides it for one run        |
-| `--no-documentation`                             | skip the vault for one run, overriding the config file                             |
+| `--vault[=PATH]`                                 | mount the Obsidian vault read-write at `/vault`; `=PATH` picks the vault for one run |
+| `--no-vault`                                     | skip the vault for one run, overriding the config file                             |
 | `--shared-memory-ro`, `--no-shared-memory`       | restrict or disable pooled per-project memory                                      |
 | `--shared-claude-md-rw`, `--no-shared-claude-md` | writable or disabled global CLAUDE.md                                              |
 | `--version`                                      | print the version and exit                                                         |
 
 ## Obsidian vault over MCP
 
-`--vault` (or `-d`) mounts your Obsidian vault at `/vault`. Adding `--with mcpvault`
-also installs [mcpvault](https://github.com/bitbonsai/mcpvault) in the image and
-registers it as the MCP server `obsidian`, so Claude searches and edits notes through
-tools rather than raw file reads.
+`--vault` mounts your Obsidian vault at `/vault`. Adding `--with mcpvault` also
+installs [mcpvault](https://github.com/bitbonsai/mcpvault) in the image and registers
+it as the MCP server `obsidian`, so Claude searches and edits notes through tools
+rather than raw file reads.
 
-Set the vault path once in `~/.agent-capsule/config`:
+mcpvault requires the vault path to be chosen explicitly, since the server gets
+read-write access to everything under it:
+
+```sh
+agent-capsule --with mcpvault --vault="$HOME/Work" .   # for one run
+```
+
+Or set it once in `~/.agent-capsule/config`, after which plain `agent-capsule .`
+does it all with no flags:
 
 ```
+AGENT_CAPSULE_WITH=mcpvault
+AGENT_CAPSULE_MOUNT_VAULT=1
 AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
 ```
 
-Then:
-
-```sh
-agent-capsule --with mcpvault --vault ~/code/myapp   # the configured vault
-agent-capsule --with mcpvault --vault="$HOME/Work" . # another vault for this run
-```
-
-Add `AGENT_CAPSULE_WITH=mcpvault` and `AGENT_CAPSULE_DOCUMENTATION=1` to the config
-file and plain `agent-capsule .` does it all with no flags.
-
 Notes:
 
-- The path override is only the `=` form. A bare `--vault` followed by a directory
-  reads that directory as the project, never as the vault. The shell does not expand
-  `~` after `=`, so write `--vault="$HOME/Work"`.
-- The run is rejected when the vault is not mounted, or when no vault path was chosen
-  (`--vault=PATH` or `AGENT_CAPSULE_VAULT`). The built-in path is a placeholder, and
-  the server gets read-write access to everything under whatever it points at, so that
-  has to be your choice rather than a default. Plain `-d`/`--vault` without `mcpvault`
-  still falls back to the built-in path.
+- Only the `=` form takes a path: a bare `--vault` mounts the configured vault, and
+  `--vault ~/dir` reads `~/dir` as the project. The shell does not expand `~` after
+  `=`, so write `--vault="$HOME/Work"`.
 - The generated config goes to the session home and reaches Claude Code through
   `--mcp-config`, so a project's own `.mcp.json` still loads.
 
@@ -120,7 +114,7 @@ add-ons you always want are not retyped on every run:
 ```
 # ~/.agent-capsule/config
 AGENT_CAPSULE_WITH=superclaude,mcpvault
-AGENT_CAPSULE_DOCUMENTATION=1
+AGENT_CAPSULE_MOUNT_VAULT=1
 AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
 AGENT_CAPSULE_KEEPID=1
 ```
@@ -130,7 +124,7 @@ keys are accepted, and the file is parsed rather than sourced, so it cannot run 
 
 Precedence is command-line flag > environment > config file > built-in default. A
 command-line `--with` replaces the configured list instead of adding to it, `--with none`
-selects nothing, and `--no-documentation` skips the vault for a single run.
+selects nothing, and `--no-vault` skips the vault for a single run.
 
 ## State layout
 
