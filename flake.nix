@@ -6,10 +6,15 @@
   outputs =
     { self, nixpkgs }:
     let
-      # Rootless Podman is Linux-only, and so is the script.
+      # On macOS, Podman only runs containers through a Linux VM ("podman
+      # machine"), which is where the rootless namespace/subuid handling
+      # actually happens -- the script and its host-side dependencies here
+      # are portable bash/coreutils, so it works there too.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
