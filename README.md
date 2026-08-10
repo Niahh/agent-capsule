@@ -183,7 +183,9 @@ MIT, see [LICENSE](LICENSE).
 
 ## Contributors
 
-| Name                                               | Contribution  |
-|----------------------------------------------------|---------------|
-| [@linouxis9](https://github.com/linouxis9)         | Initial draft |
-| [@alcelafranque](https://github.com/alcelafranque) | Reviews       |
+| Name                                               | Contribution                                                       |
+|----------------------------------------------------|--------------------------------------------------------------------|
+| [@linouxis9](https://github.com/linouxis9)         | Original script concept                                            |
+| [@Niahh](https://github.com/Niahh)                 | Initial release, session, makefile, config file, mcpvault, anydoc  |
+| [@alcelafranque](https://github.com/alcelafranque) | Nix flake, dev shell, CI check                                     |
+| [@citizen8](https://github.com/citizen8)           | macOS (Darwin) support in the nix flake                            |
