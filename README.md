@@ -32,8 +32,39 @@ everything else on the host stays out of reach.
 
 ## Requirements
 
-- Linux with rootless Podman configured
+- Linux with rootless Podman configured, **or** macOS with Podman (see below)
 - `make` for `make install` (or copy the two files manually)
+
+### macOS
+
+Podman on macOS runs containers inside a Linux VM, so every host path
+agent-capsule bind-mounts has to actually be visible inside that VM. A plain
+init covers the common case, since `podman machine init` already mounts
+`$HOME:$HOME` by default, which is where agent-capsule keeps everything
+(project checkouts, `~/.agent-capsule/`, credentials):
+
+```sh
+podman machine init
+podman machine start
+```
+
+If `agent-capsule` was installed via Nix (nix-darwin, `nix profile install`,
+`nix build`, etc.), also mount `/nix/store` — the closures of any Nix-built
+tools ever get bind-mounted into the container (e.g. `--mount`-ing a wrapper's
+extra tools, or a `--with` extra resolving under `/nix/store`) need to be
+visible to the VM. Passing any `--volume` at all replaces Podman's implicit
+default instead of adding to it, so `$HOME:$HOME` must be listed explicitly
+too — `--volume` also can't be added to an already-created machine, so get
+both in from the start:
+
+```sh
+podman machine init --volume $HOME:$HOME --volume /nix/store:/nix/store:ro
+podman machine start
+```
+
+Leaving out `$HOME:$HOME` breaks the build, since agent-capsule bind-mounts
+`PROJECT_DIR` itself (plus `~/.agent-capsule/` and the auth home) under
+`$HOME`: `Error: statfs /Users/.../your-project: no such file or directory`.
 
 ## Install
 
