@@ -56,6 +56,8 @@ RUN set -eu; \
           HOME=/opt/superclaude superclaude install --force ;; \
         hunkdiff) \
           npm install -g hunkdiff ;; \
+        mcpvault) \
+          npm install -g @bitbonsai/mcpvault ;; \
         *) \
           echo "unknown extra: $extra" >&2; exit 1 ;; \
       esac; \
