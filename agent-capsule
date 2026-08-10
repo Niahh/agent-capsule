@@ -15,11 +15,12 @@
 #   * Claude's per-project memory is shared across sessions on the same repo
 #     (see "Shared per-project memory" below).
 #   * The Go toolchain is available inside the container.
-#   * Extra tools (SuperClaude, hunkdiff) are opt-in with --with.
+#   * Extra tools (SuperClaude, hunkdiff, mcpvault, anydoc) are opt-in with --with.
+#   * Defaults can live in a config file instead of being retyped every run.
 #   * Herdr-friendly: use --session or AGENT_CAPSULE_SESSION for parallel agents.
 #
 # Usage:
-#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [-d] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <claude args>]
+#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [--vault[=PATH]] [--no-vault] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <claude args>]
 #
 # Examples:
 #   agent-capsule
@@ -30,6 +31,8 @@
 #   agent-capsule --auth-login
 #   agent-capsule --session amf-fix-auth ~/code/amf
 #   agent-capsule --with superclaude,hunkdiff ~/code/myapp
+#   agent-capsule --with mcpvault --vault ~/code/myapp
+#   agent-capsule --with mcpvault --vault="$HOME/Notes" ~/code/myapp
 #   agent-capsule . -- --help
 #
 # Extra mounts:
@@ -42,21 +45,62 @@
 #   else is opt-in and baked in at build time:
 #     --with superclaude            SuperClaude slash commands
 #     --with hunkdiff               hunkdiff CLI
+#     --with mcpvault               Obsidian vault MCP server, requires --vault
+#     --with anydoc                 skill converting Office/PDF/EPUB files to Markdown
 #     --with superclaude,hunkdiff   several at once (--with a --with b also works)
 #     --with list                   print the known extras and exit
+#     --with none                   select nothing, overriding the config file
 #   Each selection gets its own image tag (<image>:base with no extras,
 #   <image>:<hash> otherwise), so switching selections never rebuilds over the
 #   other variant. AGENT_CAPSULE_IMAGE must therefore be a bare name with no
 #   tag. Drop variants you no longer need with `podman rmi`.
+#   A --with on the command line replaces AGENT_CAPSULE_WITH rather than adding
+#   to it, so a config default can be narrowed for a single run.
 #
-# Documentation vault (-d, --documentation):
+# Obsidian MCP server (--with mcpvault):
+#   Installs https://github.com/bitbonsai/mcpvault in the image and registers it
+#   as the MCP server "obsidian" against the mounted vault, so Claude can search
+#   and edit notes through tools instead of raw file reads. Two things are
+#   required, and the run is rejected without them: the vault mount (--vault),
+#   since the server reads the vault off the filesystem, and an explicit vault
+#   path (--vault=PATH or AGENT_CAPSULE_VAULT), since the built-in default path
+#   is a placeholder and the server may write anywhere under it. With
+#   AGENT_CAPSULE_VAULT and AGENT_CAPSULE_MOUNT_VAULT=1 in the config file, no
+#   flag at all is needed. The generated config is written to the session home
+#   and passed to claude with --mcp-config, so a project's own .mcp.json keeps
+#   working alongside it. Under --shell no claude runs; the printed command
+#   starts one by hand.
+#
+# Obsidian vault (--vault[=PATH], --no-vault):
 #   Cross-cutting knowledge (how tools connect, why-decisions, runbooks) is
-#   documented in an Obsidian vault, NOT in this script. Pass -d to mount the
-#   vault read-write at /vault so Claude can record such knowledge while working
-#   — pointers, not copies (tool detail stays in its own repo/header). The vault
-#   host path defaults to ~/Documents/Obsidian/Docs-automated; override with
-#   AGENT_CAPSULE_VAULT (and the in-container path with AGENT_CAPSULE_VAULT_DEST).
-#   See the vault's "Conventions for Claude" note for what to write and where.
+#   documented in an Obsidian vault, NOT in this script. --vault mounts it
+#   read-write at /vault (in-container path: AGENT_CAPSULE_VAULT_DEST) so Claude
+#   can record such knowledge while working: pointers, not copies (tool detail
+#   stays in its own repo/header). See the vault's "Conventions for Claude" note
+#   for what to write and where.
+#   The host path comes from AGENT_CAPSULE_VAULT (config file or environment),
+#   falling back to ~/Documents/Obsidian/Docs-automated; --vault=PATH overrides
+#   it for one run. Only the equals form takes a path: a bare --vault followed
+#   by a directory reads that directory as PROJECT_DIR, never as the vault. The
+#   shell does not expand ~ after "=", so write --vault="$HOME/Notes", not
+#   --vault=~/Notes.
+#   AGENT_CAPSULE_MOUNT_VAULT=1 makes the mount the default; --no-vault turns it
+#   off for a single run.
+#
+# Config file:
+#   $HOME/.agent-capsule/config, or AGENT_CAPSULE_CONFIG=/some/path.
+#   Persistent defaults, so a preferred set of add-ons is not retyped every run:
+#     # ~/.agent-capsule/config
+#     AGENT_CAPSULE_WITH=superclaude,mcpvault
+#     AGENT_CAPSULE_MOUNT_VAULT=1
+#     AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
+#     AGENT_CAPSULE_KEEPID=1
+#   One KEY=value per line, # comments and blank lines ignored. Only AGENT_CAPSULE_*
+#   keys are accepted, and the file is parsed, never sourced, so it cannot run
+#   commands. Precedence: command-line flag > environment > config file > built-in
+#   default; exporting a variable empty therefore forces the built-in default.
+#   AGENT_CAPSULE_HOME and AGENT_CAPSULE_CONFIG select the file itself, so they
+#   are ignored inside it.
 #
 # Shared auth:
 #   $HOME/.agent-capsule/auth-home
@@ -118,6 +162,82 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 VERSION="0.1.0"
 
+# Resolved before everything else: the config file lives under it, and the file
+# supplies the defaults every AGENT_CAPSULE_* assignment below reads.
+CONFIG_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
+
+# ----------------------------------------------------------------------------
+# Config file
+# ----------------------------------------------------------------------------
+# Persistent defaults for the AGENT_CAPSULE_* knobs, so a preferred set of extras
+# and mounts does not have to be retyped on every run. Parsed, never sourced: the
+# keys are validated and assigned with export, so the file cannot run commands.
+# A value already present in the environment always wins, which keeps the
+# precedence CLI flag > environment > config file > built-in default.
+load_config_file() {
+  local file="$1"
+  local explicit="$2"
+  local line key val
+
+  if [[ ! -e "$file" ]]; then
+    # An explicitly requested file that is missing is almost always a typo.
+    [[ "$explicit" == "1" ]] || return 1
+    echo "Config file not found: $file" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$file" ]]; then
+    echo "Not a regular file: $file" >&2
+    exit 1
+  fi
+
+  # The final line counts even without a trailing newline.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == "#"* ]] && continue
+
+    if [[ "$line" != *=* ]]; then
+      echo ">> Config  : ignoring line without '=': $line" >&2
+      continue
+    fi
+
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"
+
+    if [[ ! "$key" =~ ^AGENT_CAPSULE_[A-Z0-9_]+$ ]]; then
+      echo ">> Config  : ignoring unsupported key: $key" >&2
+      continue
+    fi
+
+    # These two select the config file itself, so reading them from it is circular.
+    case "$key" in
+      AGENT_CAPSULE_HOME | AGENT_CAPSULE_CONFIG)
+        echo ">> Config  : $key must come from the environment, ignoring it here" >&2
+        continue
+        ;;
+    esac
+
+    if [[ "$val" == \"*\" || "$val" == \'*\' ]]; then
+      val="${val:1:${#val}-2}"
+    fi
+
+    [[ -n "${!key+x}" ]] && continue
+    export "${key}=${val}"
+  done < "$file"
+
+  return 0
+}
+
+CONFIG_FILE="${AGENT_CAPSULE_CONFIG:-$CONFIG_DIR/config}"
+CONFIG_FILE_LOADED=0
+load_config_file "$CONFIG_FILE" "${AGENT_CAPSULE_CONFIG:+1}" && CONFIG_FILE_LOADED=1
+
+# ----------------------------------------------------------------------------
+# Defaults (config file and environment already applied)
+# ----------------------------------------------------------------------------
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
 NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
@@ -125,10 +245,11 @@ GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
 # Extra tools that --with can bake into the image (none by default). Keep in
 # sync with the case branches in the Dockerfile's EXTRAS step. This order is
 # also the canonical order of the selection, so the derived image tag does not
-# depend on how the user spelled it out.
-KNOWN_EXTRAS=(hunkdiff superclaude)
+# depend on how the user spelled it out. Kept alphabetical by convention; the
+# tag hash covers only the selected extras, so any placement that preserves
+# the relative order of the existing entries keeps old tags stable.
+KNOWN_EXTRAS=(anydoc hunkdiff mcpvault superclaude)
 
-CONFIG_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 BUILD_DIR="$CONFIG_DIR/build"
 AUTH_HOME_DIR="$CONFIG_DIR/auth-home"
 
@@ -154,11 +275,23 @@ DEFAULT_PIDS_LIMIT="${AGENT_CAPSULE_PIDS_LIMIT:-512}"
 
 SHARE_AUTH="${AGENT_CAPSULE_SHARE_AUTH:-1}"
 
-# Documentation vault (Obsidian). Mounted read-write at $VAULT_DEST when -d is
-# given, so Claude can record cross-cutting docs. Override the host path with
+# Obsidian vault. Mounted read-write at $VAULT_DEST when --vault is given, so
+# Claude can record cross-cutting docs. Override the host path with
 # AGENT_CAPSULE_VAULT.
 VAULT_DIR="${AGENT_CAPSULE_VAULT:-$HOME/Documents/Obsidian/Docs-automated}"
 VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
+
+# The built-in vault path is one author's layout, not a convention. Handing it to
+# an MCP server that reads and writes the whole tree needs a deliberate choice,
+# so mcpvault rejects the fallback (see below) rather than acting on a guess.
+VAULT_DIR_EXPLICIT=0
+[[ -n "${AGENT_CAPSULE_VAULT:-}" ]] && VAULT_DIR_EXPLICIT=1
+
+# MCP servers generated by the capsule (currently only mcpvault). Written into
+# the session home, which is bind-mounted at /home/dev, so no extra mount is
+# needed; claude is then pointed at it with --mcp-config.
+MCP_CONFIG_BASENAME=".mcp-servers.json"
+CONTAINER_MCP_CONFIG="/home/dev/$MCP_CONFIG_BASENAME"
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -357,9 +490,15 @@ SESSION_NAME="${AGENT_CAPSULE_SESSION:-}"
 DISABLE_SHARED_CLAUDE_MD=0
 SHARED_CLAUDE_MD_EXPLICIT=0
 SESSION_EXPLICIT=0
-MOUNT_VAULT=0
+MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
 MOUNT_SPECS=()
+
+# Seeded from the config file or the environment. The first CLI --with replaces
+# that seed instead of adding to it, otherwise a default extra could never be
+# dropped for a single run (--with none then selects nothing at all).
 EXTRAS_REQUESTED=()
+[[ -n "${AGENT_CAPSULE_WITH:-}" ]] && EXTRAS_REQUESTED=("$AGENT_CAPSULE_WITH")
+WITH_EXPLICIT=0
 
 while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
   case "$1" in
@@ -431,13 +570,15 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       ;;
     --with)
       [[ -n "${2:-}" ]] || {
-        echo "--with requires a tool list (or 'list'). Known: ${KNOWN_EXTRAS[*]}" >&2
+        echo "--with requires a tool list (or 'list'/'none'). Known: ${KNOWN_EXTRAS[*]}" >&2
         exit 1
       }
       [[ "$2" == "list" ]] && {
         printf '%s\n' "${KNOWN_EXTRAS[@]}"
         exit 0
       }
+      [[ "$WITH_EXPLICIT" == "0" ]] && EXTRAS_REQUESTED=()
+      WITH_EXPLICIT=1
       EXTRAS_REQUESTED+=("$2")
       shift 2
       ;;
@@ -446,6 +587,8 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
         printf '%s\n' "${KNOWN_EXTRAS[@]}"
         exit 0
       }
+      [[ "$WITH_EXPLICIT" == "0" ]] && EXTRAS_REQUESTED=()
+      WITH_EXPLICIT=1
       EXTRAS_REQUESTED+=("${1#--with=}")
       shift
       ;;
@@ -461,7 +604,24 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       MOUNT_SPECS+=("${1#--mount=}")
       shift
       ;;
-    -d|--documentation)
+    --vault)
+      # Bare form only: a space-separated optional path would be ambiguous with
+      # the positional PROJECT_DIR (--vault ~/code/app must keep meaning
+      # "default vault, project app"). Overrides use --vault=PATH.
+      MOUNT_VAULT=1
+      shift
+      ;;
+    --no-vault)
+      MOUNT_VAULT=0
+      shift
+      ;;
+    --vault=*)
+      [[ -n "${1#--vault=}" ]] || {
+        echo "--vault= requires a directory path." >&2
+        exit 1
+      }
+      VAULT_DIR="${1#--vault=}"
+      VAULT_DIR_EXPLICIT=1
       MOUNT_VAULT=1
       shift
       ;;
@@ -534,9 +694,28 @@ require_cmd cut
 # KNOWN_EXTRAS order so it is deduplicated and canonical: --with a,b and
 # --with b --with a --with a must resolve to the same image tag.
 EXTRAS=""
+SELECT_NONE=0
 if [[ "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
   read -r -a requested <<<"$(printf '%s ' "${EXTRAS_REQUESTED[@]}" | tr 'A-Z,' 'a-z ')"
 
+  # `none` selects nothing, the escape hatch from a config-file default.
+  for req in "${requested[@]}"; do
+    [[ "$req" == "none" ]] && SELECT_NONE=1
+  done
+
+  # Combining `none` with real tools is contradictory; silently dropping the
+  # tools would look like they were selected.
+  if [[ "$SELECT_NONE" == "1" ]]; then
+    for req in "${requested[@]}"; do
+      [[ "$req" == "none" ]] || {
+        echo "--with none cannot be combined with other tools (got: $req)" >&2
+        exit 1
+      }
+    done
+  fi
+fi
+
+if [[ "$SELECT_NONE" == "0" && "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
   for req in "${requested[@]}"; do
     known=0
     for extra in "${KNOWN_EXTRAS[@]}"; do
@@ -613,7 +792,48 @@ fi
 PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_HASH"
 [[ "$AUTH_LOGIN" == "1" ]] && SHARED_MEMORY_ENABLED=0
 
+# The vault is equally meaningless for --auth-login, and a config-file default
+# (AGENT_CAPSULE_MOUNT_VAULT=1) pointing at a missing path must not block
+# logging in.
+[[ "$AUTH_LOGIN" == "1" ]] && MOUNT_VAULT=0
+
 CONTAINER_SUFFIX="${SESSION_NAME:0:48}"
+
+# ----------------------------------------------------------------------------
+# mcpvault
+# ----------------------------------------------------------------------------
+# The MCP server reads the vault straight off the filesystem, so it is useless
+# without the vault mount. Registering it against a missing directory would only
+# fail later, opaquely, at the first tool call. Not meaningful for --auth-login,
+# which would otherwise be blocked by a config file that selects the extra.
+MCPVAULT_ENABLED=0
+
+if [[ ",$EXTRAS," == *,mcpvault,* && "$AUTH_LOGIN" != "1" ]]; then
+  if [[ "$MOUNT_VAULT" != "1" ]]; then
+    echo "--with mcpvault needs the vault mounted." >&2
+    echo "Add --vault, or set AGENT_CAPSULE_MOUNT_VAULT=1 in $CONFIG_FILE." >&2
+    exit 1
+  fi
+
+  if [[ "$VAULT_DIR_EXPLICIT" != "1" ]]; then
+    echo "--with mcpvault requires an explicit vault path." >&2
+    echo "The built-in default ($VAULT_DIR) is a placeholder, and the server gets" >&2
+    echo "read-write access to whatever it points at. Name your vault instead:" >&2
+    echo "  --vault=/path/to/vault for this run" >&2
+    echo "  or AGENT_CAPSULE_VAULT=/path/to/vault in $CONFIG_FILE or the environment" >&2
+    exit 1
+  fi
+
+  # The path is interpolated into JSON below, so a quote or a backslash in it
+  # would emit a file claude cannot parse.
+  if [[ "$VAULT_DEST" != /* || ! "$VAULT_DEST" =~ ^[A-Za-z0-9_/.-]+$ ]]; then
+    echo "Invalid vault destination: $VAULT_DEST" >&2
+    echo "It must be an absolute path of [A-Za-z0-9_/.-] characters." >&2
+    exit 1
+  fi
+
+  MCPVAULT_ENABLED=1
+fi
 
 # ----------------------------------------------------------------------------
 # SELinux volume option
@@ -662,6 +882,20 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
   mkdir -p "$HOME_DIR/.claude/projects/-workspace"
 fi
 
+# Rewritten on every run: the vault destination can change between invocations.
+if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+  cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "mcpvault",
+      "args": ["$VAULT_DEST"]
+    }
+  }
+}
+MCPCONFIG
+fi
+
 # ----------------------------------------------------------------------------
 # Write build context
 # ----------------------------------------------------------------------------
@@ -696,7 +930,12 @@ fi
 # ----------------------------------------------------------------------------
 # Command
 # ----------------------------------------------------------------------------
-RUN_CMD=(claude "${CLAUDE_ARGS[@]}")
+# Not --strict-mcp-config: a project's own .mcp.json must keep working alongside
+# the servers the capsule generates.
+MCP_ARGS=()
+[[ "$MCPVAULT_ENABLED" == "1" ]] && MCP_ARGS=(--mcp-config "$CONTAINER_MCP_CONFIG")
+
+RUN_CMD=(claude "${MCP_ARGS[@]}" "${CLAUDE_ARGS[@]}")
 [[ "$SHELL_MODE" == "1" ]] && RUN_CMD=(bash)
 
 # ----------------------------------------------------------------------------
@@ -759,13 +998,13 @@ for spec in "${MOUNT_SPECS[@]}"; do
 done
 
 # ----------------------------------------------------------------------------
-# Documentation vault mount (-d / --documentation)
+# Obsidian vault mount (--vault)
 # ----------------------------------------------------------------------------
 VAULT_MOUNT=()
 
 if [[ "$MOUNT_VAULT" == "1" ]]; then
   RESOLVED_VAULT="$(cd -P "$VAULT_DIR" 2>/dev/null && pwd)" || {
-    echo "Documentation vault not found: $VAULT_DIR" >&2
+    echo "Vault not found: $VAULT_DIR" >&2
     echo "Create it or set AGENT_CAPSULE_VAULT to your vault's path." >&2
     exit 1
   }
@@ -870,6 +1109,7 @@ TTY_ARGS=(-i)
 # ----------------------------------------------------------------------------
 # Run
 # ----------------------------------------------------------------------------
+[[ "$CONFIG_FILE_LOADED" == "1" ]] && echo ">> Config  : $CONFIG_FILE"
 echo ">> Project : $PROJECT_DIR  ->  /workspace"
 echo ">> Session : $SESSION_NAME"
 echo ">> State   : $HOME_DIR"
@@ -900,7 +1140,15 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
 fi
 
 if [[ "$MOUNT_VAULT" == "1" ]]; then
-  echo ">> Docs    : $RESOLVED_VAULT -> $VAULT_DEST (read-write)"
+  echo ">> Vault   : $RESOLVED_VAULT -> $VAULT_DEST (read-write)"
+fi
+
+if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+  if [[ "$SHELL_MODE" == "1" ]]; then
+    echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: claude --mcp-config $CONTAINER_MCP_CONFIG)"
+  else
+    echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian')"
+  fi
 fi
 
 [[ "$AUTH_LOGIN" == "1" ]] && echo ">> Mode    : auth login"
