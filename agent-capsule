@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
 #
-# agent-capsule: Run Claude Code in a ROOTLESS Podman container, sharing a
-# project folder with your host.
+# agent-capsule: Run Claude Code or the OpenAI Codex CLI in a ROOTLESS Podman
+# container, sharing a project folder with your host.
 #
-#   * Rootless podman: container root maps to YOUR host UID, so files Claude
-#     writes in /workspace are owned by you on the host by default.
-#   * Optional --keep-id or AGENT_CAPSULE_KEEPID=1: run as your UID inside
-#     the container too, needed for claude --dangerously-skip-permissions.
-#   * Claude auth is stored once in a shared auth home. The OAuth credentials
-#     file is live-shared (read-write) into every session, so a single
-#     --auth-login keeps all sessions logged in, including token refreshes.
+#   * Rootless podman: container root maps to YOUR host UID, so files the
+#     agent writes in /workspace are owned by you on the host by default.
+#   * Optional --keep-id or AGENT_CAPSULE_KEEPID=1: run as your UID inside the
+#     container too, needed for claude --dangerously-skip-permissions or
+#     codex --dangerously-bypass-approvals-and-sandbox.
+#   * --agent claude|codex picks the CLI to run (default claude); env/config
+#     key AGENT_CAPSULE_AGENT.
+#   * Auth is stored once per agent in a shared auth home. The OAuth
+#     credentials file (Claude's .credentials.json, Codex's auth.json) is
+#     live-shared (read-write) into every session, so a single --auth-login
+#     keeps all sessions logged in, including token refreshes.
 #   * Each project/task/session gets its own isolated /home/dev.
-#   * A shared global CLAUDE.md is mounted at /home/dev/.claude/CLAUDE.md.
+#   * A shared global instructions file is mounted per agent: CLAUDE.md for
+#     claude, AGENTS.md for codex.
 #   * Claude's per-project memory is shared across sessions on the same repo
-#     (see "Shared per-project memory" below).
+#     (see "Shared per-project memory" below); codex has no equivalent.
 #   * The Go toolchain is available inside the container.
-#   * Extra tools (SuperClaude, hunkdiff, mcpvault, anydoc) are opt-in with --with.
+#   * Extra tools (SuperClaude, hunkdiff, mcpvault, anydoc) are opt-in with
+#     --with; they are Claude-oriented (seeded under ~/.claude).
 #   * Defaults can live in a config file instead of being retyped every run.
 #   * Herdr-friendly: use --session or AGENT_CAPSULE_SESSION for parallel agents.
 #
 # Usage:
-#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [--vault[=PATH]] [--no-vault] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <claude args>]
+#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [--agent NAME] [--vault[=PATH]] [--no-vault] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <agent args>]
 #
 # Examples:
 #   agent-capsule
@@ -29,6 +35,8 @@
 #   agent-capsule --build .
 #   agent-capsule --offline --shell .
 #   agent-capsule --auth-login
+#   agent-capsule --agent codex --auth-login
+#   agent-capsule --agent codex ~/code/myapp
 #   agent-capsule --session amf-fix-auth ~/code/amf
 #   agent-capsule --with superclaude,hunkdiff ~/code/myapp
 #   agent-capsule --with mcpvault --vault ~/code/myapp
@@ -41,8 +49,10 @@
 #   agent-capsule --mount ~/docs:/docs:ro .
 #
 # Optional extra tools (--with):
-#   Every image ships Claude Code, the Go toolchain and golangci-lint. Anything
-#   else is opt-in and baked in at build time:
+#   Every image ships Claude Code, Codex CLI, the Go toolchain and
+#   golangci-lint. Anything else is opt-in and baked in at build time, and is
+#   Claude-oriented (seeded under ~/.claude by the entrypoint; see the
+#   Dockerfile): --agent codex simply will not see them.
 #     --with superclaude            SuperClaude slash commands
 #     --with hunkdiff               hunkdiff CLI
 #     --with mcpvault               Obsidian vault MCP server, requires --vault
@@ -59,25 +69,29 @@
 #
 # Obsidian MCP server (--with mcpvault):
 #   Installs https://github.com/bitbonsai/mcpvault in the image and registers it
-#   as the MCP server "obsidian" against the mounted vault, so Claude can search
-#   and edit notes through tools instead of raw file reads. Two things are
-#   required, and the run is rejected without them: the vault mount (--vault),
-#   since the server reads the vault off the filesystem, and an explicit vault
-#   path (--vault=PATH or AGENT_CAPSULE_VAULT), since the built-in default path
-#   is a placeholder and the server may write anywhere under it. With
-#   AGENT_CAPSULE_VAULT and AGENT_CAPSULE_MOUNT_VAULT=1 in the config file, no
-#   flag at all is needed. The generated config is written to the session home
-#   and passed to claude with --mcp-config, so a project's own .mcp.json keeps
-#   working alongside it. Under --shell no claude runs; the printed command
+#   as the MCP server "obsidian" against the mounted vault, so the agent can
+#   search and edit notes through tools instead of raw file reads. Two things
+#   are required, and the run is rejected without them: the vault mount
+#   (--vault), since the server reads the vault off the filesystem, and an
+#   explicit vault path (--vault=PATH or AGENT_CAPSULE_VAULT), since the
+#   built-in default path is a placeholder and the server may write anywhere
+#   under it. With AGENT_CAPSULE_VAULT and AGENT_CAPSULE_MOUNT_VAULT=1 in the
+#   config file, no flag at all is needed. Under --agent claude the generated
+#   config is written to the session home and passed to claude with
+#   --mcp-config, so a project's own .mcp.json keeps working alongside it.
+#   Under --agent codex, no config file is written; the server is instead
+#   registered with -c 'mcp_servers.obsidian.command=...' -c
+#   'mcp_servers.obsidian.args=...' overrides layered on top of
+#   ~/.codex/config.toml. Under --shell no agent runs; the printed command
 #   starts one by hand.
 #
 # Obsidian vault (--vault[=PATH], --no-vault):
 #   Cross-cutting knowledge (how tools connect, why-decisions, runbooks) is
 #   documented in an Obsidian vault, NOT in this script. --vault mounts it
-#   read-write at /vault (in-container path: AGENT_CAPSULE_VAULT_DEST) so Claude
-#   can record such knowledge while working: pointers, not copies (tool detail
-#   stays in its own repo/header). See the vault's "Conventions for Claude" note
-#   for what to write and where.
+#   read-write at /vault (in-container path: AGENT_CAPSULE_VAULT_DEST) so the
+#   agent can record such knowledge while working: pointers, not copies (tool
+#   detail stays in its own repo/header). See the vault's "Conventions for
+#   Claude" note for what to write and where.
 #   The host path comes from AGENT_CAPSULE_VAULT (config file or environment),
 #   falling back to ~/Documents/Obsidian/Docs-automated; --vault=PATH overrides
 #   it for one run. Only the equals form takes a path: a bare --vault followed
@@ -91,6 +105,7 @@
 #   $HOME/.agent-capsule/config, or AGENT_CAPSULE_CONFIG=/some/path.
 #   Persistent defaults, so a preferred set of add-ons is not retyped every run:
 #     # ~/.agent-capsule/config
+#     AGENT_CAPSULE_AGENT=codex
 #     AGENT_CAPSULE_WITH=superclaude,mcpvault
 #     AGENT_CAPSULE_MOUNT_VAULT=1
 #     AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
@@ -102,28 +117,53 @@
 #   AGENT_CAPSULE_HOME and AGENT_CAPSULE_CONFIG select the file itself, so they
 #   are ignored inside it.
 #
+# Agent selection (--agent claude|codex):
+#   Default claude; env/config key AGENT_CAPSULE_AGENT. Unknown values are
+#   rejected up front, before any podman command runs. The choice resolves
+#   into everything below: which binary runs, which auth file and shared
+#   instructions file are used, the API key forwarded, and the HERDR_AGENT and
+#   ai.agent container label.
+#
 # Shared auth:
 #   $HOME/.agent-capsule/auth-home
-#   Authenticate once with `agent-capsule --auth-login`. The resulting OAuth
-#   token ($AUTH_HOME/.claude/.credentials.json) is bind-mounted read-write
-#   into every session, so all sessions share one login and in-container token
-#   refreshes are written straight back. Everything else in the session home
-#   (.claude.json, sessions, history) stays per-session isolated.
+#   Authenticate once per agent with `agent-capsule --auth-login` (claude) or
+#   `agent-capsule --agent codex --auth-login` (codex); one auth home
+#   accumulates both under their own subdirectories. The resulting OAuth token
+#   ($AUTH_HOME/.claude/.credentials.json for claude, $AUTH_HOME/.codex/auth.json
+#   for codex) is bind-mounted read-write into every session for that agent, so
+#   all sessions share one login and in-container token refreshes are written
+#   straight back. Everything else in the session home (.claude.json or
+#   .codex/, sessions, history) stays per-session isolated. Claude's
+#   credentials are never mounted into codex sessions, nor codex's into claude
+#   sessions.
+#   Codex logins use the device-code flow (codex login --device-auth):
+#   approve a short code at the URL codex prints, from any browser. The
+#   browser flow is not supported in the capsule (its OAuth callback server
+#   is hardcoded to 127.0.0.1:1455 inside the container, unreachable from
+#   the host); accounts that cannot use device-code auth (some
+#   Business/Enterprise/Edu workspaces) can pass explicit login args
+#   instead, e.g. `-- --with-api-key`, which replace the default verbatim.
+#   Combining with --offline is rejected: every flow needs the network.
 #
 # Per-session homes:
 #   $HOME/.agent-capsule/homes/<session>
 #
-# Shared global Claude memory:
-#   $HOME/.agent-capsule/CLAUDE.md
-#   Mounted inside the container as:
-#   /home/dev/.claude/CLAUDE.md
+# Shared global instructions file:
+#   $HOME/.agent-capsule/CLAUDE.md (claude) or $HOME/.agent-capsule/AGENTS.md
+#   (codex; override with AGENT_CAPSULE_SHARED_AGENTS_MD, the codex counterpart
+#   of AGENT_CAPSULE_SHARED_CLAUDE_MD). Mounted inside the container as:
+#     claude: /home/dev/.claude/CLAUDE.md
+#     codex:  /home/dev/.codex/AGENTS.md
+#   --shared-claude-md, --no-shared-claude-md and --shared-claude-md-rw act on
+#   whichever file the selected --agent uses.
 #
-# Shared per-project memory (default ON, read-write):
+# Shared per-project memory (default ON, read-write; claude only):
 #   Claude Code's file-based memory (/home/dev/.claude/projects/<slug>/memory) is
 #   shared across every session working on the SAME project, so parallel agents
 #   pool what they learn instead of each re-discovering it. Kept per-project, so
 #   different repos never see each other's memory; transcripts and .claude.json
-#   stay per-session isolated.
+#   stay per-session isolated. Codex has no equivalent concept, so --agent codex
+#   forces this off regardless of flags or config.
 #     Host dir: $HOME/.agent-capsule/project-memory/<project-hash>
 #   Tradeoff: with read-write sharing, one agent's mistaken "learned fact" can be
 #   recalled by its siblings, and memory grows faster with no pruning.
@@ -137,17 +177,18 @@
 # Disable auth copying:
 #   AGENT_CAPSULE_SHARE_AUTH=0 agent-capsule --session test .
 #
-# Disable shared global CLAUDE.md:
+# Disable shared global instructions file:
 #   agent-capsule --no-shared-claude-md --session test .
 #
-# Use custom shared CLAUDE.md:
+# Use a custom shared instructions file:
 #   agent-capsule --shared-claude-md ~/.config/claude/CLAUDE.md --session test .
 #
-# Allow Claude to edit shared global CLAUDE.md:
+# Allow the agent to edit the shared global instructions file:
 #   agent-capsule --shared-claude-md-rw --session memory-edit .
 #
 # Herdr usage:
 #   HERDR_AGENT=claude AGENT_CAPSULE_SESSION=amf-fix-auth agent-capsule ~/code/amf
+#   HERDR_AGENT defaults to the selected --agent when not set explicitly.
 #
 # SELinux:
 #   If enabled, volumes are relabeled with :z automatically.
@@ -242,6 +283,11 @@ IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
 NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
 
+# CLI to run inside the capsule. Both ship in every image (see Dockerfile), so
+# this is purely a runtime choice. --agent overrides this; validated against
+# KNOWN_AGENTS once argument parsing is done.
+AGENT="${AGENT_CAPSULE_AGENT:-claude}"
+
 # Extra tools that --with can bake into the image (none by default). Keep in
 # sync with the case branches in the Dockerfile's EXTRAS step. This order is
 # also the canonical order of the selection, so the derived image tag does not
@@ -250,10 +296,15 @@ GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
 # the relative order of the existing entries keeps old tags stable.
 KNOWN_EXTRAS=(anydoc hunkdiff mcpvault superclaude)
 
+# Agents this script knows how to run; --agent must name one of these.
+KNOWN_AGENTS=(claude codex)
+
 BUILD_DIR="$CONFIG_DIR/build"
 AUTH_HOME_DIR="$CONFIG_DIR/auth-home"
 
-SHARED_CLAUDE_MD="${AGENT_CAPSULE_SHARED_CLAUDE_MD:-$CONFIG_DIR/CLAUDE.md}"
+# SHARED_CLAUDE_MD itself is not defaulted here: its built-in default depends
+# on the selected agent (CLAUDE.md vs AGENTS.md), so it is resolved once
+# argument parsing has settled AGENT and SHARED_CLAUDE_MD_EXPLICIT (see below).
 SHARED_CLAUDE_MD_ENABLED="${AGENT_CAPSULE_SHARED_CLAUDE_MD_ENABLED:-1}"
 SHARED_CLAUDE_MD_READONLY="${AGENT_CAPSULE_SHARED_CLAUDE_MD_READONLY:-1}"
 
@@ -276,7 +327,7 @@ DEFAULT_PIDS_LIMIT="${AGENT_CAPSULE_PIDS_LIMIT:-512}"
 SHARE_AUTH="${AGENT_CAPSULE_SHARE_AUTH:-1}"
 
 # Obsidian vault. Mounted read-write at $VAULT_DEST when --vault is given, so
-# Claude can record cross-cutting docs. Override the host path with
+# the agent can record cross-cutting docs. Override the host path with
 # AGENT_CAPSULE_VAULT.
 VAULT_DIR="${AGENT_CAPSULE_VAULT:-$HOME/Documents/Obsidian/Docs-automated}"
 VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
@@ -289,7 +340,8 @@ VAULT_DIR_EXPLICIT=0
 
 # MCP servers generated by the capsule (currently only mcpvault). Written into
 # the session home, which is bind-mounted at /home/dev, so no extra mount is
-# needed; claude is then pointed at it with --mcp-config.
+# needed; claude is then pointed at it with --mcp-config. Codex has no such
+# file: its servers are passed as -c overrides instead (see MCP_ARGS below).
 MCP_CONFIG_BASENAME=".mcp-servers.json"
 CONTAINER_MCP_CONFIG="/home/dev/$MCP_CONFIG_BASENAME"
 
@@ -396,6 +448,40 @@ copy_claude_auth_from_auth_home() {
   rm -f "$session_home/.claude/.credentials.json"
 
   echo ">> Auth    : copied shared Claude auth into this session"
+}
+
+session_has_codex_state() {
+  local target_home="$1"
+
+  [[ -e "$target_home/.codex" ]] && return 0
+
+  return 1
+}
+
+copy_codex_auth_from_auth_home() {
+  local auth_home="$1"
+  local session_home="$2"
+
+  [[ "$SHARE_AUTH" == "1" ]] || return 0
+  [[ "$session_home" != "$auth_home" ]] || return 0
+
+  if session_has_codex_state "$session_home"; then
+    return 0
+  fi
+
+  if ! session_has_codex_state "$auth_home"; then
+    echo ">> Auth    : no shared auth found yet. Run: agent-capsule --agent codex --auth-login" >&2
+    return 0
+  fi
+
+  copy_path_if_present "$auth_home" "$session_home" ".codex"
+
+  # Don't leave the OAuth token sprawled across every session home: the live
+  # token is bind-mounted read-write at runtime (see SHARED_CRED_MOUNT), so the
+  # copy above is redundant and would strand a stale token on disk.
+  rm -f "$session_home/.codex/auth.json"
+
+  echo ">> Auth    : copied shared Codex auth into this session"
 }
 
 resolve_file_path() {
@@ -522,6 +608,18 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       AUTH_LOGIN=1
       shift
       ;;
+    --agent)
+      [[ -n "${2:-}" ]] || {
+        echo "--agent requires a name. Known: ${KNOWN_AGENTS[*]}" >&2
+        exit 1
+      }
+      AGENT="$2"
+      shift 2
+      ;;
+    --agent=*)
+      AGENT="${1#--agent=}"
+      shift
+      ;;
     --session)
       [[ -n "${2:-}" ]] || {
         echo "--session requires a name." >&2
@@ -646,8 +744,39 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
   esac
 done
 
+# Reject an unknown --agent before touching podman or the filesystem: every
+# later section assumes AGENT is one of KNOWN_AGENTS.
+agent_known=0
+for known_agent in "${KNOWN_AGENTS[@]}"; do
+  [[ "$AGENT" == "$known_agent" ]] && agent_known=1 && break
+done
+[[ "$agent_known" == "1" ]] || {
+  echo "Unknown agent: $AGENT (known: ${KNOWN_AGENTS[*]})" >&2
+  exit 1
+}
+
 if [[ "$DISABLE_SHARED_CLAUDE_MD" == "1" ]]; then
   SHARED_CLAUDE_MD_ENABLED=0
+fi
+
+# The default shared instructions file depends on the selected agent
+# (CLAUDE.md for claude, AGENTS.md for codex); an explicit --shared-claude-md
+# always wins regardless of agent, same as SHARED_CLAUDE_MD_EXPLICIT already
+# implies for the claude-only default computed above.
+if [[ "$SHARED_CLAUDE_MD_EXPLICIT" == "0" ]]; then
+  if [[ "$AGENT" == "codex" ]]; then
+    SHARED_CLAUDE_MD="${AGENT_CAPSULE_SHARED_AGENTS_MD:-$CONFIG_DIR/AGENTS.md}"
+  else
+    SHARED_CLAUDE_MD="${AGENT_CAPSULE_SHARED_CLAUDE_MD:-$CONFIG_DIR/CLAUDE.md}"
+  fi
+fi
+
+if [[ "$AGENT" == "codex" ]]; then
+  CONTAINER_SHARED_MD_PATH="/home/dev/.codex/AGENTS.md"
+  SHARED_MD_PARENT_REL=".codex"
+else
+  CONTAINER_SHARED_MD_PATH="/home/dev/.claude/CLAUDE.md"
+  SHARED_MD_PARENT_REL=".claude"
 fi
 
 # --auth-login runs in its own dedicated home, so an explicit --session would
@@ -657,24 +786,31 @@ if [[ "$AUTH_LOGIN" == "1" && "$SESSION_EXPLICIT" == "1" ]]; then
   exit 1
 fi
 
+# Every codex login flow talks to OpenAI's auth servers; --offline would
+# break it before it starts.
+if [[ "$AUTH_LOGIN" == "1" && "$AGENT" == "codex" && "$OFFLINE" == "1" ]]; then
+  echo "--auth-login --agent codex cannot be combined with --offline (the login needs the network)." >&2
+  exit 1
+fi
+
 if [[ "$ARGS_ONLY" == "1" ]]; then
   PROJECT_DIR="$PWD"
 else
   PROJECT_DIR="${1:-$PWD}"
   if [[ -n "${1:-}" ]]; then shift; fi
   if [[ -n "${1:-}" && "$1" != "--" ]]; then
-    echo "Unexpected argument: $1 (pass claude args after --)" >&2
+    echo "Unexpected argument: $1 (pass $AGENT args after --)" >&2
     exit 1
   fi
   [[ "${1:-}" == "--" ]] && shift
 fi
 
-CLAUDE_ARGS=("$@")
+AGENT_ARGS=("$@")
 
-# --shell replaces the whole command with bash, so any claude args after --
+# --shell replaces the whole command with bash, so any agent args after --
 # would be silently discarded. Fail instead of ignoring them.
-if [[ "$SHELL_MODE" == "1" && "${#CLAUDE_ARGS[@]}" -gt 0 ]]; then
-  echo "--shell does not take claude args (got: ${CLAUDE_ARGS[*]})" >&2
+if [[ "$SHELL_MODE" == "1" && "${#AGENT_ARGS[@]}" -gt 0 ]]; then
+  echo "--shell does not take $AGENT args (got: ${AGENT_ARGS[*]})" >&2
   exit 1
 fi
 
@@ -792,6 +928,9 @@ fi
 PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_HASH"
 [[ "$AUTH_LOGIN" == "1" ]] && SHARED_MEMORY_ENABLED=0
 
+# This maps Claude Code's file-based memory layout; codex has no equivalent.
+[[ "$AGENT" == "codex" ]] && SHARED_MEMORY_ENABLED=0
+
 # The vault is equally meaningless for --auth-login, and a config-file default
 # (AGENT_CAPSULE_MOUNT_VAULT=1) pointing at a missing path must not block
 # logging in.
@@ -824,8 +963,8 @@ if [[ ",$EXTRAS," == *,mcpvault,* && "$AUTH_LOGIN" != "1" ]]; then
     exit 1
   fi
 
-  # The path is interpolated into JSON below, so a quote or a backslash in it
-  # would emit a file claude cannot parse.
+  # The path is interpolated into JSON (claude) or a TOML string (codex)
+  # below, so a quote or a backslash in it would emit something unparsable.
   if [[ "$VAULT_DEST" != /* || ! "$VAULT_DEST" =~ ^[A-Za-z0-9_/.-]+$ ]]; then
     echo "Invalid vault destination: $VAULT_DEST" >&2
     echo "It must be an absolute path of [A-Za-z0-9_/.-] characters." >&2
@@ -864,18 +1003,23 @@ chmod 700 "$CONFIG_DIR" "$AUTH_HOME_DIR" "$HOME_DIR" 2>/dev/null || true
 
 ensure_minimal_gitconfig "$HOME_DIR"
 
-copy_claude_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR"
+case "$AGENT" in
+  codex) copy_codex_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR" ;;
+  *) copy_claude_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR" ;;
+esac
 
-# Prepare /home/dev/.claude so the nested CLAUDE.md mount has a target parent.
+# Prepare the shared instructions file's parent (.claude or .codex) so the
+# nested CLAUDE.md/AGENTS.md mount has a target.
 if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
-  mkdir -p "$HOME_DIR/.claude"
+  mkdir -p "$HOME_DIR/$SHARED_MD_PARENT_REL"
   RESOLVED_SHARED_CLAUDE_MD="$(resolve_file_path "$SHARED_CLAUDE_MD" "$SHARED_CLAUDE_MD_EXPLICIT")"
   chmod 600 "$RESOLVED_SHARED_CLAUDE_MD" 2>/dev/null || true
 fi
 
 # Prepare the shared memory dir and its in-container parent. Creating the parent
 # host-side (rather than letting podman auto-create the mountpoint as root) keeps
-# ownership correct under --keep-id, same as the .claude parent above.
+# ownership correct under --keep-id, same as the shared instructions file above.
+# Claude only (see SHARED_MEMORY_ENABLED forcing above).
 if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
   mkdir -p "$PROJECT_MEMORY_DIR"
   chmod 700 "$PROJECT_MEMORY_DIR" 2>/dev/null || true
@@ -883,7 +1027,9 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
 fi
 
 # Rewritten on every run: the vault destination can change between invocations.
-if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+# Claude only: codex gets the same server through MCP_ARGS -c overrides below,
+# with no file to write (see the "Command" section).
+if [[ "$MCPVAULT_ENABLED" == "1" && "$AGENT" != "codex" ]]; then
   cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
 {
   "mcpServers": {
@@ -930,12 +1076,33 @@ fi
 # ----------------------------------------------------------------------------
 # Command
 # ----------------------------------------------------------------------------
-# Not --strict-mcp-config: a project's own .mcp.json must keep working alongside
-# the servers the capsule generates.
+# Not --strict-mcp-config for claude: a project's own .mcp.json must keep
+# working alongside the servers the capsule generates. Codex has no such
+# concept; its config.toml keeps working alongside the -c overrides below.
 MCP_ARGS=()
-[[ "$MCPVAULT_ENABLED" == "1" ]] && MCP_ARGS=(--mcp-config "$CONTAINER_MCP_CONFIG")
+if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+  if [[ "$AGENT" == "codex" ]]; then
+    MCP_ARGS=(
+      -c "mcp_servers.obsidian.command=\"mcpvault\""
+      -c "mcp_servers.obsidian.args=[\"$VAULT_DEST\"]"
+    )
+  else
+    MCP_ARGS=(--mcp-config "$CONTAINER_MCP_CONFIG")
+  fi
+fi
 
-RUN_CMD=(claude "${MCP_ARGS[@]}" "${CLAUDE_ARGS[@]}")
+RUN_CMD=("$AGENT" "${MCP_ARGS[@]}" "${AGENT_ARGS[@]}")
+# codex authenticates through a subcommand, not interactively like claude.
+# Argless, use the device-code flow (the browser flow is not supported in the
+# capsule; see "Shared auth" in the header). Explicit agent args replace the
+# default verbatim, e.g. `-- --with-api-key` for a key-based login.
+if [[ "$AUTH_LOGIN" == "1" && "$AGENT" == "codex" ]]; then
+  if [[ "${#AGENT_ARGS[@]}" -eq 0 ]]; then
+    RUN_CMD=(codex login --device-auth)
+  else
+    RUN_CMD=(codex login "${AGENT_ARGS[@]}")
+  fi
+fi
 [[ "$SHELL_MODE" == "1" ]] && RUN_CMD=(bash)
 
 # ----------------------------------------------------------------------------
@@ -943,12 +1110,17 @@ RUN_CMD=(claude "${MCP_ARGS[@]}" "${CLAUDE_ARGS[@]}")
 # ----------------------------------------------------------------------------
 EXTRA=()
 
-# Do not place the secret value directly in the podman command line.
-[[ -n "${ANTHROPIC_API_KEY:-}" ]] && EXTRA+=(-e ANTHROPIC_API_KEY)
+# Do not place the secret value directly in the podman command line. Only the
+# selected agent's key is forwarded (least exposure).
+if [[ "$AGENT" == "codex" ]]; then
+  [[ -n "${OPENAI_API_KEY:-}" ]] && EXTRA+=(-e OPENAI_API_KEY)
+else
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && EXTRA+=(-e ANTHROPIC_API_KEY)
+fi
 
-# Herdr wrapper hint. The host foreground process is podman, while Claude runs
-# inside the container.
-export HERDR_AGENT="${HERDR_AGENT:-claude}"
+# Herdr wrapper hint. The host foreground process is podman, while the agent
+# runs inside the container.
+export HERDR_AGENT="${HERDR_AGENT:-$AGENT}"
 EXTRA+=(-e "HERDR_AGENT=$HERDR_AGENT")
 
 # ----------------------------------------------------------------------------
@@ -1014,7 +1186,7 @@ if [[ "$MOUNT_VAULT" == "1" ]]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Shared global CLAUDE.md mount
+# Shared global instructions file mount (CLAUDE.md or AGENTS.md)
 # ----------------------------------------------------------------------------
 SHARED_CLAUDE_MD_MOUNT=()
 
@@ -1026,7 +1198,7 @@ if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
   fi
 
   SHARED_CLAUDE_MD_MOUNT+=(
-    -v "$RESOLVED_SHARED_CLAUDE_MD:/home/dev/.claude/CLAUDE.md${memory_opts:+:$memory_opts}"
+    -v "$RESOLVED_SHARED_CLAUDE_MD:$CONTAINER_SHARED_MD_PATH${memory_opts:+:$memory_opts}"
   )
 fi
 
@@ -1053,22 +1225,39 @@ fi
 # Bind-mount the ONE shared OAuth token (rw) into this session so a single
 # `--auth-login` serves every session and in-container token refreshes write
 # straight back to the shared file. Everything else in /home/dev stays isolated.
+# Per agent: claude's .credentials.json is never mounted into a codex session,
+# nor codex's auth.json into a claude session.
+#
+# Version-fragile: this single-file mount only works because both CLIs rewrite
+# their credentials file in place (codex: OpenOptions truncate+write in
+# codex-rs/login). A switch to atomic rename-over would fail on the bind mount.
 #
 # Concurrency note: two sessions refreshing at the exact same instant race on
 # this file (last-writer-wins). If the refresh rotates the refresh token, one
 # session may need to refresh again. Acceptable for the herdr workflow; no lock.
 SHARED_CRED_MOUNT=()
-AUTH_CRED_FILE="$AUTH_HOME_DIR/.claude/.credentials.json"
+
+if [[ "$AGENT" == "codex" ]]; then
+  AUTH_CRED_FILE="$AUTH_HOME_DIR/.codex/auth.json"
+  CONTAINER_CRED_FILE="/home/dev/.codex/auth.json"
+  CRED_PARENT_REL=".codex"
+  CRED_LOGIN_HINT="agent-capsule --agent codex --auth-login"
+else
+  AUTH_CRED_FILE="$AUTH_HOME_DIR/.claude/.credentials.json"
+  CONTAINER_CRED_FILE="/home/dev/.claude/.credentials.json"
+  CRED_PARENT_REL=".claude"
+  CRED_LOGIN_HINT="agent-capsule --auth-login"
+fi
 
 if [[ "$SHARE_AUTH" == "1" && "$AUTH_LOGIN" != "1" ]]; then
   if [[ -s "$AUTH_CRED_FILE" ]]; then
-    mkdir -p "$HOME_DIR/.claude"          # target parent must exist for the mount
+    mkdir -p "$HOME_DIR/$CRED_PARENT_REL"  # target parent must exist for the mount
     cred_opts="${SHARED_VOL_OPT#:}"
     SHARED_CRED_MOUNT+=(
-      -v "$AUTH_CRED_FILE:/home/dev/.claude/.credentials.json${cred_opts:+:$cred_opts}"
+      -v "$AUTH_CRED_FILE:$CONTAINER_CRED_FILE${cred_opts:+:$cred_opts}"
     )
   else
-    echo ">> Auth    : no shared credentials yet. Run: agent-capsule --auth-login" >&2
+    echo ">> Auth    : no shared credentials yet. Run: $CRED_LOGIN_HINT" >&2
   fi
 fi
 
@@ -1115,9 +1304,15 @@ echo ">> Session : $SESSION_NAME"
 echo ">> State   : $HOME_DIR"
 echo ">> Auth    : $AUTH_HOME_DIR"
 if [[ "${#SHARED_CRED_MOUNT[@]}" -gt 0 ]]; then
-  echo ">> Creds   : $AUTH_CRED_FILE -> /home/dev/.claude/.credentials.json (shared, read-write)"
+  echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_FILE (shared, read-write)"
 fi
-echo ">> Agent   : $HERDR_AGENT"
+# HERDR_AGENT can be pinned by the wrapper; when it diverges from --agent,
+# show both rather than misreport what actually runs.
+if [[ "$HERDR_AGENT" == "$AGENT" ]]; then
+  echo ">> Agent   : $AGENT"
+else
+  echo ">> Agent   : $AGENT (HERDR_AGENT=$HERDR_AGENT)"
+fi
 
 if [[ -n "$EXTRAS" ]]; then
   echo ">> Extras  : ${EXTRAS//,/, } ($IMAGE_REF)"
@@ -1128,7 +1323,7 @@ fi
 if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
   md_mode="read-write"
   [[ "$SHARED_CLAUDE_MD_READONLY" == "1" ]] && md_mode="read-only"
-  echo ">> Memory  : $RESOLVED_SHARED_CLAUDE_MD -> /home/dev/.claude/CLAUDE.md ($md_mode)"
+  echo ">> Memory  : $RESOLVED_SHARED_CLAUDE_MD -> $CONTAINER_SHARED_MD_PATH ($md_mode)"
 else
   echo ">> Memory  : disabled"
 fi
@@ -1145,13 +1340,28 @@ fi
 
 if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
   if [[ "$SHELL_MODE" == "1" ]]; then
-    echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: claude --mcp-config $CONTAINER_MCP_CONFIG)"
+    if [[ "$AGENT" == "codex" ]]; then
+      # Single-quote the -c overrides so the printed command survives a
+      # copy-paste: the TOML quoting inside must reach codex verbatim.
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: codex -c 'mcp_servers.obsidian.command=\"mcpvault\"' -c 'mcp_servers.obsidian.args=[\"$VAULT_DEST\"]')"
+    else
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: claude --mcp-config $CONTAINER_MCP_CONFIG)"
+    fi
   else
     echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian')"
   fi
 fi
 
 [[ "$AUTH_LOGIN" == "1" ]] && echo ">> Mode    : auth login"
+if [[ "$AUTH_LOGIN" == "1" && "$AGENT" == "codex" ]]; then
+  if [[ "$SHELL_MODE" == "1" ]]; then
+    echo ">> Login   : shell mode; run the login by hand: codex login --device-auth"
+  elif [[ "${#AGENT_ARGS[@]}" -eq 0 ]]; then
+    echo ">> Login   : device-code flow; approve the code codex prints at the URL it shows, from any browser."
+  else
+    echo ">> Login   : custom login args; note the browser flow does not work in the capsule (callback port unreachable)."
+  fi
+fi
 [[ "$OFFLINE" == "1" ]] && echo ">> Network : disabled"
 
 exec podman run "${TTY_ARGS[@]}" --rm --init \
@@ -1159,7 +1369,7 @@ exec podman run "${TTY_ARGS[@]}" --rm --init \
   "${SECURITY_ARGS[@]}" \
   "${NETWORK_ARGS[@]}" \
   --name "capsule-${CONTAINER_SUFFIX}-$$" \
-  --label "ai.agent=claude" \
+  --label "ai.agent=$AGENT" \
   --label "ai.session=$SESSION_NAME" \
   -e TERM="${TERM:-xterm-256color}" \
   "${EXTRA[@]}" \
