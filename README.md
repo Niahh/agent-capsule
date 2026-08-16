@@ -4,7 +4,7 @@
 
 # agent-capsule
 
-[![lint](https://github.com/OWNER/agent-capsule/actions/workflows/lint.yml/badge.svg)](https://github.com/OWNER/agent-capsule/actions/workflows/lint.yml)
+ [![lint](https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml/badge.svg)](https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml)
 
 Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside a rootless
 [Podman](https://podman.io/) container that shares a single project directory with the host.
