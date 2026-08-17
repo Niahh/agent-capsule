@@ -6,7 +6,8 @@
 
  [![lint](https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml/badge.svg)](https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml)
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside a rootless
+Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the
+[OpenAI Codex CLI](https://github.com/openai/codex) inside a rootless
 [Podman](https://podman.io/) container that shares a single project directory with the host.
 
 One shell script, one Dockerfile. The container gets the project at `/workspace`, an
@@ -18,15 +19,17 @@ everything else on the host stays out of reach.
 - Rootless containment: container root maps to your host UID, so files written in
   `/workspace` are owned by you. All capabilities dropped, no-new-privileges,
   memory/CPU/pids limits.
-- One login for all sessions: authenticate once with `--auth-login`; the OAuth
-  credentials file is live-shared into every session, token refreshes included.
+- One login for all sessions: authenticate once per agent with `--auth-login`
+  (`--agent codex --auth-login` for Codex); the OAuth credentials file is
+  live-shared into every session for that agent, token refreshes included.
 - Isolated sessions: each project or named session gets its own `/home/dev`, so
   parallel agents do not trample each other's transcripts or settings.
-- Shared knowledge: a global `CLAUDE.md` is mounted into every session, and Claude's
-  per-project memory is pooled across sessions working on the same repo.
+- Shared knowledge: a global `CLAUDE.md` (or `AGENTS.md` under `--agent codex`) is
+  mounted into every session, and Claude's per-project memory is pooled across
+  sessions working on the same repo.
 - Batteries in the image: Go toolchain, golangci-lint. Extra tools (SuperClaude slash
-  commands, hunkdiff, an Obsidian MCP server, a document-to-Markdown skill) are opt-in
-  with `--with`, each selection getting its own image tag.
+  commands, hunkdiff, an Obsidian MCP server, a document-to-Markdown skill) are
+  Claude-oriented and opt-in with `--with`, each selection getting its own image tag.
 - Defaults you keep: a config file holds your usual add-ons so they are not retyped
   on every run.
 
@@ -87,6 +90,8 @@ agent-capsule --session fix-auth ~/code/myapp   # named session for parallel age
 agent-capsule --with superclaude,hunkdiff .     # opt in to the extra tools
 agent-capsule --with mcpvault --vault .         # Obsidian vault, queried over MCP
 agent-capsule . -- -p "explain this repo"       # args after -- go to claude
+agent-capsule --agent codex --auth-login        # once: log in to Codex instead
+agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on a project
 ```
 
 ## Flags at a glance
@@ -94,16 +99,17 @@ agent-capsule . -- -p "explain this repo"       # args after -- go to claude
 | Flag                                             | Effect                                                                             |
 |--------------------------------------------------|------------------------------------------------------------------------------------|
 | `--build`                                        | force a rebuild of the container image                                             |
-| `--shell`                                        | start bash instead of claude                                                       |
+| `--shell`                                        | start bash instead of the agent                                                    |
 | `--keep-id`                                      | run as your UID inside too (needed for `--dangerously-skip-permissions`)           |
 | `--offline`                                      | no network inside the container                                                    |
+| `--agent NAME`                                   | pick the CLI to run: `claude` (default) or `codex`                                 |
 | `--session NAME`                                 | named per-session home, for parallel agents on one repo                            |
 | `--with TOOL[,TOOL]`                             | opt in to extra image tools (`superclaude`, `hunkdiff`, `mcpvault`, `anydoc`); `list`, `none` |
 | `--mount SRC[:DEST][:ro]`                        | extra bind mounts (repeatable)                                                     |
 | `--vault[=PATH]`                                 | mount the Obsidian vault read-write at `/vault`; `=PATH` picks the vault for one run |
 | `--no-vault`                                     | skip the vault for one run, overriding the config file                             |
-| `--shared-memory-ro`, `--no-shared-memory`       | restrict or disable pooled per-project memory                                      |
-| `--shared-claude-md-rw`, `--no-shared-claude-md` | writable or disabled global CLAUDE.md                                              |
+| `--shared-memory-ro`, `--no-shared-memory`       | restrict or disable pooled per-project memory (claude only)                        |
+| `--shared-claude-md-rw`, `--no-shared-claude-md` | writable or disabled global instructions file (CLAUDE.md, or AGENTS.md under `--agent codex`) |
 | `--version`                                      | print the version and exit                                                         |
 
 ## Obsidian vault over MCP
@@ -163,10 +169,11 @@ Everything lives under `~/.agent-capsule/`:
 
 ```
 config                   optional defaults for the AGENT_CAPSULE_* settings
-auth-home/               shared login (created by --auth-login)
+auth-home/               shared login (created by --auth-login), one subdir per agent
 homes/<session>/         one isolated /home/dev per session
-project-memory/<hash>/   per-project memory pooled across sessions
-CLAUDE.md                global instructions mounted into every session
+project-memory/<hash>/   per-project memory pooled across sessions (claude only)
+CLAUDE.md                global instructions mounted into every claude session
+AGENTS.md                global instructions mounted into every codex session
 build/                   image build context and per-variant build hashes
 ```
 

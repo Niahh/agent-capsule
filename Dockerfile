@@ -31,7 +31,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+# Both agents ship in every image; agent-capsule's --agent flag is a purely
+# runtime choice, so the --with image-tag scheme (see agent-capsule) is
+# untouched by which one a run selects.
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 # Install golangci-lint from the official prebuilt binary (the project advises
 # against `go install`). Land it in /usr/local/bin, not $GOPATH/bin: /home/dev is
