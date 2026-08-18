@@ -6,11 +6,17 @@ on:
   pull_request:
 
 jobs:
+  launcher-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck agent-capsule
+      - run: shellcheck agent-capsule tests/agent-capsule_test.sh
 
   hadolint:
     runs-on: ubuntu-latest
@@ -19,6 +25,42 @@ jobs:
       - uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
+
+  image-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t agent-capsule:test .
+      - run: |
+          docker run --rm agent-capsule:test claude --version
+          docker run --rm -e AGENT_CAPSULE_AGENT=codex agent-capsule:test codex --version
+          docker run --rm -e AGENT_CAPSULE_AGENT=opencode agent-capsule:test opencode --version
+          docker run --rm agent-capsule:test \
+            claude --plugin-dir /opt/superpowers/source --version
+          docker run --rm agent-capsule:test \
+            claude --plugin-dir /opt/anydoc/plugin --version
+          docker run --rm agent-capsule:test mcpvault --help
+          docker run --rm -e AGENT_CAPSULE_AGENT=opencode \
+            -e AGENT_CAPSULE_WITH=superpowers \
+            -e 'OPENCODE_CONFIG_CONTENT={"plugin":["/opt/superpowers/source"]}' \
+            agent-capsule:test opencode debug config | \
+            grep -F '/opt/superpowers/source'
+      - run: |
+          codex_home="capsule-codex-smoke-${GITHUB_RUN_ID}"
+          trap 'docker volume rm "$codex_home" >/dev/null' EXIT
+          docker volume create "$codex_home"
+          docker run --rm -v "$codex_home:/home/dev" \
+            -e AGENT_CAPSULE_AGENT=codex \
+            -e AGENT_CAPSULE_WITH=superpowers \
+            agent-capsule:test bash -c \
+            'test -e /home/dev/.codex/.superpowers-capsule-managed && \
+             ! codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
+          docker run --rm -v "$codex_home:/home/dev" \
+            -e AGENT_CAPSULE_AGENT=codex \
+            -e AGENT_CAPSULE_WITH= \
+            agent-capsule:test bash -c \
+            'test ! -e /home/dev/.codex/.superpowers-capsule-managed && \
+             codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
 
   nix:
     runs-on: ubuntu-latest

@@ -1,5 +1,5 @@
 {
-  description = "Run Claude Code inside a rootless Podman container that shares one project directory with the host";
+  description = "Run Claude Code, Codex, or opencode inside a rootless Podman container that shares one project directory with the host";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -61,7 +61,7 @@
           '';
 
           meta = {
-            description = "Run Claude Code in a rootless Podman container sharing one project directory";
+            description = "Run a coding agent in a rootless Podman container sharing one project directory";
             homepage = "https://github.com/Niahh/agent-capsule";
             license = nixpkgs.lib.licenses.mit;
             platforms = systems;
@@ -88,13 +88,20 @@
         package = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-capsule;
         shellcheck =
           pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-            shellcheck ${self}/agent-capsule
+            shellcheck ${self}/agent-capsule ${self}/tests/agent-capsule_test.sh
             touch $out
           '';
         hadolint = pkgs.runCommand "hadolint" { nativeBuildInputs = [ pkgs.hadolint ]; } ''
           hadolint --config ${self}/.hadolint.yaml ${self}/Dockerfile
           touch $out
         '';
+        launcher-tests =
+          pkgs.runCommand "launcher-tests"
+            { nativeBuildInputs = with pkgs; [ bash coreutils git perl ]; }
+            ''
+              bash ${self}/tests/agent-capsule_test.sh
+              touch $out
+            '';
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);

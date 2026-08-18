@@ -1,6 +1,6 @@
 ignored:
-  # apt and npm installs are unpinned by design: the image tracks the latest
-  # tools and rebuilds whenever the Dockerfile or base tags change.
+  # apt and unpinned npm installs are mutable by design. An explicit --build
+  # pulls the base image and bypasses the cache to refresh them.
   - DL3008
   - DL3016
   # The entrypoint is written via printf with single-quoted lines that must
