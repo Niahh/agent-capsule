@@ -12,11 +12,15 @@ PREFIX ?= $(HOME)/.local
 BINDIR = $(PREFIX)/bin
 SHAREDIR = $(PREFIX)/share/agent-capsule
 
-.PHONY: help install uninstall
+.PHONY: help test install uninstall
 
 help:
+	@echo "test         Run launcher behavior tests"
 	@echo "install      Install agent-capsule and its Dockerfile"
 	@echo "uninstall    Remove the installed script and Dockerfile"
+
+test:
+	@bash tests/agent-capsule_test.sh
 
 install:
 	@install -d "$(BINDIR)"
