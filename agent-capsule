@@ -1,207 +1,143 @@
 #!/usr/bin/env bash
-#
-# agent-capsule: Run Claude Code or the OpenAI Codex CLI in a ROOTLESS Podman
-# container, sharing a project folder with your host.
-#
-#   * Rootless podman: container root maps to YOUR host UID, so files the
-#     agent writes in /workspace are owned by you on the host by default.
-#   * Optional --keep-id or AGENT_CAPSULE_KEEPID=1: run as your UID inside the
-#     container too, needed for claude --dangerously-skip-permissions or
-#     codex --dangerously-bypass-approvals-and-sandbox.
-#   * --agent claude|codex picks the CLI to run (default claude); env/config
-#     key AGENT_CAPSULE_AGENT.
-#   * Auth is stored once per agent in a shared auth home. The OAuth
-#     credentials file (Claude's .credentials.json, Codex's auth.json) is
-#     live-shared (read-write) into every session, so a single --auth-login
-#     keeps all sessions logged in, including token refreshes.
-#   * Each project/task/session gets its own isolated /home/dev.
-#   * A shared global instructions file is mounted per agent: CLAUDE.md for
-#     claude, AGENTS.md for codex.
-#   * Claude's per-project memory is shared across sessions on the same repo
-#     (see "Shared per-project memory" below); codex has no equivalent.
-#   * The Go toolchain is available inside the container.
-#   * Extra tools (SuperClaude, hunkdiff, mcpvault, anydoc) are opt-in with
-#     --with; they are Claude-oriented (seeded under ~/.claude).
-#   * Defaults can live in a config file instead of being retyped every run.
-#   * Herdr-friendly: use --session or AGENT_CAPSULE_SESSION for parallel agents.
+# Run a coding agent in a rootless Podman container.
 #
 # Usage:
-#   agent-capsule [--version] [--build] [--shell] [--keep-id] [--offline] [--auth-login] [--agent NAME] [--vault[=PATH]] [--no-vault] [--session NAME] [--with TOOL[,TOOL]...]... [--mount SRC[:DEST][:ro]]... [--no-shared-memory] [--shared-memory-ro] [PROJECT_DIR] [-- <agent args>]
+#   agent-capsule [OPTIONS] [PROJECT_DIR] [-- AGENT_ARGS...]
 #
-# Examples:
-#   agent-capsule
-#   agent-capsule ~/code/myapp
-#   agent-capsule --shell .
-#   agent-capsule --build .
-#   agent-capsule --offline --shell .
-#   agent-capsule --auth-login
-#   agent-capsule --agent codex --auth-login
-#   agent-capsule --agent codex ~/code/myapp
-#   agent-capsule --session amf-fix-auth ~/code/amf
-#   agent-capsule --with superclaude,hunkdiff ~/code/myapp
-#   agent-capsule --with mcpvault --vault ~/code/myapp
-#   agent-capsule --with mcpvault --vault="$HOME/Notes" ~/code/myapp
-#   agent-capsule . -- --help
+# Options:
+#   --agent NAME           claude (default), codex, opencode, or list
+#   --session NAME         use a named isolated home
+#   --auth-login           authenticate the selected agent
+#   --shell                start bash instead of the agent
+#   --offline              disable container networking
+#   --keep-id              run with the host UID and GID inside
+#   --with TOOLS           activate integrations, or use list or none
+#   -m, --mount SPEC       mount SRC[:DEST][:ro], repeatable
+#   --vault[=PATH]         mount the configured or given vault (default /vault)
+#   --no-vault             disable the vault and mcpvault for this run
+#   --shared-rules PATH    select the global rules file
+#   --shared-rules-rw      mount the global rules file read-write
+#   --no-shared-rules      disable the global rules file
+#   --shared-memory-ro     mount Claude project memory read-only
+#   --no-shared-memory     disable Claude project memory
+#   --build                rebuild the universal image without cache
+#   --versions             print configured tool versions
+#   --check-updates        compare configured and upstream tool versions
+#   --version              print the launcher version
+#   -h, --help             show this help
 #
-# Extra mounts:
-#   agent-capsule --mount ~/code/shared-lib .
-#   agent-capsule --mount ~/data:/data .
-#   agent-capsule --mount ~/docs:/docs:ro .
+# Integrations:
+#   superpowers, mcpvault, anydoc
+#   mcpvault requires --vault. anydoc is available only with claude.
 #
-# Optional extra tools (--with):
-#   Every image ships Claude Code, Codex CLI, the Go toolchain and
-#   golangci-lint. Anything else is opt-in and baked in at build time, and is
-#   Claude-oriented (seeded under ~/.claude by the entrypoint; see the
-#   Dockerfile): --agent codex simply will not see them.
-#     --with superclaude            SuperClaude slash commands
-#     --with hunkdiff               hunkdiff CLI
-#     --with mcpvault               Obsidian vault MCP server, requires --vault
-#     --with anydoc                 skill converting Office/PDF/EPUB files to Markdown
-#     --with superclaude,hunkdiff   several at once (--with a --with b also works)
-#     --with list                   print the known extras and exit
-#     --with none                   select nothing, overriding the config file
-#   Each selection gets its own image tag (<image>:base with no extras,
-#   <image>:<hash> otherwise), so switching selections never rebuilds over the
-#   other variant. AGENT_CAPSULE_IMAGE must therefore be a bare name with no
-#   tag. Drop variants you no longer need with `podman rmi`.
-#   A --with on the command line replaces AGENT_CAPSULE_WITH rather than adding
-#   to it, so a config default can be narrowed for a single run.
-#
-# Obsidian MCP server (--with mcpvault):
-#   Installs https://github.com/bitbonsai/mcpvault in the image and registers it
-#   as the MCP server "obsidian" against the mounted vault, so the agent can
-#   search and edit notes through tools instead of raw file reads. Two things
-#   are required, and the run is rejected without them: the vault mount
-#   (--vault), since the server reads the vault off the filesystem, and an
-#   explicit vault path (--vault=PATH or AGENT_CAPSULE_VAULT), since the
-#   built-in default path is a placeholder and the server may write anywhere
-#   under it. With AGENT_CAPSULE_VAULT and AGENT_CAPSULE_MOUNT_VAULT=1 in the
-#   config file, no flag at all is needed. Under --agent claude the generated
-#   config is written to the session home and passed to claude with
-#   --mcp-config, so a project's own .mcp.json keeps working alongside it.
-#   Under --agent codex, no config file is written; the server is instead
-#   registered with -c 'mcp_servers.obsidian.command=...' -c
-#   'mcp_servers.obsidian.args=...' overrides layered on top of
-#   ~/.codex/config.toml. Under --shell no agent runs; the printed command
-#   starts one by hand.
-#
-# Obsidian vault (--vault[=PATH], --no-vault):
-#   Cross-cutting knowledge (how tools connect, why-decisions, runbooks) is
-#   documented in an Obsidian vault, NOT in this script. --vault mounts it
-#   read-write at /vault (in-container path: AGENT_CAPSULE_VAULT_DEST) so the
-#   agent can record such knowledge while working: pointers, not copies (tool
-#   detail stays in its own repo/header). See the vault's "Conventions for
-#   Claude" note for what to write and where.
-#   The host path comes from AGENT_CAPSULE_VAULT (config file or environment),
-#   falling back to ~/Documents/Obsidian/Docs-automated; --vault=PATH overrides
-#   it for one run. Only the equals form takes a path: a bare --vault followed
-#   by a directory reads that directory as PROJECT_DIR, never as the vault. The
-#   shell does not expand ~ after "=", so write --vault="$HOME/Notes", not
-#   --vault=~/Notes.
-#   AGENT_CAPSULE_MOUNT_VAULT=1 makes the mount the default; --no-vault turns it
-#   off for a single run.
-#
-# Config file:
-#   $HOME/.agent-capsule/config, or AGENT_CAPSULE_CONFIG=/some/path.
-#   Persistent defaults, so a preferred set of add-ons is not retyped every run:
-#     # ~/.agent-capsule/config
-#     AGENT_CAPSULE_AGENT=codex
-#     AGENT_CAPSULE_WITH=superclaude,mcpvault
-#     AGENT_CAPSULE_MOUNT_VAULT=1
-#     AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
-#     AGENT_CAPSULE_KEEPID=1
-#   One KEY=value per line, # comments and blank lines ignored. Only AGENT_CAPSULE_*
-#   keys are accepted, and the file is parsed, never sourced, so it cannot run
-#   commands. Precedence: command-line flag > environment > config file > built-in
-#   default; exporting a variable empty therefore forces the built-in default.
-#   AGENT_CAPSULE_HOME and AGENT_CAPSULE_CONFIG select the file itself, so they
-#   are ignored inside it.
-#
-# Agent selection (--agent claude|codex):
-#   Default claude; env/config key AGENT_CAPSULE_AGENT. Unknown values are
-#   rejected up front, before any podman command runs. The choice resolves
-#   into everything below: which binary runs, which auth file and shared
-#   instructions file are used, the API key forwarded, and the HERDR_AGENT and
-#   ai.agent container label.
-#
-# Shared auth:
-#   $HOME/.agent-capsule/auth-home
-#   Authenticate once per agent with `agent-capsule --auth-login` (claude) or
-#   `agent-capsule --agent codex --auth-login` (codex); one auth home
-#   accumulates both under their own subdirectories. The resulting OAuth token
-#   ($AUTH_HOME/.claude/.credentials.json for claude, $AUTH_HOME/.codex/auth.json
-#   for codex) is bind-mounted read-write into every session for that agent, so
-#   all sessions share one login and in-container token refreshes are written
-#   straight back. Everything else in the session home (.claude.json or
-#   .codex/, sessions, history) stays per-session isolated. Claude's
-#   credentials are never mounted into codex sessions, nor codex's into claude
-#   sessions.
-#   Codex logins use the device-code flow (codex login --device-auth):
-#   approve a short code at the URL codex prints, from any browser. The
-#   browser flow is not supported in the capsule (its OAuth callback server
-#   is hardcoded to 127.0.0.1:1455 inside the container, unreachable from
-#   the host); accounts that cannot use device-code auth (some
-#   Business/Enterprise/Edu workspaces) can pass explicit login args
-#   instead, e.g. `-- --with-api-key`, which replace the default verbatim.
-#   Combining with --offline is rejected: every flow needs the network.
-#
-# Per-session homes:
-#   $HOME/.agent-capsule/homes/<session>
-#
-# Shared global instructions file:
-#   $HOME/.agent-capsule/CLAUDE.md (claude) or $HOME/.agent-capsule/AGENTS.md
-#   (codex; override with AGENT_CAPSULE_SHARED_AGENTS_MD, the codex counterpart
-#   of AGENT_CAPSULE_SHARED_CLAUDE_MD). Mounted inside the container as:
-#     claude: /home/dev/.claude/CLAUDE.md
-#     codex:  /home/dev/.codex/AGENTS.md
-#   --shared-claude-md, --no-shared-claude-md and --shared-claude-md-rw act on
-#   whichever file the selected --agent uses.
-#
-# Shared per-project memory (default ON, read-write; claude only):
-#   Claude Code's file-based memory (/home/dev/.claude/projects/<slug>/memory) is
-#   shared across every session working on the SAME project, so parallel agents
-#   pool what they learn instead of each re-discovering it. Kept per-project, so
-#   different repos never see each other's memory; transcripts and .claude.json
-#   stay per-session isolated. Codex has no equivalent concept, so --agent codex
-#   forces this off regardless of flags or config.
-#     Host dir: $HOME/.agent-capsule/project-memory/<project-hash>
-#   Tradeoff: with read-write sharing, one agent's mistaken "learned fact" can be
-#   recalled by its siblings, and memory grows faster with no pruning.
-#     --shared-memory-ro    share read-only (curated one-way broadcast)
-#     --no-shared-memory    restore full per-session isolation
-#     AGENT_CAPSULE_SHARED_MEMORY_ENABLED=0 / _READONLY=1  (env equivalents)
-#
-# Override base dir:
-#   AGENT_CAPSULE_HOME=/some/path
-#
-# Disable auth copying:
-#   AGENT_CAPSULE_SHARE_AUTH=0 agent-capsule --session test .
-#
-# Disable shared global instructions file:
-#   agent-capsule --no-shared-claude-md --session test .
-#
-# Use a custom shared instructions file:
-#   agent-capsule --shared-claude-md ~/.config/claude/CLAUDE.md --session test .
-#
-# Allow the agent to edit the shared global instructions file:
-#   agent-capsule --shared-claude-md-rw --session memory-edit .
-#
-# Herdr usage:
-#   HERDR_AGENT=claude AGENT_CAPSULE_SESSION=amf-fix-auth agent-capsule ~/code/amf
-#   HERDR_AGENT defaults to the selected --agent when not set explicitly.
-#
-# SELinux:
-#   If enabled, volumes are relabeled with :z automatically.
-#   Override with AGENT_CAPSULE_VOLOPT, for example:
-#     AGENT_CAPSULE_VOLOPT=""
-#     AGENT_CAPSULE_VOLOPT=":Z"
+# Persistent defaults: ~/.agent-capsule/config
+# Documentation: https://github.com/Niahh/agent-capsule
 #
 set -euo pipefail
+
+ACTIVE_LOCK_DIRS=()
+
+release_lock() {
+  local lock_dir="$1"
+  local remaining=()
+  local active
+
+  rm -rf "$lock_dir"
+  for active in "${ACTIVE_LOCK_DIRS[@]}"; do
+    [[ "$active" == "$lock_dir" ]] || remaining+=("$active")
+  done
+  ACTIVE_LOCK_DIRS=("${remaining[@]}")
+}
+
+release_all_locks() {
+  local lock_dir
+
+  for lock_dir in "${ACTIVE_LOCK_DIRS[@]}"; do
+    rm -rf "$lock_dir"
+  done
+}
+
+acquire_lock() {
+  local lock_dir="$1"
+  local missing_owner_attempts=0
+  local owner
+
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    if [[ -f "$lock_dir/pid" ]]; then
+      owner="$(<"$lock_dir/pid")"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf "$lock_dir"
+        continue
+      fi
+      if [[ "$owner" =~ ^[0-9]+$ ]]; then
+        missing_owner_attempts=0
+      else
+        ((missing_owner_attempts += 1))
+      fi
+    else
+      ((missing_owner_attempts += 1))
+    fi
+    if [[ "$missing_owner_attempts" -ge 10 ]]; then
+      rm -rf "$lock_dir"
+      missing_owner_attempts=0
+      continue
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$$" > "$lock_dir/pid"
+  ACTIVE_LOCK_DIRS+=("$lock_dir")
+}
+
+trap release_all_locks EXIT
 
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
-VERSION="0.1.0"
+VERSION="0.2.2"
+
+usage() {
+  awk 'NR==1{next} !/^#/{exit} {sub(/^# ?/,""); print}' "$0"
+}
+
+legacy_upgrade_required() {
+  local detected="$1"
+
+  echo "Configuration or state from an earlier agent-capsule version was detected." >&2
+  echo "Detected: $detected" >&2
+  echo "No files were changed." >&2
+  echo "Read the 'Upgrading from 0.1' section:" >&2
+  echo "https://github.com/Niahh/agent-capsule#upgrading-from-01" >&2
+  exit 1
+}
+
+# Help and version must remain available even when an explicitly selected config
+# file is missing or malformed. Skip option values so a file named --help is not
+# mistaken for the flag it follows.
+preflight_expect_value=0
+for preflight_arg in "$@"; do
+  if [[ "$preflight_expect_value" == "1" ]]; then
+    preflight_expect_value=0
+    continue
+  fi
+
+  case "$preflight_arg" in
+    --) break ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --version)
+      echo "agent-capsule $VERSION"
+      exit 0
+      ;;
+    --agent | --session | --shared-rules | --with | -m | --mount)
+      preflight_expect_value=1
+      ;;
+    -*) ;;
+    *) break ;;
+  esac
+done
+unset preflight_arg preflight_expect_value
 
 # Resolved before everything else: the config file lives under it, and the file
 # supplies the defaults every AGENT_CAPSULE_* assignment below reads.
@@ -218,7 +154,8 @@ CONFIG_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 load_config_file() {
   local file="$1"
   local explicit="$2"
-  local line key val
+  local line key val quote
+  local line_number=0
 
   if [[ ! -e "$file" ]]; then
     # An explicitly requested file that is missing is almost always a typo.
@@ -234,12 +171,13 @@ load_config_file() {
 
   # The final line counts even without a trailing newline.
   while IFS= read -r line || [[ -n "$line" ]]; do
+    ((line_number += 1))
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" || "$line" == "#"* ]] && continue
 
     if [[ "$line" != *=* ]]; then
-      echo ">> Config  : ignoring line without '=': $line" >&2
+      echo "$file:$line_number: ignoring line without '='" >&2
       continue
     fi
 
@@ -261,7 +199,12 @@ load_config_file() {
         ;;
     esac
 
-    if [[ "$val" == \"*\" || "$val" == \'*\' ]]; then
+    quote="${val:0:1}"
+    if [[ "$quote" == '"' || "$quote" == "'" ]]; then
+      if [[ "${#val}" -lt 2 || "${val: -1}" != "$quote" ]]; then
+        echo "$file:$line_number: unterminated quoted value for $key" >&2
+        exit 1
+      fi
       val="${val:1:${#val}-2}"
     fi
 
@@ -276,49 +219,66 @@ CONFIG_FILE="${AGENT_CAPSULE_CONFIG:-$CONFIG_DIR/config}"
 CONFIG_FILE_LOADED=0
 load_config_file "$CONFIG_FILE" "${AGENT_CAPSULE_CONFIG:+1}" && CONFIG_FILE_LOADED=1
 
+for legacy_variable in \
+  AGENT_CAPSULE_SHARED_CLAUDE_MD \
+  AGENT_CAPSULE_SHARED_CLAUDE_MD_ENABLED \
+  AGENT_CAPSULE_SHARED_CLAUDE_MD_READONLY \
+  AGENT_CAPSULE_SHARED_AGENTS_MD; do
+  if [[ -n "${!legacy_variable+x}" ]]; then
+    legacy_upgrade_required "legacy variable $legacy_variable"
+  fi
+done
+unset legacy_variable
+
 # ----------------------------------------------------------------------------
 # Defaults (config file and environment already applied)
 # ----------------------------------------------------------------------------
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
 NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
+CLAUDE_CODE_VERSION="${AGENT_CAPSULE_CLAUDE_CODE_VERSION:-2.1.234}"
+CODEX_VERSION="${AGENT_CAPSULE_CODEX_VERSION:-0.147.0}"
+OPENCODE_VERSION="${AGENT_CAPSULE_OPENCODE_VERSION:-1.18.18}"
+ANYDOC_VERSION="${AGENT_CAPSULE_ANYDOC_VERSION:-0.1.9}"
+MCPVAULT_VERSION="${AGENT_CAPSULE_MCPVAULT_VERSION:-0.16.0}"
+SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-1.5.22}"
+SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-v6.3.0}"
+GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-v2.12.2}"
 
-# CLI to run inside the capsule. Both ship in every image (see Dockerfile), so
-# this is purely a runtime choice. --agent overrides this; validated against
-# KNOWN_AGENTS once argument parsing is done.
+# CLI to run inside the capsule. --agent overrides this and selects only runtime
+# behavior; every supported CLI is present in the same image.
 AGENT="${AGENT_CAPSULE_AGENT:-claude}"
 
-# Extra tools that --with can bake into the image (none by default). Keep in
-# sync with the case branches in the Dockerfile's EXTRAS step. This order is
-# also the canonical order of the selection, so the derived image tag does not
-# depend on how the user spelled it out. Kept alphabetical by convention; the
-# tag hash covers only the selected extras, so any placement that preserves
-# the relative order of the existing entries keeps old tags stable.
-KNOWN_EXTRAS=(anydoc hunkdiff mcpvault superclaude)
+# Bundled integrations that --with can activate (none by default). The order is
+# canonical so status output does not depend on how the user spelled the list.
+KNOWN_EXTRAS=(anydoc mcpvault superpowers)
 
-# Agents this script knows how to run; --agent must name one of these.
-KNOWN_AGENTS=(claude codex)
+# Some extras ship files for ~/.claude and are useless to other agents.
+extra_supported_by_agent() { # $1=extra $2=agent
+  case "$1:$2" in
+    anydoc:claude) return 0 ;;
+    anydoc:*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 
 BUILD_DIR="$CONFIG_DIR/build"
-AUTH_HOME_DIR="$CONFIG_DIR/auth-home"
+AUTH_ROOT_DIR="$CONFIG_DIR/auth-home"
 
-# SHARED_CLAUDE_MD itself is not defaulted here: its built-in default depends
-# on the selected agent (CLAUDE.md vs AGENTS.md), so it is resolved once
-# argument parsing has settled AGENT and SHARED_CLAUDE_MD_EXPLICIT (see below).
-SHARED_CLAUDE_MD_ENABLED="${AGENT_CAPSULE_SHARED_CLAUDE_MD_ENABLED:-1}"
-SHARED_CLAUDE_MD_READONLY="${AGENT_CAPSULE_SHARED_CLAUDE_MD_READONLY:-1}"
+# One rules file for every agent; only the in-container mount target differs
+# per agent (AGENT_RULES_REL).
+SHARED_RULES="${AGENT_CAPSULE_SHARED_RULES:-$CONFIG_DIR/CLAUDE.md}"
+SHARED_RULES_ENABLED="${AGENT_CAPSULE_SHARED_RULES_ENABLED:-1}"
+SHARED_RULES_READONLY="${AGENT_CAPSULE_SHARED_RULES_READONLY:-1}"
 
-# Shared per-project memory. Claude Code's file-based memory lives under
-# /home/dev/.claude/projects/<slug>/memory. The <slug> is derived from the cwd,
-# which is always /workspace inside the capsule, so the container path is fixed
-# (version-fragile: a Claude Code change to the slug scheme would move it).
-# Keyed by project (not session) so parallel agents on the same repo pool what
-# they learn, while transcripts and .claude.json stay per-session isolated.
-# Default: enabled, read-write (agents must write to share learnings). Set
-# read-only for a curated one-way broadcast; disable to restore full isolation.
+# Shared per-project memory (claude only; the container path comes from the
+# agent profile). Keyed by project (not session) so parallel agents on the
+# same repo pool what they learn, while transcripts and settings stay
+# per-session isolated. Default: enabled, read-write (agents must write to
+# share learnings). Set read-only for a curated one-way broadcast; disable to
+# restore full isolation.
 SHARED_MEMORY_ENABLED="${AGENT_CAPSULE_SHARED_MEMORY_ENABLED:-1}"
 SHARED_MEMORY_READONLY="${AGENT_CAPSULE_SHARED_MEMORY_READONLY:-0}"
-CONTAINER_MEMORY_PATH="/home/dev/.claude/projects/-workspace/memory"
 
 DEFAULT_MEMORY="${AGENT_CAPSULE_MEMORY:-8g}"
 DEFAULT_CPUS="${AGENT_CAPSULE_CPUS:-4}"
@@ -326,32 +286,78 @@ DEFAULT_PIDS_LIMIT="${AGENT_CAPSULE_PIDS_LIMIT:-512}"
 
 SHARE_AUTH="${AGENT_CAPSULE_SHARE_AUTH:-1}"
 
-# Obsidian vault. Mounted read-write at $VAULT_DEST when --vault is given, so
-# the agent can record cross-cutting docs. Override the host path with
-# AGENT_CAPSULE_VAULT.
-VAULT_DIR="${AGENT_CAPSULE_VAULT:-$HOME/Documents/Obsidian/Docs-automated}"
+# Obsidian vault. Mounted read-write at $VAULT_DEST when --vault is given.
+VAULT_DIR="${AGENT_CAPSULE_VAULT:-}"
 VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
 
-# The built-in vault path is one author's layout, not a convention. Handing it to
-# an MCP server that reads and writes the whole tree needs a deliberate choice,
-# so mcpvault rejects the fallback (see below) rather than acting on a guess.
-VAULT_DIR_EXPLICIT=0
-[[ -n "${AGENT_CAPSULE_VAULT:-}" ]] && VAULT_DIR_EXPLICIT=1
-
-# MCP servers generated by the capsule (currently only mcpvault). Written into
-# the session home, which is bind-mounted at /home/dev, so no extra mount is
-# needed; claude is then pointed at it with --mcp-config. Codex has no such
-# file: its servers are passed as -c overrides instead (see MCP_ARGS below).
+# Claude receives capsule-generated MCP servers through a file in the session
+# home, which is bind-mounted at /home/dev, and the --mcp-config flag.
 MCP_CONFIG_BASENAME=".mcp-servers.json"
 CONTAINER_MCP_CONFIG="/home/dev/$MCP_CONFIG_BASENAME"
 
 # ----------------------------------------------------------------------------
-# Helpers
+# Agent profiles
 # ----------------------------------------------------------------------------
-usage() {
-  awk 'NR==1{next} !/^#/{exit} {sub(/^# ?/,""); print}' "$0"
+# The one place that knows agent-specific runtime behavior. Adding an agent also
+# requires one KNOWN_AGENTS entry and installing its CLI in the Dockerfile.
+KNOWN_AGENTS=(claude codex opencode)
+
+load_agent_profile() {
+  case "$1" in
+    claude)
+      AGENT_BIN=claude
+      # What --auth-login runs; claude's login is in-app.
+      AGENT_AUTH_CMD=(claude)
+      # Copied from the auth home into new session homes (minus the live
+      # credentials file). Also the probe for "has this agent been used here?".
+      AGENT_AUTH_COPY_PATHS=(".claude" ".claude.json")
+      # The one live-shared (rw bind mount) credentials file, rel to $HOME.
+      AGENT_CRED_REL=".claude/.credentials.json"
+      # Where the shared rules file is mounted, rel to /home/dev.
+      AGENT_RULES_REL=".claude/CLAUDE.md"
+      # Resolved after the project and its main Git worktree are known.
+      AGENT_MEMORY_REL="dynamic"
+      # flag: pass a generated file with --mcp-config.
+      # override: use CLI settings. env: merge invocation-scoped config.
+      AGENT_MCP_MODE="flag"
+      # API keys passed through by name only (values stay off the podman argv).
+      AGENT_ENV_PASS=(ANTHROPIC_API_KEY)
+      AGENT_AUTH_DEVICE_DEFAULT=0
+      ;;
+    codex)
+      AGENT_BIN=codex
+      AGENT_AUTH_CMD=(codex login)
+      AGENT_AUTH_COPY_PATHS=(.codex)
+      AGENT_CRED_REL=.codex/auth.json
+      AGENT_RULES_REL=.codex/AGENTS.md
+      AGENT_MEMORY_REL=""
+      AGENT_MCP_MODE="override"
+      AGENT_ENV_PASS=(OPENAI_API_KEY)
+      AGENT_AUTH_DEVICE_DEFAULT=1
+      ;;
+    opencode)
+      AGENT_BIN=opencode
+      AGENT_AUTH_CMD=(opencode auth login)
+      # Nothing is copied: the live credentials mount suffices, and copying
+      # .local/share/opencode would drag another session's transcripts along.
+      AGENT_AUTH_COPY_PATHS=()
+      AGENT_CRED_REL=".local/share/opencode/auth.json"
+      AGENT_RULES_REL=".config/opencode/AGENTS.md"
+      AGENT_MEMORY_REL=""
+      AGENT_MCP_MODE="env"
+      AGENT_ENV_PASS=(ANTHROPIC_API_KEY OPENAI_API_KEY)
+      AGENT_AUTH_DEVICE_DEFAULT=0
+      ;;
+    *)
+      echo "Unknown agent: $1 (known: ${KNOWN_AGENTS[*]})" >&2
+      exit 1
+      ;;
+  esac
 }
 
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
 sanitize_name() {
   local raw="${1:-}"
   local cleaned
@@ -365,6 +371,123 @@ require_cmd() {
     echo "$1 is not installed or not on PATH." >&2
     exit 1
   }
+}
+
+json_string_field() {
+  local json="$1"
+  local field="$2"
+  local pattern
+
+  pattern="\"$field\"[[:space:]]*:[[:space:]]*\"([^\"]+)\""
+  [[ "$json" =~ $pattern ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
+classify_version_status() {
+  local configured="${1#v}"
+  local latest="${2#v}"
+  local configured_release="${configured%%+*}"
+  local latest_release="${latest%%+*}"
+  local configured_base="${configured_release%%-*}"
+  local latest_base="${latest_release%%-*}"
+  local configured_pre=""
+  local latest_pre=""
+  local configured_major configured_minor configured_patch
+  local latest_major latest_minor latest_patch
+
+  [[ "$configured_release" == *-* ]] && configured_pre="${configured_release#*-}"
+  [[ "$latest_release" == *-* ]] && latest_pre="${latest_release#*-}"
+  IFS=. read -r configured_major configured_minor configured_patch <<< "$configured_base"
+  IFS=. read -r latest_major latest_minor latest_patch <<< "$latest_base"
+
+  if [[ ! "$configured_major" =~ ^[0-9]+$ ]] ||
+     [[ ! "$configured_minor" =~ ^[0-9]+$ ]] ||
+     [[ ! "$configured_patch" =~ ^[0-9]+$ ]] ||
+     [[ ! "$latest_major" =~ ^[0-9]+$ ]] ||
+     [[ ! "$latest_minor" =~ ^[0-9]+$ ]] ||
+     [[ ! "$latest_patch" =~ ^[0-9]+$ ]]; then
+    printf '%s' different
+    return 0
+  fi
+
+  configured_major=$((10#$configured_major))
+  configured_minor=$((10#$configured_minor))
+  configured_patch=$((10#$configured_patch))
+  latest_major=$((10#$latest_major))
+  latest_minor=$((10#$latest_minor))
+  latest_patch=$((10#$latest_patch))
+
+  if ((latest_major > configured_major)) ||
+     ((latest_major == configured_major && latest_minor > configured_minor)) ||
+     ((latest_major == configured_major && latest_minor == configured_minor &&
+       latest_patch > configured_patch)); then
+    printf '%s' available
+  elif ((latest_major < configured_major)) ||
+       ((latest_major == configured_major && latest_minor < configured_minor)) ||
+       ((latest_major == configured_major && latest_minor == configured_minor &&
+         latest_patch < configured_patch)); then
+    printf '%s' 'configured newer'
+  elif [[ -n "$configured_pre" && -z "$latest_pre" ]]; then
+    printf '%s' available
+  elif [[ -z "$configured_pre" && -n "$latest_pre" ]]; then
+    printf '%s' 'configured newer'
+  elif [[ "$configured_pre" == "$latest_pre" ]]; then
+    printf '%s' current
+  else
+    printf '%s' different
+  fi
+}
+
+print_update_status() {
+  local tool="$1"
+  local configured="$2"
+  local url="$3"
+  local field="$4"
+  local response
+  local latest
+  local status
+
+  if ! response="$(
+    curl -fsSL --connect-timeout 5 --max-time 15 \
+      -H 'Accept: application/json' \
+      -A "agent-capsule/$VERSION" \
+      "$url" 2>/dev/null
+  )" || ! latest="$(json_string_field "$response" "$field")"; then
+    printf '%-16s %-16s %-16s %s\n' "$tool" "$configured" unavailable 'lookup failed'
+    UPDATE_CHECK_FAILED=1
+    return 0
+  fi
+
+  status="$(classify_version_status "$configured" "$latest")"
+  printf '%-16s %-16s %-16s %s\n' "$tool" "$configured" "$latest" "$status"
+}
+
+check_updates() {
+  require_cmd curl
+  UPDATE_CHECK_FAILED=0
+
+  printf '%-16s %-16s %-16s %s\n' TOOL CONFIGURED LATEST STATUS
+  print_update_status claude-code "$CLAUDE_CODE_VERSION" \
+    'https://registry.npmjs.org/-/package/%40anthropic-ai%2Fclaude-code/dist-tags' latest
+  print_update_status codex "$CODEX_VERSION" \
+    'https://registry.npmjs.org/-/package/%40openai%2Fcodex/dist-tags' latest
+  print_update_status opencode "$OPENCODE_VERSION" \
+    'https://registry.npmjs.org/-/package/opencode-ai/dist-tags' latest
+  print_update_status anydoc "$ANYDOC_VERSION" \
+    'https://registry.npmjs.org/-/package/%40firecrawl%2Fanydoc/dist-tags' latest
+  print_update_status mcpvault "$MCPVAULT_VERSION" \
+    'https://registry.npmjs.org/-/package/%40bitbonsai%2Fmcpvault/dist-tags' latest
+  print_update_status skills "$SKILLS_VERSION" \
+    'https://registry.npmjs.org/-/package/skills/dist-tags' latest
+  print_update_status superpowers "$SUPERPOWERS_VERSION" \
+    'https://api.github.com/repos/obra/superpowers/releases/latest' tag_name
+  print_update_status golangci-lint "$GOLANGCI_LINT_VERSION" \
+    'https://api.github.com/repos/golangci/golangci-lint/releases/latest' tag_name
+
+  if [[ "$UPDATE_CHECK_FAILED" == "1" ]]; then
+    echo "One or more update checks failed; configured versions were not changed." >&2
+    return 1
+  fi
 }
 
 ensure_minimal_gitconfig() {
@@ -414,74 +537,117 @@ copy_path_if_present() {
   cp -a "$from_home/$rel_path" "$to_home/$rel_path"
 }
 
-session_has_claude_state() {
+session_has_agent_state() {
   local target_home="$1"
+  local rel
 
-  [[ -e "$target_home/.claude" ]] && return 0
-  [[ -e "$target_home/.claude.json" ]] && return 0
+  for rel in "${AGENT_AUTH_COPY_PATHS[@]}"; do
+    [[ -e "$target_home/$rel" ]] && return 0
+  done
 
   return 1
 }
 
-copy_claude_auth_from_auth_home() {
+copy_agent_auth_from_auth_home() {
   local auth_home="$1"
   local session_home="$2"
+  local rel
 
   [[ "$SHARE_AUTH" == "1" ]] || return 0
   [[ "$session_home" != "$auth_home" ]] || return 0
 
-  if session_has_claude_state "$session_home"; then
+  # Agents with an empty copy list rely on the live credentials mount alone.
+  [[ "${#AGENT_AUTH_COPY_PATHS[@]}" -gt 0 ]] || return 0
+
+  if session_has_agent_state "$session_home"; then
     return 0
   fi
 
-  if ! session_has_claude_state "$auth_home"; then
-    echo ">> Auth    : no shared auth found yet. Run: agent-capsule --auth-login" >&2
+  if ! session_has_agent_state "$auth_home"; then
+    echo ">> Auth    : no shared auth found yet. Run: agent-capsule --agent $AGENT --auth-login" >&2
     return 0
   fi
 
-  copy_path_if_present "$auth_home" "$session_home" ".claude"
-  copy_path_if_present "$auth_home" "$session_home" ".claude.json"
+  for rel in "${AGENT_AUTH_COPY_PATHS[@]}"; do
+    copy_path_if_present "$auth_home" "$session_home" "$rel"
+  done
 
   # Don't leave the OAuth token sprawled across every session home: the live
   # credentials are bind-mounted read-write at runtime (see SHARED_CRED_MOUNT),
   # so the copy above is redundant and would strand a stale token on disk.
-  rm -f "$session_home/.claude/.credentials.json"
+  rm -f "$session_home/$AGENT_CRED_REL"
 
-  echo ">> Auth    : copied shared Claude auth into this session"
+  echo ">> Auth    : copied shared $AGENT auth into this session"
 }
 
-session_has_codex_state() {
-  local target_home="$1"
+# A session home stays bound to the agent that created it: sharing one home
+# across agents would silently mix their state. Each agent also gets a separate
+# auth home, so login sessions never expose another agent's credentials.
+ensure_session_agent_marker() {
+  local session_home="$1"
+  local marker="$session_home/.agent"
+  local owner
 
-  [[ -e "$target_home/.codex" ]] && return 0
+  if [[ -f "$marker" ]]; then
+    owner="$(<"$marker")"
+  else
+    owner="$AGENT"
+    printf '%s\n' "$owner" > "$marker"
+  fi
 
-  return 1
+  if [[ "$owner" != "$AGENT" ]]; then
+    echo "Session '$SESSION_NAME' was created by agent '$owner'." >&2
+    echo "Rerun with --agent $owner, or pick another --session." >&2
+    exit 1
+  fi
 }
 
-copy_codex_auth_from_auth_home() {
-  local auth_home="$1"
-  local session_home="$2"
+detect_unmarked_legacy_session_home() {
+  local session_home="$1"
+  local rel
 
-  [[ "$SHARE_AUTH" == "1" ]] || return 0
-  [[ "$session_home" != "$auth_home" ]] || return 0
+  [[ -d "$session_home" && ! -e "$session_home/.agent" ]] || return 0
 
-  if session_has_codex_state "$session_home"; then
-    return 0
+  for rel in \
+    .claude \
+    .claude.json \
+    .codex \
+    .config/opencode \
+    .local/share/opencode; do
+    if [[ -e "$session_home/$rel" ]]; then
+      legacy_upgrade_required "unmarked session state $session_home/$rel"
+    fi
+  done
+}
+
+detect_legacy_state() {
+  local path
+
+  for path in \
+    "$AUTH_ROOT_DIR/.claude" \
+    "$AUTH_ROOT_DIR/.claude.json" \
+    "$AUTH_ROOT_DIR/.codex" \
+    "$AUTH_ROOT_DIR/.local/share/opencode/auth.json"; do
+    if [[ -e "$path" ]]; then
+      legacy_upgrade_required "legacy authentication state $path"
+    fi
+  done
+
+  if [[ -e "$CONFIG_DIR/AGENTS.md" ]]; then
+    legacy_upgrade_required "legacy shared rules file $CONFIG_DIR/AGENTS.md"
   fi
 
-  if ! session_has_codex_state "$auth_home"; then
-    echo ">> Auth    : no shared auth found yet. Run: agent-capsule --agent codex --auth-login" >&2
-    return 0
+  if [[ "$AUTH_LOGIN" != "1" ]]; then
+    if [[ -e "$HOME_DIR/.config/opencode/.opencode.json.capsule" ]]; then
+      legacy_upgrade_required \
+        "legacy OpenCode marker $HOME_DIR/.config/opencode/.opencode.json.capsule"
+    fi
+
+    detect_unmarked_legacy_session_home "$HOME_DIR"
+    if [[ -n "$LEGACY_DEFAULT_HOME" && "$LEGACY_DEFAULT_HOME" != "$HOME_DIR" ]]; then
+      detect_unmarked_legacy_session_home "$LEGACY_DEFAULT_HOME"
+    fi
   fi
-
-  copy_path_if_present "$auth_home" "$session_home" ".codex"
-
-  # Don't leave the OAuth token sprawled across every session home: the live
-  # token is bind-mounted read-write at runtime (see SHARED_CRED_MOUNT), so the
-  # copy above is redundant and would strand a stale token on disk.
-  rm -f "$session_home/.codex/auth.json"
-
-  echo ">> Auth    : copied shared Codex auth into this session"
 }
 
 resolve_file_path() {
@@ -509,6 +675,7 @@ resolve_file_path() {
     fi
     mkdir -p "$dir"
     touch "$path"
+    chmod 600 "$path" 2>/dev/null || true
   fi
 
   dir="$(cd "$dir" 2>/dev/null && pwd)" || {
@@ -573,10 +740,12 @@ AUTH_LOGIN=0
 KEEP_ID="${AGENT_CAPSULE_KEEPID:-0}"
 OFFLINE="${AGENT_CAPSULE_OFFLINE:-0}"
 SESSION_NAME="${AGENT_CAPSULE_SESSION:-}"
-DISABLE_SHARED_CLAUDE_MD=0
-SHARED_CLAUDE_MD_EXPLICIT=0
+DISABLE_SHARED_RULES=0
+SHARED_RULES_EXPLICIT=0
 SESSION_EXPLICIT=0
+SESSION_DEFAULTED=0
 MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
+NO_VAULT=0
 MOUNT_SPECS=()
 
 # Seeded from the config file or the environment. The first CLI --with replaces
@@ -610,13 +779,21 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       ;;
     --agent)
       [[ -n "${2:-}" ]] || {
-        echo "--agent requires a name. Known: ${KNOWN_AGENTS[*]}" >&2
+        echo "--agent requires a name (or 'list'). Known: ${KNOWN_AGENTS[*]}" >&2
         exit 1
+      }
+      [[ "$2" == "list" ]] && {
+        printf '%s\n' "${KNOWN_AGENTS[@]}"
+        exit 0
       }
       AGENT="$2"
       shift 2
       ;;
     --agent=*)
+      [[ "${1#--agent=}" == "list" ]] && {
+        printf '%s\n' "${KNOWN_AGENTS[@]}"
+        exit 0
+      }
       AGENT="${1#--agent=}"
       shift
       ;;
@@ -631,32 +808,39 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       ;;
     --session=*)
       SESSION_NAME="${1#--session=}"
+      [[ -n "$SESSION_NAME" ]] || {
+        echo "--session= requires a name." >&2
+        exit 1
+      }
       SESSION_EXPLICIT=1
       shift
       ;;
-    --shared-claude-md)
+    --shared-rules)
       [[ -n "${2:-}" ]] || {
-        echo "--shared-claude-md requires a file path." >&2
+        echo "$1 requires a file path." >&2
         exit 1
       }
-      SHARED_CLAUDE_MD="$2"
-      SHARED_CLAUDE_MD_ENABLED=1
-      SHARED_CLAUDE_MD_EXPLICIT=1
+      SHARED_RULES="$2"
+      SHARED_RULES_ENABLED=1
+      SHARED_RULES_EXPLICIT=1
       shift 2
       ;;
-    --shared-claude-md=*)
-      SHARED_CLAUDE_MD="${1#--shared-claude-md=}"
-      SHARED_CLAUDE_MD_ENABLED=1
-      SHARED_CLAUDE_MD_EXPLICIT=1
+    --shared-rules=*)
+      SHARED_RULES="${1#*=}"
+      SHARED_RULES_ENABLED=1
+      SHARED_RULES_EXPLICIT=1
       shift
       ;;
-    --no-shared-claude-md)
-      DISABLE_SHARED_CLAUDE_MD=1
+    --no-shared-rules)
+      DISABLE_SHARED_RULES=1
       shift
       ;;
-    --shared-claude-md-rw)
-      SHARED_CLAUDE_MD_READONLY=0
+    --shared-rules-rw)
+      SHARED_RULES_READONLY=0
       shift
+      ;;
+    --shared-claude-md | --shared-claude-md=* | --no-shared-claude-md | --shared-claude-md-rw)
+      legacy_upgrade_required "legacy option $1"
       ;;
     --no-shared-memory)
       SHARED_MEMORY_ENABLED=0
@@ -681,6 +865,10 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       shift 2
       ;;
     --with=*)
+      [[ -n "${1#--with=}" ]] || {
+        echo "--with= requires a tool list (or 'list'/'none'). Known: ${KNOWN_EXTRAS[*]}" >&2
+        exit 1
+      }
       [[ "${1#--with=}" == "list" ]] && {
         printf '%s\n' "${KNOWN_EXTRAS[@]}"
         exit 0
@@ -707,10 +895,12 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       # the positional PROJECT_DIR (--vault ~/code/app must keep meaning
       # "default vault, project app"). Overrides use --vault=PATH.
       MOUNT_VAULT=1
+      NO_VAULT=0
       shift
       ;;
     --no-vault)
       MOUNT_VAULT=0
+      NO_VAULT=1
       shift
       ;;
     --vault=*)
@@ -719,13 +909,34 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
         exit 1
       }
       VAULT_DIR="${1#--vault=}"
-      VAULT_DIR_EXPLICIT=1
       MOUNT_VAULT=1
+      NO_VAULT=0
       shift
       ;;
     --version)
       echo "agent-capsule $VERSION"
       exit 0
+      ;;
+    --versions)
+      cat <<VERSIONS
+agent-capsule $VERSION
+claude-code $CLAUDE_CODE_VERSION
+codex $CODEX_VERSION
+opencode $OPENCODE_VERSION
+anydoc $ANYDOC_VERSION
+mcpvault $MCPVAULT_VERSION
+skills $SKILLS_VERSION
+superpowers $SUPERPOWERS_VERSION
+golangci-lint $GOLANGCI_LINT_VERSION
+VERSIONS
+      exit 0
+      ;;
+    --check-updates)
+      if check_updates; then
+        exit 0
+      else
+        exit 1
+      fi
       ;;
     -h|--help)
       usage
@@ -744,52 +955,38 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
   esac
 done
 
-# Reject an unknown --agent before touching podman or the filesystem: every
-# later section assumes AGENT is one of KNOWN_AGENTS.
-agent_known=0
-for known_agent in "${KNOWN_AGENTS[@]}"; do
-  [[ "$AGENT" == "$known_agent" ]] && agent_known=1 && break
-done
-[[ "$agent_known" == "1" ]] || {
-  echo "Unknown agent: $AGENT (known: ${KNOWN_AGENTS[*]})" >&2
-  exit 1
-}
+load_agent_profile "$AGENT"
+AUTH_HOME_DIR="$AUTH_ROOT_DIR/$AGENT"
 
-if [[ "$DISABLE_SHARED_CLAUDE_MD" == "1" ]]; then
-  SHARED_CLAUDE_MD_ENABLED=0
+# Superpowers documents these opt-outs. Passing them by name keeps their values
+# out of the podman command line, like the provider API keys above.
+AGENT_ENV_PASS+=(
+  SUPERPOWERS_DISABLE_TELEMETRY
+  DISABLE_TELEMETRY
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+)
+
+# Per-project memory is a Claude Code mechanism; agents without an equivalent
+# get it disabled outright (the memory flags become accepted no-ops).
+if [[ -z "$AGENT_MEMORY_REL" ]]; then
+  SHARED_MEMORY_ENABLED=0
 fi
-
-# The default shared instructions file depends on the selected agent
-# (CLAUDE.md for claude, AGENTS.md for codex); an explicit --shared-claude-md
-# always wins regardless of agent, same as SHARED_CLAUDE_MD_EXPLICIT already
-# implies for the claude-only default computed above.
-if [[ "$SHARED_CLAUDE_MD_EXPLICIT" == "0" ]]; then
-  if [[ "$AGENT" == "codex" ]]; then
-    SHARED_CLAUDE_MD="${AGENT_CAPSULE_SHARED_AGENTS_MD:-$CONFIG_DIR/AGENTS.md}"
-  else
-    SHARED_CLAUDE_MD="${AGENT_CAPSULE_SHARED_CLAUDE_MD:-$CONFIG_DIR/CLAUDE.md}"
-  fi
-fi
-
-if [[ "$AGENT" == "codex" ]]; then
-  CONTAINER_SHARED_MD_PATH="/home/dev/.codex/AGENTS.md"
-  SHARED_MD_PARENT_REL=".codex"
-else
-  CONTAINER_SHARED_MD_PATH="/home/dev/.claude/CLAUDE.md"
-  SHARED_MD_PARENT_REL=".claude"
+if [[ "$DISABLE_SHARED_RULES" == "1" ]]; then
+  SHARED_RULES_ENABLED=0
 fi
 
 # --auth-login runs in its own dedicated home, so an explicit --session would
-# be silently ignored. Reject the combination instead.
+# be silently ignored. Reject the combination instead. A session coming from
+# the environment or config file is an ambient default and is fine to ignore.
 if [[ "$AUTH_LOGIN" == "1" && "$SESSION_EXPLICIT" == "1" ]]; then
   echo "--auth-login uses its own session; do not combine it with --session." >&2
   exit 1
 fi
 
-# Every codex login flow talks to OpenAI's auth servers; --offline would
-# break it before it starts.
-if [[ "$AUTH_LOGIN" == "1" && "$AGENT" == "codex" && "$OFFLINE" == "1" ]]; then
-  echo "--auth-login --agent codex cannot be combined with --offline (the login needs the network)." >&2
+# Agent login flows need the network. An auth-home shell remains useful offline
+# for inspection and repair because it does not start a login command.
+if [[ "$AUTH_LOGIN" == "1" && "$OFFLINE" == "1" && "$SHELL_MODE" != "1" ]]; then
+  echo "--auth-login cannot be combined with --offline (the login needs the network)." >&2
   exit 1
 fi
 
@@ -817,18 +1014,56 @@ fi
 # ----------------------------------------------------------------------------
 # Validate environment
 # ----------------------------------------------------------------------------
+for package_version in \
+  "$CLAUDE_CODE_VERSION" \
+  "$CODEX_VERSION" \
+  "$OPENCODE_VERSION" \
+  "$ANYDOC_VERSION" \
+  "$MCPVAULT_VERSION" \
+  "$SKILLS_VERSION"; do
+  if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    echo "Invalid pinned package version: $package_version" >&2
+    exit 1
+  fi
+done
+unset package_version
+
+for tagged_version in "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION"; do
+  if [[ ! "$tagged_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    echo "Invalid pinned tagged version: $tagged_version" >&2
+    exit 1
+  fi
+done
+unset tagged_version
+
 require_cmd podman
-require_cmd sha256sum
 require_cmd awk
 require_cmd tr
-require_cmd cut
+
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256_COMMAND=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+  # macOS provides shasum instead of GNU coreutils' sha256sum.
+  SHA256_COMMAND=(shasum -a 256)
+else
+  echo "sha256sum or shasum is required but neither is installed or on PATH." >&2
+  exit 1
+fi
+
+sha256_stream() {
+  "${SHA256_COMMAND[@]}" | awk '{print $1}'
+}
+
+sha256_file() {
+  "${SHA256_COMMAND[@]}" "$1" | awk '{print $1}'
+}
 
 # ----------------------------------------------------------------------------
-# Resolve the requested extras and the image variant they select
+# Resolve the requested runtime integrations
 # ----------------------------------------------------------------------------
 # Accept repeated flags and comma-separated lists, then rebuild the selection in
 # KNOWN_EXTRAS order so it is deduplicated and canonical: --with a,b and
-# --with b --with a --with a must resolve to the same image tag.
+# --with b --with a --with a must produce the same runtime selection.
 EXTRAS=""
 SELECT_NONE=0
 if [[ "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
@@ -836,6 +1071,11 @@ if [[ "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
 
   # `none` selects nothing, the escape hatch from a config-file default.
   for req in "${requested[@]}"; do
+    case "$req" in
+      superclaude | hunkdiff)
+        legacy_upgrade_required "legacy integration $req"
+        ;;
+    esac
     [[ "$req" == "none" ]] && SELECT_NONE=1
   done
 
@@ -873,20 +1113,38 @@ if [[ "$SELECT_NONE" == "0" && "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
   done
 fi
 
-# One image per selection, so switching --with does not rebuild over the other
-# variant. The tag carries that meaning, hence a pre-tagged override cannot work.
-if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
-  echo "AGENT_CAPSULE_IMAGE must not include a tag (got: $IMAGE_NAME);" >&2
-  echo "the tag encodes the --with selection." >&2
-  exit 1
+# Authentication uses a dedicated home without project integrations or mounts.
+if [[ "$AUTH_LOGIN" == "1" ]]; then
+  EXTRAS=""
+  SHARED_MEMORY_ENABLED=0
+  MOUNT_VAULT=0
 fi
 
-if [[ -z "$EXTRAS" ]]; then
-  IMAGE_VARIANT="base"
-else
-  IMAGE_VARIANT="$(printf '%s' "$EXTRAS" | sha256sum | cut -c1-7)"
+# Agent-specific integrations never activate under an unsupported agent. An explicit
+# --with fails loudly; a config-file default is dropped so a persistent
+# AGENT_CAPSULE_WITH does not block switching agents.
+if [[ -n "$EXTRAS" ]]; then
+  KEPT_EXTRAS=""
+  for extra in ${EXTRAS//,/ }; do
+    if extra_supported_by_agent "$extra" "$AGENT"; then
+      KEPT_EXTRAS="${KEPT_EXTRAS:+$KEPT_EXTRAS,}$extra"
+    elif [[ "$WITH_EXPLICIT" == "1" ]]; then
+      echo "Extra '$extra' is not available with --agent $AGENT." >&2
+      exit 1
+    else
+      echo ">> Extras  : dropping '$extra' (unsupported by agent $AGENT)" >&2
+    fi
+  done
+  EXTRAS="$KEPT_EXTRAS"
 fi
-IMAGE_REF="$IMAGE_NAME:$IMAGE_VARIANT"
+
+# A custom image may include its own tag. Untagged names use one stable tag for
+# every agent and runtime integration selection.
+if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
+  IMAGE_REF="$IMAGE_NAME"
+else
+  IMAGE_REF="$IMAGE_NAME:latest"
+fi
 
 # Resolve physically (-P): a repo reached via a symlink and via its real path
 # must hash to the same PROJECT_HASH, or shared per-project memory splits in two.
@@ -895,23 +1153,84 @@ RESOLVED_DIR="$(cd -P "$PROJECT_DIR" 2>/dev/null && pwd)" || {
   exit 1
 }
 PROJECT_DIR="$RESOLVED_DIR"
+CONTAINER_PROJECT_DIR="$PROJECT_DIR"
 
-PROJECT_HASH="$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-12)"
+# Git records absolute paths for linked worktrees by default. Running at the
+# host-identical path keeps new worktree metadata valid outside the container.
+# Existing linked worktrees also need their common Git directory mounted at its
+# original path because it normally lives outside the selected worktree.
+GIT_COMMON_DIR=""
+GIT_COMMON_EXTERNAL=0
+GIT_MAIN_WORKTREE=""
+GIT_COMMON_RAW=""
+
+if command -v git >/dev/null 2>&1 && git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  GIT_COMMON_RAW="$(git -C "$PROJECT_DIR" rev-parse --git-common-dir)"
+  case "$GIT_COMMON_RAW" in
+    /*) GIT_COMMON_DIR="$GIT_COMMON_RAW" ;;
+    *) GIT_COMMON_DIR="$PROJECT_DIR/$GIT_COMMON_RAW" ;;
+  esac
+  GIT_COMMON_DIR="$(cd -P "$GIT_COMMON_DIR" 2>/dev/null && pwd)" || {
+    echo "Cannot resolve the Git common directory for: $PROJECT_DIR" >&2
+    exit 1
+  }
+
+  GIT_MAIN_WORKTREE="$(
+    git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null |
+      awk '/^worktree / { sub(/^worktree /, ""); print; exit }'
+  )"
+  if [[ -n "$GIT_MAIN_WORKTREE" ]]; then
+    GIT_MAIN_WORKTREE="$(cd -P "$GIT_MAIN_WORKTREE" 2>/dev/null && pwd)" || GIT_MAIN_WORKTREE=""
+  fi
+
+  GIT_TOPLEVEL="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)" || GIT_TOPLEVEL=""
+
+  case "$GIT_COMMON_DIR" in
+    "$PROJECT_DIR" | "$PROJECT_DIR"/*) ;;
+    *)
+      # Only a worktree launched at its top level owns the external common
+      # dir. From a plain subdirectory the repository .git also resolves
+      # here, and mounting it without its worktree would present the whole
+      # repo as deleted inside the container.
+      [[ "$GIT_TOPLEVEL" == "$PROJECT_DIR" ]] && GIT_COMMON_EXTERNAL=1 ;;
+  esac
+elif [[ -f "$PROJECT_DIR/.git" ]]; then
+  echo "Cannot use linked worktree or submodule without a working host git command: $PROJECT_DIR" >&2
+  exit 1
+fi
+
+project_hash_full="$(printf '%s' "$PROJECT_DIR" | sha256_stream)"
+PROJECT_HASH="${project_hash_full:0:12}"
 PROJECT_BASENAME="$(sanitize_name "$(basename "$PROJECT_DIR")")"
 [[ -n "$PROJECT_BASENAME" ]] || PROJECT_BASENAME="project"
+LEGACY_DEFAULT_SESSION_NAME="${PROJECT_BASENAME}-${PROJECT_HASH}"
+
+MAX_SESSION_NAME_LENGTH=120
 
 if [[ "$AUTH_LOGIN" == "1" ]]; then
   SESSION_NAME="_auth"
 elif [[ -z "$SESSION_NAME" ]]; then
-  SESSION_NAME="${PROJECT_BASENAME}-${PROJECT_HASH}"
+  SESSION_DEFAULTED=1
+  SESSION_SUFFIX="-${PROJECT_HASH}"
+  # Per-agent default homes, so two agents on one project never collide.
+  # Claude keeps the unsuffixed name existing session homes already use.
+  [[ "$AGENT" != "claude" ]] && SESSION_SUFFIX="${SESSION_SUFFIX}-${AGENT}"
+  PROJECT_BASENAME="${PROJECT_BASENAME:0:$((MAX_SESSION_NAME_LENGTH - ${#SESSION_SUFFIX}))}"
+  SESSION_NAME="${PROJECT_BASENAME}${SESSION_SUFFIX}"
 fi
 
-SESSION_NAME="$(sanitize_name "$SESSION_NAME")"
-[[ -n "$SESSION_NAME" ]] || SESSION_NAME="$PROJECT_HASH"
+if [[ ! "$SESSION_NAME" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+  echo "Invalid session name. Use only letters, digits, dots, underscores, and hyphens." >&2
+  exit 1
+fi
 
-# sanitize_name strips slashes but keeps dots, so a name of "." or ".." would
-# make HOME_DIR resolve to homes/ or the whole config dir and mount every
-# sibling session, the auth home and all project memory into the container.
+if [[ "${#SESSION_NAME}" -gt "$MAX_SESSION_NAME_LENGTH" ]]; then
+  echo "Session name is too long (${#SESSION_NAME} characters; maximum $MAX_SESSION_NAME_LENGTH)." >&2
+  exit 1
+fi
+
+# A name of "." or ".." would make HOME_DIR resolve to homes/ or the whole
+# config dir and mount sibling sessions, auth state, and project memory.
 if [[ "$SESSION_NAME" == "." || "$SESSION_NAME" == ".." ]]; then
   echo "Invalid session name: '$SESSION_NAME' (resolves outside the session home)." >&2
   exit 1
@@ -923,18 +1242,40 @@ else
   HOME_DIR="$CONFIG_DIR/homes/$SESSION_NAME"
 fi
 
-# Shared memory lives outside the per-session home, keyed by project so every
-# session on the same repo converges on it. Not meaningful for --auth-login.
-PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_HASH"
-[[ "$AUTH_LOGIN" == "1" ]] && SHARED_MEMORY_ENABLED=0
+LEGACY_DEFAULT_HOME=""
+if [[ "$SESSION_DEFAULTED" == "1" && "$AGENT" != "claude" ]]; then
+  LEGACY_DEFAULT_HOME="$CONFIG_DIR/homes/$LEGACY_DEFAULT_SESSION_NAME"
+fi
 
-# This maps Claude Code's file-based memory layout; codex has no equivalent.
-[[ "$AGENT" == "codex" ]] && SHARED_MEMORY_ENABLED=0
+# Shared memory lives outside the per-session home. The default agent derives
+# its memory key from the main worktree, so linked worktrees of one repository
+# converge on the same host directory. The in-container path must follow the
+# agent's cwd instead: claude derives its projects slug from where it runs.
+PROJECT_MEMORY_KEY="$PROJECT_DIR"
+if [[ "$AGENT" == "claude" ]]; then
+  [[ -n "$GIT_MAIN_WORKTREE" ]] && PROJECT_MEMORY_KEY="$GIT_MAIN_WORKTREE"
+  project_memory_hash_full="$(printf '%s' "$PROJECT_MEMORY_KEY" | sha256_stream)"
+  PROJECT_MEMORY_HASH="${project_memory_hash_full:0:12}"
+  AGENT_MEMORY_SLUG="$(printf '%s' "$CONTAINER_PROJECT_DIR" | tr -c 'a-zA-Z0-9' '-')"
+  AGENT_MEMORY_REL=".claude/projects/$AGENT_MEMORY_SLUG/memory"
+else
+  PROJECT_MEMORY_HASH="$PROJECT_HASH"
+fi
+CONTAINER_MEMORY_PATH="/home/dev/$AGENT_MEMORY_REL"
+PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_MEMORY_HASH"
 
-# The vault is equally meaningless for --auth-login, and a config-file default
-# (AGENT_CAPSULE_MOUNT_VAULT=1) pointing at a missing path must not block
-# logging in.
-[[ "$AUTH_LOGIN" == "1" ]] && MOUNT_VAULT=0
+if [[ "$MOUNT_VAULT" == "1" ]]; then
+  if [[ -z "$VAULT_DIR" ]]; then
+    echo "No vault configured. Use --vault=PATH or set AGENT_CAPSULE_VAULT." >&2
+    exit 1
+  fi
+
+  if [[ "$VAULT_DEST" != /* || ! "$VAULT_DEST" =~ ^[A-Za-z0-9_/.-]+$ ]]; then
+    echo "Invalid vault destination: $VAULT_DEST" >&2
+    echo "It must be an absolute path of [A-Za-z0-9_/.-] characters." >&2
+    exit 1
+  fi
+fi
 
 CONTAINER_SUFFIX="${SESSION_NAME:0:48}"
 
@@ -943,35 +1284,20 @@ CONTAINER_SUFFIX="${SESSION_NAME:0:48}"
 # ----------------------------------------------------------------------------
 # The MCP server reads the vault straight off the filesystem, so it is useless
 # without the vault mount. Registering it against a missing directory would only
-# fail later, opaquely, at the first tool call. Not meaningful for --auth-login,
-# which would otherwise be blocked by a config file that selects the extra.
+# fail later, opaquely, at the first tool call.
 MCPVAULT_ENABLED=0
 
-if [[ ",$EXTRAS," == *,mcpvault,* && "$AUTH_LOGIN" != "1" ]]; then
-  if [[ "$MOUNT_VAULT" != "1" ]]; then
+# --no-vault keeps a configured integration overridable for one run.
+if [[ ",$EXTRAS," == *,mcpvault,* ]]; then
+  if [[ "$NO_VAULT" == "1" ]]; then
+    echo ">> MCP     : mcpvault disabled for this run (--no-vault)" >&2
+  elif [[ "$MOUNT_VAULT" != "1" ]]; then
     echo "--with mcpvault needs the vault mounted." >&2
     echo "Add --vault, or set AGENT_CAPSULE_MOUNT_VAULT=1 in $CONFIG_FILE." >&2
     exit 1
+  else
+    MCPVAULT_ENABLED=1
   fi
-
-  if [[ "$VAULT_DIR_EXPLICIT" != "1" ]]; then
-    echo "--with mcpvault requires an explicit vault path." >&2
-    echo "The built-in default ($VAULT_DIR) is a placeholder, and the server gets" >&2
-    echo "read-write access to whatever it points at. Name your vault instead:" >&2
-    echo "  --vault=/path/to/vault for this run" >&2
-    echo "  or AGENT_CAPSULE_VAULT=/path/to/vault in $CONFIG_FILE or the environment" >&2
-    exit 1
-  fi
-
-  # The path is interpolated into JSON (claude) or a TOML string (codex)
-  # below, so a quote or a backslash in it would emit something unparsable.
-  if [[ "$VAULT_DEST" != /* || ! "$VAULT_DEST" =~ ^[A-Za-z0-9_/.-]+$ ]]; then
-    echo "Invalid vault destination: $VAULT_DEST" >&2
-    echo "It must be an absolute path of [A-Za-z0-9_/.-] characters." >&2
-    exit 1
-  fi
-
-  MCPVAULT_ENABLED=1
 fi
 
 # ----------------------------------------------------------------------------
@@ -998,39 +1324,37 @@ SHARED_VOL_OPT="$VOL_OPT"
 # ----------------------------------------------------------------------------
 # Prepare persistent dirs
 # ----------------------------------------------------------------------------
-mkdir -p "$BUILD_DIR" "$AUTH_HOME_DIR" "$HOME_DIR"
-chmod 700 "$CONFIG_DIR" "$AUTH_HOME_DIR" "$HOME_DIR" 2>/dev/null || true
+detect_legacy_state
+
+mkdir -p "$BUILD_DIR" "$AUTH_ROOT_DIR" "$AUTH_HOME_DIR" "$HOME_DIR"
+chmod 700 "$CONFIG_DIR" "$AUTH_ROOT_DIR" "$AUTH_HOME_DIR" "$HOME_DIR" 2>/dev/null || true
+
+[[ "$AUTH_LOGIN" == "1" ]] || ensure_session_agent_marker "$HOME_DIR"
 
 ensure_minimal_gitconfig "$HOME_DIR"
 
-case "$AGENT" in
-  codex) copy_codex_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR" ;;
-  *) copy_claude_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR" ;;
-esac
+copy_agent_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR"
 
-# Prepare the shared instructions file's parent (.claude or .codex) so the
-# nested CLAUDE.md/AGENTS.md mount has a target.
-if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
-  mkdir -p "$HOME_DIR/$SHARED_MD_PARENT_REL"
-  RESOLVED_SHARED_CLAUDE_MD="$(resolve_file_path "$SHARED_CLAUDE_MD" "$SHARED_CLAUDE_MD_EXPLICIT")"
-  chmod 600 "$RESOLVED_SHARED_CLAUDE_MD" 2>/dev/null || true
+# Prepare the rules mount's target parent inside the session home.
+if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then
+  mkdir -p "$HOME_DIR/$(dirname "$AGENT_RULES_REL")"
+  RESOLVED_SHARED_RULES="$(resolve_file_path "$SHARED_RULES" "$SHARED_RULES_EXPLICIT")"
 fi
 
 # Prepare the shared memory dir and its in-container parent. Creating the parent
 # host-side (rather than letting podman auto-create the mountpoint as root) keeps
-# ownership correct under --keep-id, same as the shared instructions file above.
-# Claude only (see SHARED_MEMORY_ENABLED forcing above).
+# ownership correct under --keep-id, same as the rules parent above.
 if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
   mkdir -p "$PROJECT_MEMORY_DIR"
   chmod 700 "$PROJECT_MEMORY_DIR" 2>/dev/null || true
-  mkdir -p "$HOME_DIR/.claude/projects/-workspace"
+  mkdir -p "$HOME_DIR/$(dirname "$AGENT_MEMORY_REL")"
 fi
 
 # Rewritten on every run: the vault destination can change between invocations.
-# Claude only: codex gets the same server through MCP_ARGS -c overrides below,
-# with no file to write (see the "Command" section).
-if [[ "$MCPVAULT_ENABLED" == "1" && "$AGENT" != "codex" ]]; then
-  cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
+if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+  case "$AGENT_MCP_MODE" in
+    flag)
+      cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
 {
   "mcpServers": {
     "obsidian": {
@@ -1040,67 +1364,132 @@ if [[ "$MCPVAULT_ENABLED" == "1" && "$AGENT" != "codex" ]]; then
   }
 }
 MCPCONFIG
+      ;;
+    env | override) ;;
+  esac
 fi
 
-# ----------------------------------------------------------------------------
-# Write build context
-# ----------------------------------------------------------------------------
 DOCKERFILE_SRC="$(resolve_dockerfile)"
-cp -f "$DOCKERFILE_SRC" "$BUILD_DIR/Dockerfile"
+DOCKERFILE_HASH="$(sha256_file "$DOCKERFILE_SRC")"
 
 # ----------------------------------------------------------------------------
 # Build image if needed
 # ----------------------------------------------------------------------------
-# Fold the injected build args into the hash: the tags and the extras are not
-# baked into the Dockerfile, so changing them must still trigger a rebuild.
-HASH="$(printf '%s\n%s\n%s\n%s\n' "$NODE_TAG" "$GO_TAG" "$EXTRAS" \
-  "$(sha256sum "$BUILD_DIR/Dockerfile" | cut -d' ' -f1)" | sha256sum | cut -d' ' -f1)"
-# One hash file per image variant, so the variants track their own freshness.
-HASH_FILE="$BUILD_DIR/.last_build_hash-$IMAGE_VARIANT"
+# Agent and integration choices are runtime-only, so they do not participate in
+# image freshness. Only inputs that change image contents belong in this hash.
+HASH="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+  "$NODE_TAG" "$GO_TAG" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
+  "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
+  "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" \
+  "$DOCKERFILE_HASH" | sha256_stream)"
+BUILD_CONTEXT_DIR="$BUILD_DIR/contexts/$HASH"
 NEED_BUILD=0
 
 [[ "$FORCE_BUILD" == "1" ]] && NEED_BUILD=1
-podman image exists "$IMAGE_REF" || NEED_BUILD=1
-[[ -f "$HASH_FILE" && "$(cat "$HASH_FILE" 2>/dev/null)" == "$HASH" ]] || NEED_BUILD=1
+IMAGE_BUNDLE_HASH="$(
+  podman image inspect --format '{{ index .Labels "io.agent-capsule.bundle" }}' \
+    "$IMAGE_REF" 2>/dev/null || true
+)"
+[[ "$IMAGE_BUNDLE_HASH" == "$HASH" ]] || NEED_BUILD=1
 
 if [[ "$NEED_BUILD" == "1" ]]; then
-  echo ">> Building $IMAGE_REF..."
-  podman build \
-    --build-arg "NODE_TAG=$NODE_TAG" \
-    --build-arg "GO_TAG=$GO_TAG" \
-    --build-arg "EXTRAS=$EXTRAS" \
-    -t "$IMAGE_REF" "$BUILD_DIR"
-  echo "$HASH" > "$HASH_FILE"
+  LOCK_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-capsule-$UID"
+  mkdir -p "$LOCK_ROOT"
+  chmod 700 "$LOCK_ROOT"
+  BUILD_LOCK_KEY="$(printf '%s' "$IMAGE_REF" | sha256_stream)"
+  BUILD_LOCK_DIR="$LOCK_ROOT/image-$BUILD_LOCK_KEY.lock"
+  acquire_lock "$BUILD_LOCK_DIR"
+  IMAGE_BUNDLE_HASH="$(
+    podman image inspect --format '{{ index .Labels "io.agent-capsule.bundle" }}' \
+      "$IMAGE_REF" 2>/dev/null || true
+  )"
+  if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
+    mkdir -p "$BUILD_CONTEXT_DIR"
+    cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
+    if [[ "$(sha256_file "$BUILD_CONTEXT_DIR/Dockerfile")" != "$DOCKERFILE_HASH" ]]; then
+      echo "Dockerfile changed while preparing the image; retry the launch." >&2
+      exit 1
+    fi
+    echo ">> Building $IMAGE_REF..."
+    BUILD_REFRESH_ARGS=()
+    [[ "$FORCE_BUILD" == "1" ]] && BUILD_REFRESH_ARGS=(--pull=always --no-cache)
+    podman build \
+      "${BUILD_REFRESH_ARGS[@]}" \
+      --build-arg "NODE_TAG=$NODE_TAG" \
+      --build-arg "GO_TAG=$GO_TAG" \
+      --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
+      --build-arg "CODEX_VERSION=$CODEX_VERSION" \
+      --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
+      --build-arg "ANYDOC_VERSION=$ANYDOC_VERSION" \
+      --build-arg "MCPVAULT_VERSION=$MCPVAULT_VERSION" \
+      --build-arg "SKILLS_VERSION=$SKILLS_VERSION" \
+      --build-arg "SUPERPOWERS_VERSION=$SUPERPOWERS_VERSION" \
+      --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
+      --label "io.agent-capsule.bundle=$HASH" \
+      -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
+  fi
+  release_lock "$BUILD_LOCK_DIR"
 fi
 
 # ----------------------------------------------------------------------------
 # Command
 # ----------------------------------------------------------------------------
-# Not --strict-mcp-config for claude: a project's own .mcp.json must keep
-# working alongside the servers the capsule generates. Codex has no such
-# concept; its config.toml keeps working alongside the -c overrides below.
+# Not --strict-mcp-config: a project's own .mcp.json must keep working alongside
+# the servers the capsule generates.
 MCP_ARGS=()
 if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
-  if [[ "$AGENT" == "codex" ]]; then
-    MCP_ARGS=(
-      -c "mcp_servers.obsidian.command=\"mcpvault\""
-      -c "mcp_servers.obsidian.args=[\"$VAULT_DEST\"]"
-    )
-  else
-    MCP_ARGS=(--mcp-config "$CONTAINER_MCP_CONFIG")
+  case "$AGENT_MCP_MODE" in
+    flag) MCP_ARGS=(--mcp-config "$CONTAINER_MCP_CONFIG") ;;
+    override)
+      MCP_ARGS=(
+        -c "mcp_servers.obsidian.command=\"mcpvault\""
+        -c "mcp_servers.obsidian.args=[\"$VAULT_DEST\"]"
+      )
+      ;;
+  esac
+fi
+
+INTEGRATION_ARGS=()
+if [[ "$AGENT" == "claude" ]]; then
+  if [[ ",$EXTRAS," == *,superpowers,* ]]; then
+    INTEGRATION_ARGS+=(--plugin-dir /opt/superpowers/source)
+  fi
+  if [[ ",$EXTRAS," == *,anydoc,* ]]; then
+    INTEGRATION_ARGS+=(--plugin-dir /opt/anydoc/plugin)
   fi
 fi
 
-RUN_CMD=("$AGENT" "${MCP_ARGS[@]}" "${AGENT_ARGS[@]}")
-# codex authenticates through a subcommand, not interactively like claude.
-# Argless, use the device-code flow (the browser flow is not supported in the
-# capsule; see "Shared auth" in the header). Explicit agent args replace the
-# default verbatim, e.g. `-- --with-api-key` for a key-based login.
-if [[ "$AUTH_LOGIN" == "1" && "$AGENT" == "codex" ]]; then
-  if [[ "${#AGENT_ARGS[@]}" -eq 0 ]]; then
-    RUN_CMD=(codex login --device-auth)
+# OpenCode merges inline configuration over its normal global and project
+# files. This keeps capsule additions per invocation and leaves user files
+# untouched. A local package path keeps Superpowers available offline.
+OPENCODE_RUNTIME_CONFIG=""
+if [[ "$AGENT" == "opencode" ]]; then
+  OPENCODE_CONFIG_ITEMS=()
+  if [[ ",$EXTRAS," == *,superpowers,* ]]; then
+    OPENCODE_CONFIG_ITEMS+=('"plugin":["/opt/superpowers/source"]')
+  fi
+  if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+    OPENCODE_CONFIG_ITEMS+=(
+      "\"mcp\":{\"obsidian\":{\"type\":\"local\",\"command\":[\"mcpvault\",\"$VAULT_DEST\"]}}"
+    )
+  fi
+
+  if [[ "${#OPENCODE_CONFIG_ITEMS[@]}" -gt 0 ]]; then
+    OPENCODE_RUNTIME_CONFIG="{"
+    for item in "${OPENCODE_CONFIG_ITEMS[@]}"; do
+      [[ "$OPENCODE_RUNTIME_CONFIG" == "{" ]] || OPENCODE_RUNTIME_CONFIG+=","
+      OPENCODE_RUNTIME_CONFIG+="$item"
+    done
+    OPENCODE_RUNTIME_CONFIG+="}"
+  fi
+fi
+
+RUN_CMD=("$AGENT_BIN" "${INTEGRATION_ARGS[@]}" "${MCP_ARGS[@]}" "${AGENT_ARGS[@]}")
+if [[ "$AUTH_LOGIN" == "1" ]]; then
+  if [[ "$AGENT_AUTH_DEVICE_DEFAULT" == "1" && "${#AGENT_ARGS[@]}" -eq 0 ]]; then
+    RUN_CMD=("${AGENT_AUTH_CMD[@]}" --device-auth)
   else
-    RUN_CMD=(codex login "${AGENT_ARGS[@]}")
+    RUN_CMD=("${AGENT_AUTH_CMD[@]}" "${AGENT_ARGS[@]}")
   fi
 fi
 [[ "$SHELL_MODE" == "1" ]] && RUN_CMD=(bash)
@@ -1110,12 +1499,19 @@ fi
 # ----------------------------------------------------------------------------
 EXTRA=()
 
-# Do not place the secret value directly in the podman command line. Only the
-# selected agent's key is forwarded (least exposure).
-if [[ "$AGENT" == "codex" ]]; then
-  [[ -n "${OPENAI_API_KEY:-}" ]] && EXTRA+=(-e OPENAI_API_KEY)
-else
-  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && EXTRA+=(-e ANTHROPIC_API_KEY)
+# The entrypoint activates only the integrations selected for this invocation.
+EXTRA+=(-e "AGENT_CAPSULE_AGENT=$AGENT")
+EXTRA+=(-e "AGENT_CAPSULE_WITH=$EXTRAS")
+
+# Do not place the secret values directly in the podman command line.
+for key in "${AGENT_ENV_PASS[@]}"; do
+  if [[ -n "${!key:-}" ]]; then
+    EXTRA+=(-e "$key")
+  fi
+done
+
+if [[ -n "$OPENCODE_RUNTIME_CONFIG" ]]; then
+  EXTRA+=(-e "OPENCODE_CONFIG_CONTENT=$OPENCODE_RUNTIME_CONFIG")
 fi
 
 # Herdr wrapper hint. The host foreground process is podman, while the agent
@@ -1142,10 +1538,23 @@ for spec in "${MOUNT_SPECS[@]}"; do
 
   dest="$rest"
 
-  resolved="$(cd -P "$src" 2>/dev/null && pwd)" || {
+  if [[ -d "$src" ]]; then
+    resolved="$(cd -P "$src" 2>/dev/null && pwd)" || {
+      echo "Mount source not found: $src" >&2
+      exit 1
+    }
+  elif [[ -e "$src" ]]; then
+    src_dir="$(dirname "$src")"
+    src_base="$(basename "$src")"
+    resolved_dir="$(cd -P "$src_dir" 2>/dev/null && pwd)" || {
+      echo "Mount source not found: $src" >&2
+      exit 1
+    }
+    resolved="$resolved_dir/$src_base"
+  else
     echo "Mount source not found: $src" >&2
     exit 1
-  }
+  fi
   src="$resolved"
 
   if [[ -z "$dest" ]]; then
@@ -1169,6 +1578,19 @@ for spec in "${MOUNT_SPECS[@]}"; do
   fi
 done
 
+# Keep the working directory identical to its host path so Git worktree
+# metadata remains portable across the bind boundary. /workspace remains as a
+# compatibility alias for existing scripts and prompts.
+PROJECT_MOUNTS=(-v "$PROJECT_DIR:$CONTAINER_PROJECT_DIR$SHARED_VOL_OPT")
+if [[ "$CONTAINER_PROJECT_DIR" != "/workspace" ]]; then
+  PROJECT_MOUNTS+=(-v "$PROJECT_DIR:/workspace$SHARED_VOL_OPT")
+fi
+
+GIT_COMMON_MOUNT=()
+if [[ "$GIT_COMMON_EXTERNAL" == "1" ]]; then
+  GIT_COMMON_MOUNT=(-v "$GIT_COMMON_DIR:$GIT_COMMON_DIR$SHARED_VOL_OPT")
+fi
+
 # ----------------------------------------------------------------------------
 # Obsidian vault mount (--vault)
 # ----------------------------------------------------------------------------
@@ -1186,19 +1608,19 @@ if [[ "$MOUNT_VAULT" == "1" ]]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Shared global instructions file mount (CLAUDE.md or AGENTS.md)
+# Shared global rules file mount
 # ----------------------------------------------------------------------------
-SHARED_CLAUDE_MD_MOUNT=()
+SHARED_RULES_MOUNT=()
 
-if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
-  memory_opts="${SHARED_VOL_OPT#:}"
+if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then
+  rules_opts="${SHARED_VOL_OPT#:}"
 
-  if [[ "$SHARED_CLAUDE_MD_READONLY" == "1" ]]; then
-    memory_opts="${memory_opts:+$memory_opts,}ro"
+  if [[ "$SHARED_RULES_READONLY" == "1" ]]; then
+    rules_opts="${rules_opts:+$rules_opts,}ro"
   fi
 
-  SHARED_CLAUDE_MD_MOUNT+=(
-    -v "$RESOLVED_SHARED_CLAUDE_MD:$CONTAINER_SHARED_MD_PATH${memory_opts:+:$memory_opts}"
+  SHARED_RULES_MOUNT+=(
+    -v "$RESOLVED_SHARED_RULES:/home/dev/$AGENT_RULES_REL${rules_opts:+:$rules_opts}"
   )
 fi
 
@@ -1225,39 +1647,23 @@ fi
 # Bind-mount the ONE shared OAuth token (rw) into this session so a single
 # `--auth-login` serves every session and in-container token refreshes write
 # straight back to the shared file. Everything else in /home/dev stays isolated.
-# Per agent: claude's .credentials.json is never mounted into a codex session,
-# nor codex's auth.json into a claude session.
-#
-# Version-fragile: this single-file mount only works because both CLIs rewrite
-# their credentials file in place (codex: OpenOptions truncate+write in
-# codex-rs/login). A switch to atomic rename-over would fail on the bind mount.
-#
 # Concurrency note: two sessions refreshing at the exact same instant race on
 # this file (last-writer-wins). If the refresh rotates the refresh token, one
 # session may need to refresh again. Acceptable for the herdr workflow; no lock.
 SHARED_CRED_MOUNT=()
-
-if [[ "$AGENT" == "codex" ]]; then
-  AUTH_CRED_FILE="$AUTH_HOME_DIR/.codex/auth.json"
-  CONTAINER_CRED_FILE="/home/dev/.codex/auth.json"
-  CRED_PARENT_REL=".codex"
-  CRED_LOGIN_HINT="agent-capsule --agent codex --auth-login"
-else
-  AUTH_CRED_FILE="$AUTH_HOME_DIR/.claude/.credentials.json"
-  CONTAINER_CRED_FILE="/home/dev/.claude/.credentials.json"
-  CRED_PARENT_REL=".claude"
-  CRED_LOGIN_HINT="agent-capsule --auth-login"
-fi
+AUTH_CRED_FILE="$AUTH_HOME_DIR/$AGENT_CRED_REL"
+CONTAINER_CRED_PATH="/home/dev/$AGENT_CRED_REL"
 
 if [[ "$SHARE_AUTH" == "1" && "$AUTH_LOGIN" != "1" ]]; then
   if [[ -s "$AUTH_CRED_FILE" ]]; then
-    mkdir -p "$HOME_DIR/$CRED_PARENT_REL"  # target parent must exist for the mount
+    # The target parent must exist for the mount.
+    mkdir -p "$HOME_DIR/$(dirname "$AGENT_CRED_REL")"
     cred_opts="${SHARED_VOL_OPT#:}"
     SHARED_CRED_MOUNT+=(
-      -v "$AUTH_CRED_FILE:$CONTAINER_CRED_FILE${cred_opts:+:$cred_opts}"
+      -v "$AUTH_CRED_FILE:$CONTAINER_CRED_PATH${cred_opts:+:$cred_opts}"
     )
   else
-    echo ">> Auth    : no shared credentials yet. Run: $CRED_LOGIN_HINT" >&2
+    echo ">> Auth    : no shared credentials yet. Run: agent-capsule --agent $AGENT --auth-login" >&2
   fi
 fi
 
@@ -1299,12 +1705,15 @@ TTY_ARGS=(-i)
 # Run
 # ----------------------------------------------------------------------------
 [[ "$CONFIG_FILE_LOADED" == "1" ]] && echo ">> Config  : $CONFIG_FILE"
-echo ">> Project : $PROJECT_DIR  ->  /workspace"
+echo ">> Project : $PROJECT_DIR (working directory; also available at /workspace)"
+if [[ "$GIT_COMMON_EXTERNAL" == "1" ]]; then
+  echo ">> Git     : $GIT_COMMON_DIR (linked-worktree metadata)"
+fi
 echo ">> Session : $SESSION_NAME"
 echo ">> State   : $HOME_DIR"
 echo ">> Auth    : $AUTH_HOME_DIR"
 if [[ "${#SHARED_CRED_MOUNT[@]}" -gt 0 ]]; then
-  echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_FILE (shared, read-write)"
+  echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_PATH (shared, read-write)"
 fi
 # HERDR_AGENT can be pinned by the wrapper; when it diverges from --agent,
 # show both rather than misreport what actually runs.
@@ -1315,23 +1724,26 @@ else
 fi
 
 if [[ -n "$EXTRAS" ]]; then
-  echo ">> Extras  : ${EXTRAS//,/, } ($IMAGE_REF)"
+  echo ">> Extras  : ${EXTRAS//,/, }"
 else
-  echo ">> Extras  : none ($IMAGE_REF)"
+  echo ">> Extras  : none"
 fi
+echo ">> Image   : $IMAGE_REF"
 
-if [[ "$SHARED_CLAUDE_MD_ENABLED" == "1" ]]; then
+if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then
   md_mode="read-write"
-  [[ "$SHARED_CLAUDE_MD_READONLY" == "1" ]] && md_mode="read-only"
-  echo ">> Memory  : $RESOLVED_SHARED_CLAUDE_MD -> $CONTAINER_SHARED_MD_PATH ($md_mode)"
+  [[ "$SHARED_RULES_READONLY" == "1" ]] && md_mode="read-only"
+  echo ">> Rules   : $RESOLVED_SHARED_RULES -> /home/dev/$AGENT_RULES_REL ($md_mode)"
 else
-  echo ">> Memory  : disabled"
+  echo ">> Rules   : disabled"
 fi
 
 if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
   mem_mode="read-write"
   [[ "$SHARED_MEMORY_READONLY" == "1" ]] && mem_mode="read-only"
   echo ">> ProjMem : $PROJECT_MEMORY_DIR -> $CONTAINER_MEMORY_PATH (shared per-project, $mem_mode)"
+elif [[ -z "$AGENT_MEMORY_REL" && "$AUTH_LOGIN" != "1" ]]; then
+  echo ">> ProjMem : not supported by $AGENT"
 fi
 
 if [[ "$MOUNT_VAULT" == "1" ]]; then
@@ -1339,16 +1751,24 @@ if [[ "$MOUNT_VAULT" == "1" ]]; then
 fi
 
 if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
-  if [[ "$SHELL_MODE" == "1" ]]; then
-    if [[ "$AGENT" == "codex" ]]; then
-      # Single-quote the -c overrides so the printed command survives a
-      # copy-paste: the TOML quoting inside must reach codex verbatim.
+  if [[ "$AGENT_MCP_MODE" == "flag" ]]; then
+    if [[ "$SHELL_MODE" == "1" ]]; then
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: $AGENT_BIN --mcp-config $CONTAINER_MCP_CONFIG)"
+    else
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian')"
+    fi
+  elif [[ "$AGENT_MCP_MODE" == "override" ]]; then
+    if [[ "$SHELL_MODE" == "1" ]]; then
       echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: codex -c 'mcp_servers.obsidian.command=\"mcpvault\"' -c 'mcp_servers.obsidian.args=[\"$VAULT_DEST\"]')"
     else
-      echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: claude --mcp-config $CONTAINER_MCP_CONFIG)"
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian', configuration overrides)"
     fi
   else
-    echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian')"
+    if [[ "$SHELL_MODE" == "1" ]]; then
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (runtime config; start it with: $AGENT_BIN)"
+    else
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian', runtime config)"
+    fi
   fi
 fi
 
@@ -1373,12 +1793,13 @@ exec podman run "${TTY_ARGS[@]}" --rm --init \
   --label "ai.session=$SESSION_NAME" \
   -e TERM="${TERM:-xterm-256color}" \
   "${EXTRA[@]}" \
-  -v "$PROJECT_DIR:/workspace$SHARED_VOL_OPT" \
   -v "$HOME_DIR:/home/dev$VOL_OPT" \
-  "${SHARED_CLAUDE_MD_MOUNT[@]}" \
+  "${PROJECT_MOUNTS[@]}" \
+  "${GIT_COMMON_MOUNT[@]}" \
+  "${SHARED_RULES_MOUNT[@]}" \
   "${SHARED_MEMORY_MOUNT[@]}" \
   "${SHARED_CRED_MOUNT[@]}" \
   "${VAULT_MOUNT[@]}" \
   "${MOUNT_ARGS[@]}" \
-  -w /workspace \
+  -w "$CONTAINER_PROJECT_DIR" \
   "$IMAGE_REF" "${RUN_CMD[@]}"
