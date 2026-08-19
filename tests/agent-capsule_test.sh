@@ -136,6 +136,19 @@ run_capsule() {
 }
 
 new_case
+for agent_and_skills_dir in \
+  'claude|/home/dev/.claude/skills' \
+  'codex|/home/dev/.codex/skills' \
+  'opencode|/home/dev/.config/opencode/skills'; do
+  IFS='|' read -r agent skills_dir <<<"$agent_and_skills_dir"
+  run_capsule --agent "$agent" --with explain-diff --shell \
+    --session "explain-diff-$agent" "$ROOT_DIR"
+  assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WITH=explain-diff'
+  assert_contains "$PODMAN_LOG" "ARG=AGENT_CAPSULE_SKILLS_DIR=$skills_dir"
+  : > "$PODMAN_LOG"
+done
+
+new_case
 rules_file="$CASE_DIR/rules.md"
 touch "$rules_file"
 chmod 0644 "$rules_file"

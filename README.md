@@ -162,6 +162,7 @@ agent-capsule --shell .             # a shell inside the capsule instead of the 
 agent-capsule --agent opencode .    # run opencode instead of Claude Code
 agent-capsule --session fix-auth ~/code/myapp   # named session for parallel agents
 agent-capsule --with superpowers .              # activate bundled development skills
+agent-capsule --with explain-diff .             # explain a change as interactive HTML
 agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
 agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
 agent-capsule --agent codex --auth-login        # once: log in to Codex instead
@@ -184,6 +185,11 @@ agent that created it.
 The `superpowers` integration activates the bundled
 [Superpowers](https://github.com/obra/superpowers) checkout through each agent's
 plugin mechanism. It does not need network access to load after the image is built.
+
+The `explain-diff` integration activates Geoffrey Litt's
+[HTML diff explanation skill](https://gist.github.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524)
+for Claude Code, Codex, and OpenCode. The skill writes a self-contained interactive
+HTML explanation to `/tmp`.
 
 The launcher forwards `SUPERPOWERS_DISABLE_TELEMETRY`, `DISABLE_TELEMETRY`, and
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` when those variables are set on the host.
@@ -212,7 +218,7 @@ overrides.
 | `--auth-login`                                   | authenticate the selected agent in its isolated auth home                          |
 | `--agent NAME`                                   | pick the agent (`claude` default, `codex`, `opencode`); `list` prints them         |
 | `--session NAME`                                 | named per-session home, for parallel agents on one repo                            |
-| `--with TOOL[,TOOL]`                             | activate bundled integrations (`superpowers`, `mcpvault`, `anydoc`); `list`, `none` |
+| `--with TOOL[,TOOL]`                             | activate bundled integrations (`superpowers`, `explain-diff`, `mcpvault`, `anydoc`); `list`, `none` |
 | `--mount SRC[:DEST][:ro]`                        | extra file or directory bind mounts (repeatable)                                   |
 | `--vault[=PATH]`                                 | mount a configured vault read-write; `=PATH` picks it for one run                    |
 | `--no-vault`                                     | skip the vault (and mcpvault) for one run, overriding the config file              |

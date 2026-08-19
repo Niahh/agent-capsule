@@ -236,12 +236,12 @@ unset legacy_variable
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
 NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
-CLAUDE_CODE_VERSION="${AGENT_CAPSULE_CLAUDE_CODE_VERSION:-2.1.234}"
-CODEX_VERSION="${AGENT_CAPSULE_CODEX_VERSION:-0.147.0}"
+CLAUDE_CODE_VERSION="${AGENT_CAPSULE_CLAUDE_CODE_VERSION:-2.1.235}"
+CODEX_VERSION="${AGENT_CAPSULE_CODEX_VERSION:-0.148.0}"
 OPENCODE_VERSION="${AGENT_CAPSULE_OPENCODE_VERSION:-1.18.18}"
 ANYDOC_VERSION="${AGENT_CAPSULE_ANYDOC_VERSION:-0.1.9}"
 MCPVAULT_VERSION="${AGENT_CAPSULE_MCPVAULT_VERSION:-0.16.0}"
-SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-1.5.22}"
+SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-1.5.23}"
 SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-v6.3.0}"
 GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-v2.12.2}"
 
@@ -251,7 +251,7 @@ AGENT="${AGENT_CAPSULE_AGENT:-claude}"
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
-KNOWN_EXTRAS=(anydoc mcpvault superpowers)
+KNOWN_EXTRAS=(anydoc explain-diff mcpvault superpowers)
 
 # Some extras ship files for ~/.claude and are useless to other agents.
 extra_supported_by_agent() { # $1=extra $2=agent
@@ -315,6 +315,7 @@ load_agent_profile() {
       AGENT_CRED_REL=".claude/.credentials.json"
       # Where the shared rules file is mounted, rel to /home/dev.
       AGENT_RULES_REL=".claude/CLAUDE.md"
+      AGENT_SKILLS_REL=".claude/skills"
       # Resolved after the project and its main Git worktree are known.
       AGENT_MEMORY_REL="dynamic"
       # flag: pass a generated file with --mcp-config.
@@ -330,6 +331,7 @@ load_agent_profile() {
       AGENT_AUTH_COPY_PATHS=(.codex)
       AGENT_CRED_REL=.codex/auth.json
       AGENT_RULES_REL=.codex/AGENTS.md
+      AGENT_SKILLS_REL=.codex/skills
       AGENT_MEMORY_REL=""
       AGENT_MCP_MODE="override"
       AGENT_ENV_PASS=(OPENAI_API_KEY)
@@ -343,6 +345,7 @@ load_agent_profile() {
       AGENT_AUTH_COPY_PATHS=()
       AGENT_CRED_REL=".local/share/opencode/auth.json"
       AGENT_RULES_REL=".config/opencode/AGENTS.md"
+      AGENT_SKILLS_REL=".config/opencode/skills"
       AGENT_MEMORY_REL=""
       AGENT_MCP_MODE="env"
       AGENT_ENV_PASS=(ANTHROPIC_API_KEY OPENAI_API_KEY)
@@ -1502,6 +1505,7 @@ EXTRA=()
 # The entrypoint activates only the integrations selected for this invocation.
 EXTRA+=(-e "AGENT_CAPSULE_AGENT=$AGENT")
 EXTRA+=(-e "AGENT_CAPSULE_WITH=$EXTRAS")
+EXTRA+=(-e "AGENT_CAPSULE_SKILLS_DIR=/home/dev/$AGENT_SKILLS_REL")
 
 # Do not place the secret values directly in the podman command line.
 for key in "${AGENT_ENV_PASS[@]}"; do

@@ -45,6 +45,12 @@ RUN npm install -g \
       "opencode-ai@$OPENCODE_VERSION" \
     && npm cache clean --force
 
+# Keep the upstream skill content pinned so image rebuilds are reproducible.
+RUN mkdir -p /opt/explain-diff-html \
+    && curl -sSfL \
+      https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/e4982a26bc8975dd45eeb96ad8c68f2f25fc42c7/explain-diff-html.md \
+      -o /opt/explain-diff-html/SKILL.md
+
 # Install golangci-lint from the official prebuilt binary (the project advises
 # against `go install`). Land it in /usr/local/bin, not $GOPATH/bin: /home/dev is
 # bind-mounted at runtime and would mask /home/dev/go/bin. Pin install.sh to the
@@ -82,6 +88,25 @@ RUN npm install -g \
 RUN printf '%s\n' \
       '#!/usr/bin/env bash' \
       'set -e' \
+      'skills_dir="${AGENT_CAPSULE_SKILLS_DIR:-}"' \
+      'if [[ -n "$skills_dir" ]]; then' \
+      '  skill="$skills_dir/explain-diff-html"' \
+      '  marker="$skills_dir/.explain-diff-html-capsule-managed"' \
+      '  case ",${AGENT_CAPSULE_WITH:-}," in' \
+      '    *,explain-diff,*)' \
+      '      mkdir -p "$skills_dir"' \
+      '      if [[ ( -e "$skill" || -L "$skill" ) && ! -e "$marker" ]]; then' \
+      '        echo "explain-diff-html already exists and is not capsule-managed: $skill" >&2' \
+      '        exit 1' \
+      '      fi' \
+      '      ln -sfn /opt/explain-diff-html "$skill"' \
+      '      touch "$marker" ;;' \
+      '    *)' \
+      '      if [[ -e "$marker" ]]; then' \
+      '        rm -f "$skill" "$marker"' \
+      '      fi ;;' \
+      '  esac' \
+      'fi' \
       'if [[ "${AGENT_CAPSULE_AGENT:-}" == codex ]]; then' \
       '      codex_home="${CODEX_HOME:-${HOME:-/home/dev}/.codex}"' \
       '      marker="$codex_home/.superpowers-capsule-managed"' \
