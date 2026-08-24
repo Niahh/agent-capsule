@@ -1,15 +1,19 @@
 # Base image tags are injected by agent-capsule via --build-arg
 # (defaults mirror AGENT_CAPSULE_NODE_TAG / AGENT_CAPSULE_GO_TAG).
-ARG NODE_TAG=26-trixie-slim
-ARG GO_TAG=1.26.4-trixie
-ARG GOLANGCI_LINT_VERSION=v2.12.2
-ARG SUPERPOWERS_VERSION=v6.3.0
-ARG CLAUDE_CODE_VERSION=2.1.234
-ARG CODEX_VERSION=0.147.0
-ARG OPENCODE_VERSION=1.18.18
-ARG ANYDOC_VERSION=0.1.9
-ARG MCPVAULT_VERSION=0.16.0
-ARG SKILLS_VERSION=1.5.22
+ARG NODE_TAG=trixie-slim
+ARG GO_TAG=trixie
+
+# Tool versions are empty by default, which means latest at build time.
+# agent-capsule passes a value only when AGENT_CAPSULE_*_VERSION pins one, so
+# there is no second set of defaults here to drift out of step with the script.
+ARG GOLANGCI_LINT_VERSION=""
+ARG SUPERPOWERS_VERSION=""
+ARG CLAUDE_CODE_VERSION=""
+ARG CODEX_VERSION=""
+ARG OPENCODE_VERSION=""
+ARG ANYDOC_VERSION=""
+ARG MCPVAULT_VERSION=""
+ARG SKILLS_VERSION=""
 
 FROM golang:${GO_TAG} AS go-toolchain
 
@@ -38,47 +42,82 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Agent selection is runtime-only. One image supports every launcher profile.
-RUN npm install -g \
-      "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" \
-      "@openai/codex@$CODEX_VERSION" \
-      "opencode-ai@$OPENCODE_VERSION" \
-    && npm cache clean --force
-
-# Keep the upstream skill content pinned so image rebuilds are reproducible.
-RUN mkdir -p /opt/explain-diff-html \
-    && curl -sSfL \
-      https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/e4982a26bc8975dd45eeb96ad8c68f2f25fc42c7/explain-diff-html.md \
-      -o /opt/explain-diff-html/SKILL.md
-
 # Install golangci-lint from the official prebuilt binary (the project advises
 # against `go install`). Land it in /usr/local/bin, not $GOPATH/bin: /home/dev is
-# bind-mounted at runtime and would mask /home/dev/go/bin. Pin install.sh to the
-# release tag (not HEAD) so the installer matches the version it installs.
-RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh \
-      | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}"
+# bind-mounted at runtime and would mask /home/dev/go/bin. When pinned, install.sh
+# comes from the same release tag so the installer matches what it installs.
+RUN if [ -n "$GOLANGCI_LINT_VERSION" ]; then \
+      curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/$GOLANGCI_LINT_VERSION/install.sh" \
+        | sh -s -- -b /usr/local/bin "$GOLANGCI_LINT_VERSION"; \
+    else \
+      curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+        | sh -s -- -b /usr/local/bin; \
+    fi
 
-# Bundled integrations are activated per run with `agent-capsule --with`.
+# Selection. The launcher passes these from --agent and --with; the defaults
+# mirror its own, so a bare `docker build .` still produces a usable image.
+ARG AGENT=claude
+ARG WITH_ANYDOC=0
+ARG WITH_EXPLAIN_DIFF=0
+ARG WITH_MCPVAULT=0
+ARG WITH_SUPERPOWERS=0
+
+# Integrations are installed only when selected, one layer each: a RUN's cache
+# key is its expanded command, so toggling one leaves the others cached.
 # Files that become agent state stay under /opt because /home/dev is
 # bind-mounted from the host session home at runtime.
-# Codex activates superpowers by cloning /opt/superpowers/source at startup, so
-# its .git must survive and HEAD must sit on a real branch: a shallow --branch
-# clone leaves HEAD detached, and cloning a branchless repo yields an empty one.
-RUN npm install -g \
-      "@firecrawl/anydoc@$ANYDOC_VERSION" \
-      "@bitbonsai/mcpvault@$MCPVAULT_VERSION" \
-    && HOME=/opt/anydoc npx -y "skills@$SKILLS_VERSION" \
-      add "https://github.com/firecrawl/anydoc/tree/v$ANYDOC_VERSION" \
-      -g -a claude-code -y \
-    && rm -rf /opt/anydoc/.npm /opt/anydoc/.agents \
-    && mkdir -p /opt/anydoc/plugin/.claude-plugin \
-    && cp -a /opt/anydoc/.claude/skills /opt/anydoc/plugin/skills \
-    && printf '%s\n' \
-      "{\"name\":\"anydoc\",\"version\":\"$ANYDOC_VERSION\",\"description\":\"Convert documents to Markdown\"}" \
-      > /opt/anydoc/plugin/.claude-plugin/plugin.json \
-    && git clone --depth 1 --branch "$SUPERPOWERS_VERSION" \
-      https://github.com/obra/superpowers.git /opt/superpowers/source \
-    && git -C /opt/superpowers/source checkout -B main \
+RUN if [ "$WITH_ANYDOC" = 1 ]; then \
+      npm install -g "@firecrawl/anydoc@${ANYDOC_VERSION:-latest}" \
+      && anydoc_root="$(npm root -g)/@firecrawl/anydoc" \
+      && anydoc_installed="$(node -p "require('$anydoc_root/package.json').version")" \
+      && anydoc_ref="https://github.com/firecrawl/anydoc/tree/v$anydoc_installed" \
+      && HOME=/opt/anydoc npx -y "skills@${SKILLS_VERSION:-latest}" \
+        add "$anydoc_ref" -g -a claude-code -y \
+      && rm -rf /opt/anydoc/.npm /opt/anydoc/.agents \
+      && mkdir -p /opt/anydoc/plugin/.claude-plugin \
+      && cp -a /opt/anydoc/.claude/skills /opt/anydoc/plugin/skills \
+      && printf '%s\n' \
+        "{\"name\":\"anydoc\",\"version\":\"$anydoc_installed\",\"description\":\"Convert documents to Markdown\"}" \
+        > /opt/anydoc/plugin/.claude-plugin/plugin.json \
+      && npm cache clean --force; \
+    fi
+
+# Pinned to a gist revision, so image rebuilds are reproducible.
+RUN if [ "$WITH_EXPLAIN_DIFF" = 1 ]; then \
+      mkdir -p /opt/explain-diff-html \
+      && curl -sSfL \
+        https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/e4982a26bc8975dd45eeb96ad8c68f2f25fc42c7/explain-diff-html.md \
+        -o /opt/explain-diff-html/SKILL.md; \
+    fi
+
+RUN if [ "$WITH_MCPVAULT" = 1 ]; then \
+      npm install -g "@bitbonsai/mcpvault@${MCPVAULT_VERSION:-latest}" \
+      && npm cache clean --force; \
+    fi
+
+# Codex activates Superpowers from /opt/superpowers/source at startup, so its
+# .git must survive. Resolve the latest release tag when no version is pinned,
+# then put the tagged checkout on a real branch for the local marketplace clone.
+RUN if [ "$WITH_SUPERPOWERS" = 1 ]; then \
+      superpowers_ref="${SUPERPOWERS_VERSION:-latest}" \
+      && if [ "$superpowers_ref" = latest ]; then \
+        release_url="$(curl -sSfL -o /dev/null -w '%{url_effective}' \
+          https://github.com/obra/superpowers/releases/latest)" \
+        && superpowers_ref="${release_url##*/}"; \
+      fi \
+      && git clone --depth 1 --branch "$superpowers_ref" \
+        https://github.com/obra/superpowers.git /opt/superpowers/source \
+      && git -C /opt/superpowers/source checkout -B main; \
+    fi
+
+# One CLI, not three: a run uses exactly one agent and each package is large.
+# Last of the selected installs, so switching agents reuses every layer above.
+RUN case "$AGENT" in \
+      claude) npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}" ;; \
+      codex) npm install -g "@openai/codex@${CODEX_VERSION:-latest}" ;; \
+      opencode) npm install -g "opencode-ai@${OPENCODE_VERSION:-latest}" ;; \
+      *) echo "unknown agent: $AGENT" >&2; exit 1 ;; \
+    esac \
     && npm cache clean --force
 
 COPY entrypoint.sh /usr/local/bin/agent-capsule-entrypoint.sh
@@ -89,5 +128,6 @@ ENV HOME=/home/dev \
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/agent-capsule-entrypoint.sh"]
-# Manual-run fallback only: agent-capsule always passes the command explicitly.
-CMD ["claude"]
+# Manual-run fallback only: agent-capsule always passes the command explicitly,
+# and which agent binary exists now depends on the AGENT build arg.
+CMD ["bash"]

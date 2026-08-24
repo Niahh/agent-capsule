@@ -211,7 +211,22 @@ new_case
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 AGENT_CAPSULE_CODEX_VERSION=6.5.4 run_capsule --versions
 assert_contains "$OUTPUT" 'claude-code 9.8.7'
 assert_contains "$OUTPUT" 'codex 6.5.4'
+# Everything without an override tracks the latest release at build time.
+assert_contains "$OUTPUT" 'opencode latest'
+assert_contains "$OUTPUT" 'superpowers latest'
 assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# An unset pin reaches the build as an empty arg, which the Dockerfile reads as
+# "latest"; an override carries its value through.
+new_case
+run_capsule --shell --session unpinned-build "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'SUPERPOWERS_VERSION='
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
+  run_capsule --shell --session pinned-build "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
 
 new_case
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=1.2.3-beta.1+build.7 run_capsule --versions
@@ -291,15 +306,37 @@ assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/auth-home/codex:/home/dev"
 assert_not_contains "$PODMAN_LOG" "$CAPSULE_HOME/auth-home/claude:/home/dev"
 assert_not_contains "$PODMAN_LOG" "$CAPSULE_HOME/auth-home/opencode:/home/dev"
 
+# One tag, rebuilt whenever the selection changes: the image carries only the
+# agent and integrations this run asked for.
 new_case
-run_capsule --agent claude --shell --session universal-claude "$ROOT_DIR"
+run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" --build-arg 'AGENT=claude'
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
+
+: > "$PODMAN_LOG"
+run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+
+# Switching the agent changes what is installed, so it must rebuild.
 : > "$PODMAN_LOG"
 run_capsule --agent codex --shell --with superpowers \
-  --session universal-codex "$ROOT_DIR"
+  --session selection-codex "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=agent-capsule-dev:latest'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_AGENT=codex'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WITH=superpowers'
-assert_not_contains "$PODMAN_LOG" 'CALL=build'
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" --build-arg 'AGENT=codex'
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=1'
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_ANYDOC=0'
+assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.selection=codex:superpowers'
+
+# So does changing the integrations, with the agent held fixed.
+: > "$PODMAN_LOG"
+run_capsule --agent codex --shell --with none --session selection-codex "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
+assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.selection=codex:none'
 
 : > "$PODMAN_LOG"
 AGENT_CAPSULE_IMAGE=preexisting:image \

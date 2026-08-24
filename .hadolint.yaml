@@ -1,5 +1,6 @@
 ignored:
-  # apt and unpinned npm installs are mutable by design. An explicit --build
-  # pulls the base image and bypasses the cache to refresh them.
+  # apt and npm installs are unpinned by design: agent-capsule tracks the latest
+  # release of every tool unless AGENT_CAPSULE_*_VERSION pins one, and refreshes
+  # them with --pull=always --no-cache.
   - DL3008
   - DL3016

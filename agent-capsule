@@ -20,7 +20,7 @@
 #   --no-shared-rules      disable the global rules file
 #   --shared-memory-ro     mount Claude project memory read-only
 #   --no-shared-memory     disable Claude project memory
-#   --build                rebuild the universal image without cache
+#   --build                rebuild the image from scratch
 #   --versions             print configured tool versions
 #   --version              print the launcher version
 #   -h, --help             show this help
@@ -93,20 +93,25 @@ usage() {
 STATE_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
-NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
-GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
-CLAUDE_CODE_VERSION="${AGENT_CAPSULE_CLAUDE_CODE_VERSION:-2.1.235}"
-CODEX_VERSION="${AGENT_CAPSULE_CODEX_VERSION:-0.148.0}"
-OPENCODE_VERSION="${AGENT_CAPSULE_OPENCODE_VERSION:-1.18.18}"
-ANYDOC_VERSION="${AGENT_CAPSULE_ANYDOC_VERSION:-0.1.9}"
-MCPVAULT_VERSION="${AGENT_CAPSULE_MCPVAULT_VERSION:-0.16.0}"
-SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-1.5.23}"
-SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-v6.3.0}"
-GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-v2.12.2}"
+NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-trixie-slim}"
+GO_TAG="${AGENT_CAPSULE_GO_TAG:-trixie}"
+CLAUDE_CODE_VERSION="${AGENT_CAPSULE_CLAUDE_CODE_VERSION:-}"
+CODEX_VERSION="${AGENT_CAPSULE_CODEX_VERSION:-}"
+OPENCODE_VERSION="${AGENT_CAPSULE_OPENCODE_VERSION:-}"
+ANYDOC_VERSION="${AGENT_CAPSULE_ANYDOC_VERSION:-}"
+MCPVAULT_VERSION="${AGENT_CAPSULE_MCPVAULT_VERSION:-}"
+SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-}"
+SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-}"
+GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-}"
 
-# CLI to run inside the capsule. --agent overrides this and selects only runtime
-# behavior; every supported CLI is present in the same image.
+# CLI to run inside the capsule. --agent overrides this. Only the selected CLI is
+# installed, so changing it rebuilds the image.
 AGENT="${AGENT_CAPSULE_AGENT:-claude}"
+
+# Empty pins mean latest, which --versions has to say out loud.
+selected_version() {
+  printf '%s' "${1:-latest}"
+}
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
@@ -149,7 +154,7 @@ CONTAINER_MCP_CONFIG="/home/dev/$MCP_CONFIG_BASENAME"
 # Agent profiles
 # ----------------------------------------------------------------------------
 # The one place that knows agent-specific runtime behavior. Adding an agent also
-# requires one KNOWN_AGENTS entry and installing its CLI in the Dockerfile.
+# requires one KNOWN_AGENTS entry and one arm in the Dockerfile's AGENT case.
 KNOWN_AGENTS=(claude codex opencode)
 
 load_agent_profile() {
@@ -567,14 +572,14 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
     --versions)
       cat <<VERSIONS
 agent-capsule $VERSION
-claude-code $CLAUDE_CODE_VERSION
-codex $CODEX_VERSION
-opencode $OPENCODE_VERSION
-anydoc $ANYDOC_VERSION
-mcpvault $MCPVAULT_VERSION
-skills $SKILLS_VERSION
-superpowers $SUPERPOWERS_VERSION
-golangci-lint $GOLANGCI_LINT_VERSION
+claude-code $(selected_version "$CLAUDE_CODE_VERSION")
+codex $(selected_version "$CODEX_VERSION")
+opencode $(selected_version "$OPENCODE_VERSION")
+anydoc $(selected_version "$ANYDOC_VERSION")
+mcpvault $(selected_version "$MCPVAULT_VERSION")
+skills $(selected_version "$SKILLS_VERSION")
+superpowers $(selected_version "$SUPERPOWERS_VERSION")
+golangci-lint $(selected_version "$GOLANGCI_LINT_VERSION")
 VERSIONS
       exit 0
       ;;
@@ -659,6 +664,7 @@ for package_version in \
   "$ANYDOC_VERSION" \
   "$MCPVAULT_VERSION" \
   "$SKILLS_VERSION"; do
+  [[ -n "$package_version" ]] || continue
   if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
     echo "Invalid pinned package version: $package_version" >&2
     exit 1
@@ -667,6 +673,7 @@ done
 unset package_version
 
 for tagged_version in "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION"; do
+  [[ -n "$tagged_version" ]] || continue
   if [[ ! "$tagged_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
     echo "Invalid pinned tagged version: $tagged_version" >&2
     exit 1
@@ -766,8 +773,8 @@ for extra in "${KNOWN_EXTRAS[@]}"; do
   done
 done
 
-# A custom image may include its own tag. Untagged names use one stable tag for
-# every agent and runtime integration selection.
+# One tag for every selection: the io.agent-capsule.bundle label decides whether
+# what it points at matches what this run asked for.
 if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
   IMAGE_REF="$IMAGE_NAME"
 else
@@ -1016,10 +1023,10 @@ ENTRYPOINT_HASH="$(sha256_file "$ENTRYPOINT_SRC")"
 # ----------------------------------------------------------------------------
 # Build image if needed
 # ----------------------------------------------------------------------------
-# Agent and integration choices are runtime-only, so they do not participate in
-# image freshness. Only inputs that change image contents belong in this hash.
+# The image contains only the selected agent and integrations, so both belong
+# in the hash: changing either has to invalidate the image.
 HASH="$(printf '%s\n' \
-  "$NODE_TAG" "$GO_TAG" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
+  "$NODE_TAG" "$GO_TAG" "$AGENT" "$EXTRAS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" \
   "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" | sha256_stream)"
@@ -1043,7 +1050,18 @@ if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
   cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
   cp -f "$ENTRYPOINT_SRC" "$BUILD_CONTEXT_DIR/entrypoint.sh"
   chmod 0755 "$BUILD_CONTEXT_DIR/entrypoint.sh"
-  echo ">> Building $IMAGE_REF..."
+  BUILD_SELECTION_ARGS=(--build-arg "AGENT=$AGENT")
+  for extra in "${KNOWN_EXTRAS[@]}"; do
+    # anydoc -> WITH_ANYDOC, explain-diff -> WITH_EXPLAIN_DIFF.
+    build_arg="WITH_$(printf '%s' "$extra" | tr 'a-z-' 'A-Z_')"
+    if [[ ",$EXTRAS," == *",$extra,"* ]]; then
+      BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=1")
+    else
+      BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=0")
+    fi
+  done
+
+  echo ">> Building $IMAGE_REF ($AGENT, ${EXTRAS:-no integrations})..."
   BUILD_REFRESH_ARGS=()
   [[ "$FORCE_BUILD" == "1" ]] && BUILD_REFRESH_ARGS=(--pull=always --no-cache)
   podman build \
@@ -1058,7 +1076,9 @@ if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
     --build-arg "SKILLS_VERSION=$SKILLS_VERSION" \
     --build-arg "SUPERPOWERS_VERSION=$SUPERPOWERS_VERSION" \
     --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
+    "${BUILD_SELECTION_ARGS[@]}" \
     --label "io.agent-capsule.bundle=$HASH" \
+    --label "io.agent-capsule.selection=$AGENT:${EXTRAS:-none}" \
     -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
 fi
 release_build_lock
