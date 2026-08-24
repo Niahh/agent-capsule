@@ -188,33 +188,24 @@ run_capsule --agent opencode --shell --session opencode-state \
 assert_not_contains "$PODMAN_LOG" 'obsidian'
 
 new_case
-set +e
-AGENT_CAPSULE_CONFIG="$CASE_DIR/missing" "$BASH_BIN" "$SCRIPT" --help > "$OUTPUT" 2>&1
-status=$?
-set -e
-[[ "$status" -eq 0 ]] || fail "--help was blocked by a missing config"
+run_capsule --help
 assert_contains "$OUTPUT" 'Usage:'
 assert_contains "$OUTPUT" '--versions'
 assert_contains "$OUTPUT" '--shared-rules PATH'
-AGENT_CAPSULE_CONFIG="$CASE_DIR/missing" "$BASH_BIN" "$SCRIPT" --version > "$OUTPUT" 2>&1 ||
-  fail "--version was blocked by a missing config"
+assert_contains "$OUTPUT" 'explain-diff'
+assert_not_contains "$PODMAN_LOG" 'CALL='
+run_capsule --version
 assert_contains "$OUTPUT" "agent-capsule $LAUNCHER_VERSION"
 
+# A config file left over from 0.2 is inert: never read, never an error.
 new_case
-printf '%s\n' 'AGENT_CAPSULE_AGENT="codex' > "$CASE_DIR/config"
-set +e
-HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
-  AGENT_CAPSULE_CONFIG="$CASE_DIR/config" "$BASH_BIN" "$SCRIPT" --shell "$ROOT_DIR" > "$OUTPUT" 2>&1
-status=$?
-set -e
-assert_status_fails "$status"
-assert_contains "$OUTPUT" 'unterminated quoted value for AGENT_CAPSULE_AGENT'
-
-new_case
-printf '%s\n' 'accidentally-pasted-secret' > "$CAPSULE_HOME/config"
-run_capsule --shell --session malformed-config "$ROOT_DIR"
-assert_contains "$OUTPUT" "$CAPSULE_HOME/config:1: ignoring line without '='"
+printf '%s\n' 'AGENT_CAPSULE_AGENT=codex' 'accidentally-pasted-secret' \
+  > "$CAPSULE_HOME/config"
+run_capsule --shell --session leftover-config "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> Agent   : claude'
 assert_not_contains "$OUTPUT" 'accidentally-pasted-secret'
+assert_not_contains "$OUTPUT" '>> Config'
+assert_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 AGENT_CAPSULE_CODEX_VERSION=6.5.4 run_capsule --versions
@@ -239,7 +230,7 @@ assert_status_fails "$status"
 assert_contains "$OUTPUT" 'Invalid pinned package version: invalid'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
-# A session from the environment or config is an ambient default; only an
+# A session from the environment is an ambient default; only an
 # explicit --session conflicts with the dedicated auth home.
 new_case
 AGENT_CAPSULE_SESSION=configured-session run_capsule --auth-login

@@ -29,7 +29,6 @@
 #   superpowers, explain-diff, mcpvault, anydoc
 #   mcpvault requires --vault. anydoc is available only with claude.
 #
-# Persistent defaults: ~/.agent-capsule/config
 # Documentation: https://github.com/Niahh/agent-capsule
 #
 set -euo pipefail
@@ -87,118 +86,12 @@ usage() {
   awk 'NR==1{next} !/^#/{exit} {sub(/^# ?/,""); print}' "$0"
 }
 
-# Help and version must remain available even when an explicitly selected config
-# file is missing or malformed. Skip option values so a file named --help is not
-# mistaken for the flag it follows.
-preflight_expect_value=0
-for preflight_arg in "$@"; do
-  if [[ "$preflight_expect_value" == "1" ]]; then
-    preflight_expect_value=0
-    continue
-  fi
-
-  case "$preflight_arg" in
-    --) break ;;
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    --version)
-      echo "agent-capsule $VERSION"
-      exit 0
-      ;;
-    --agent | --session | --shared-rules | --with | -m | --mount)
-      preflight_expect_value=1
-      ;;
-    -*) ;;
-    *) break ;;
-  esac
-done
-unset preflight_arg preflight_expect_value
-
-# Resolved before everything else: the config file lives under it, and the file
-# supplies the defaults every AGENT_CAPSULE_* assignment below reads.
-CONFIG_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
-
 # ----------------------------------------------------------------------------
-# Config file
+# Defaults (the environment is the only configuration channel)
 # ----------------------------------------------------------------------------
-# Persistent defaults for the AGENT_CAPSULE_* knobs, so a preferred set of extras
-# and mounts does not have to be retyped on every run. Parsed, never sourced: the
-# keys are validated and assigned with export, so the file cannot run commands.
-# A value already present in the environment always wins, which keeps the
-# precedence CLI flag > environment > config file > built-in default.
-load_config_file() {
-  local file="$1"
-  local explicit="$2"
-  local line key val quote
-  local line_number=0
+# Everything persistent lives under this root: homes/, auth-home/, build/.
+STATE_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 
-  if [[ ! -e "$file" ]]; then
-    # An explicitly requested file that is missing is almost always a typo.
-    [[ "$explicit" == "1" ]] || return 1
-    echo "Config file not found: $file" >&2
-    exit 1
-  fi
-
-  if [[ ! -f "$file" ]]; then
-    echo "Not a regular file: $file" >&2
-    exit 1
-  fi
-
-  # The final line counts even without a trailing newline.
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    ((line_number += 1))
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [[ -z "$line" || "$line" == "#"* ]] && continue
-
-    if [[ "$line" != *=* ]]; then
-      echo "$file:$line_number: ignoring line without '='" >&2
-      continue
-    fi
-
-    key="${line%%=*}"
-    val="${line#*=}"
-    key="${key%"${key##*[![:space:]]}"}"
-    val="${val#"${val%%[![:space:]]*}"}"
-
-    if [[ ! "$key" =~ ^AGENT_CAPSULE_[A-Z0-9_]+$ ]]; then
-      echo ">> Config  : ignoring unsupported key: $key" >&2
-      continue
-    fi
-
-    # These two select the config file itself, so reading them from it is circular.
-    case "$key" in
-      AGENT_CAPSULE_HOME | AGENT_CAPSULE_CONFIG)
-        echo ">> Config  : $key must come from the environment, ignoring it here" >&2
-        continue
-        ;;
-    esac
-
-    quote="${val:0:1}"
-    if [[ "$quote" == '"' || "$quote" == "'" ]]; then
-      if [[ "${#val}" -lt 2 || "${val: -1}" != "$quote" ]]; then
-        echo "$file:$line_number: unterminated quoted value for $key" >&2
-        exit 1
-      fi
-      val="${val:1:${#val}-2}"
-    fi
-
-    [[ -n "${!key+x}" ]] && continue
-    export "${key}=${val}"
-  done < "$file"
-
-  return 0
-}
-
-CONFIG_FILE="${AGENT_CAPSULE_CONFIG:-$CONFIG_DIR/config}"
-CONFIG_FILE_LOADED=0
-load_config_file "$CONFIG_FILE" "${AGENT_CAPSULE_CONFIG:+1}" && CONFIG_FILE_LOADED=1
-
-# ----------------------------------------------------------------------------
-# Defaults (config file and environment already applied)
-# ----------------------------------------------------------------------------
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
 NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-26-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-1.26.4-trixie}"
@@ -219,12 +112,12 @@ AGENT="${AGENT_CAPSULE_AGENT:-claude}"
 # canonical so status output does not depend on how the user spelled the list.
 KNOWN_EXTRAS=(anydoc explain-diff mcpvault superpowers)
 
-BUILD_DIR="$CONFIG_DIR/build"
-AUTH_ROOT_DIR="$CONFIG_DIR/auth-home"
+BUILD_DIR="$STATE_DIR/build"
+AUTH_ROOT_DIR="$STATE_DIR/auth-home"
 
 # One rules file for every agent; only the in-container mount target differs
 # per agent (AGENT_RULES_REL).
-SHARED_RULES="${AGENT_CAPSULE_SHARED_RULES:-$CONFIG_DIR/CLAUDE.md}"
+SHARED_RULES="${AGENT_CAPSULE_SHARED_RULES:-$STATE_DIR/CLAUDE.md}"
 SHARED_RULES_ENABLED="${AGENT_CAPSULE_SHARED_RULES_ENABLED:-1}"
 SHARED_RULES_READONLY="${AGENT_CAPSULE_SHARED_RULES_READONLY:-1}"
 
@@ -538,9 +431,9 @@ MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
 NO_VAULT=0
 MOUNT_SPECS=()
 
-# Seeded from the config file or the environment. The first CLI --with replaces
-# that seed instead of adding to it, otherwise a default extra could never be
-# dropped for a single run (--with none then selects nothing at all).
+# Seeded from the environment. The first CLI --with replaces that seed instead
+# of adding to it, otherwise an ambient default extra could never be dropped for
+# a single run (--with none then selects nothing at all).
 EXTRAS_REQUESTED=()
 [[ -n "${AGENT_CAPSULE_WITH:-}" ]] && EXTRAS_REQUESTED=("$AGENT_CAPSULE_WITH")
 WITH_EXPLICIT=0
@@ -722,7 +615,7 @@ fi
 
 # --auth-login runs in its own dedicated home, so an explicit --session would
 # be silently ignored. Reject the combination instead. A session coming from
-# the environment or config file is an ambient default and is fine to ignore.
+# the environment is an ambient default and is fine to ignore.
 if [[ "$AUTH_LOGIN" == "1" && "$SESSION_EXPLICIT" == "1" ]]; then
   echo "--auth-login uses its own session; do not combine it with --session." >&2
   exit 1
@@ -967,7 +860,7 @@ fi
 if [[ "$AUTH_LOGIN" == "1" ]]; then
   HOME_DIR="$AUTH_HOME_DIR"
 else
-  HOME_DIR="$CONFIG_DIR/homes/$SESSION_NAME"
+  HOME_DIR="$STATE_DIR/homes/$SESSION_NAME"
 fi
 
 # Shared memory lives outside the per-session home. The default agent derives
@@ -987,7 +880,7 @@ if [[ "$AGENT" == "claude" ]]; then
 else
   PROJECT_MEMORY_HASH="$PROJECT_HASH"
 fi
-PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_MEMORY_HASH"
+PROJECT_MEMORY_DIR="$STATE_DIR/project-memory/$PROJECT_MEMORY_HASH"
 
 if [[ "$MOUNT_VAULT" == "1" ]]; then
   if [[ -z "$VAULT_DIR" ]]; then
@@ -1018,7 +911,7 @@ if [[ ",$EXTRAS," == *,mcpvault,* ]]; then
     echo ">> MCP     : mcpvault disabled for this run (--no-vault)" >&2
   elif [[ "$MOUNT_VAULT" != "1" ]]; then
     echo "--with mcpvault needs the vault mounted." >&2
-    echo "Add --vault, or set AGENT_CAPSULE_MOUNT_VAULT=1 in $CONFIG_FILE." >&2
+    echo "Add --vault, or export AGENT_CAPSULE_MOUNT_VAULT=1." >&2
     exit 1
   else
     MCPVAULT_ENABLED=1
@@ -1067,7 +960,7 @@ if [[ -e "$AUTH_ROOT_DIR/.claude" ]]; then
 fi
 
 mkdir -p "$BUILD_DIR" "$AUTH_ROOT_DIR" "$AUTH_HOME_DIR" "$HOME_DIR"
-chmod 700 "$CONFIG_DIR" "$AUTH_ROOT_DIR" "$AUTH_HOME_DIR" "$HOME_DIR" 2>/dev/null || true
+chmod 700 "$STATE_DIR" "$AUTH_ROOT_DIR" "$AUTH_HOME_DIR" "$HOME_DIR" 2>/dev/null || true
 
 [[ "$AUTH_LOGIN" == "1" ]] || ensure_session_agent_marker "$HOME_DIR"
 
@@ -1424,7 +1317,6 @@ TTY_ARGS=(-i)
 # ----------------------------------------------------------------------------
 # Run
 # ----------------------------------------------------------------------------
-[[ "$CONFIG_FILE_LOADED" == "1" ]] && echo ">> Config  : $CONFIG_FILE"
 echo ">> Project : $PROJECT_DIR (working directory; also available at /workspace)"
 if [[ "$GIT_COMMON_EXTERNAL" == "1" ]]; then
   echo ">> Git     : $GIT_COMMON_DIR (linked-worktree metadata)"

@@ -31,8 +31,8 @@ limits. Everything else on the host stays out of reach.
   is pooled across sessions and linked worktrees of the same repo.
 - One reusable image: every supported agent and integration is bundled once.
   `--agent` selects the CLI, and `--with` activates only the requested integrations.
-- Defaults you keep: a config file holds your usual add-ons so they are not retyped
-  on every run.
+- Defaults you keep: exported `AGENT_CAPSULE_*` variables hold your usual add-ons
+  so they are not retyped on every run.
 
 ## Requirements
 
@@ -118,8 +118,7 @@ Update the old configuration and state before launching version 0.2:
 ## Tool versions and upgrades
 
 Bundled tools are pinned, and agent-capsule does not check for newer releases. To
-use another version, set its version variable in `~/.agent-capsule/config` and
-rebuild the image:
+use another version, export its version variable and rebuild the image:
 
 ```text
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=2.1.234
@@ -129,8 +128,8 @@ AGENT_CAPSULE_CLAUDE_CODE_VERSION=2.1.234
 agent-capsule --build .
 ```
 
-An exported environment variable works too, but it must remain set on later runs or
-the configured default becomes the selected pin again. The available variables are:
+The variable must stay set on later runs, or that package returns to the version
+the installed agent-capsule release ships. The available variables are:
 
 ```text
 AGENT_CAPSULE_CLAUDE_CODE_VERSION
@@ -144,8 +143,7 @@ AGENT_CAPSULE_GOLANGCI_LINT_VERSION
 ```
 
 Superpowers and golangci-lint use Git tags, including the leading `v`.
-Removing an override returns that package to the version shipped by the installed
-agent-capsule release. Use `agent-capsule --versions` to inspect the selected pins.
+Use `agent-capsule --versions` to inspect the selected pins.
 
 ## Quick start
 
@@ -167,7 +165,7 @@ agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on 
 
 Claude Code is the default. `--agent codex` runs the OpenAI Codex CLI and `--agent
 opencode` runs [opencode](https://opencode.ai); `AGENT_CAPSULE_AGENT` sets the same
-default from the config file, and `--agent list` prints the known agents.
+default, and `--agent list` prints the known agents.
 
 All agents use one image. Each gets its own default session per project and its own
 login: run `agent-capsule --agent NAME --auth-login` once. Credentials live under
@@ -214,7 +212,7 @@ overrides.
 | `--with TOOL[,TOOL]`                             | activate bundled integrations (`superpowers`, `explain-diff`, `mcpvault`, `anydoc`); `list`, `none` |
 | `--mount SRC[:DEST][:ro]`                        | extra file or directory bind mounts (repeatable)                                   |
 | `--vault[=PATH]`                                 | mount a configured vault read-write; `=PATH` picks it for one run                    |
-| `--no-vault`                                     | skip the vault (and mcpvault) for one run, overriding the config file              |
+| `--no-vault`                                     | skip the vault (and mcpvault) for one run, overriding the environment              |
 | `--shared-memory-ro`, `--no-shared-memory`       | restrict or disable pooled per-project memory (claude only)                        |
 | `--shared-rules PATH`                            | use a specific global rules file                                                   |
 | `--shared-rules-rw`, `--no-shared-rules`         | writable or disabled global rules file                                              |
@@ -236,13 +234,13 @@ read-write access to everything under it:
 agent-capsule --with mcpvault --vault="$HOME/Work" .   # for one run
 ```
 
-Or set it once in `~/.agent-capsule/config`, after which plain `agent-capsule .`
+Or export it once from your shell profile, after which plain `agent-capsule .`
 does it all with no flags:
 
-```
-AGENT_CAPSULE_WITH=mcpvault
-AGENT_CAPSULE_MOUNT_VAULT=1
-AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
+```sh
+export AGENT_CAPSULE_WITH=mcpvault
+export AGENT_CAPSULE_MOUNT_VAULT=1
+export AGENT_CAPSULE_VAULT="$HOME/Documents/Obsidian/MyVault"
 ```
 
 Notes:
@@ -255,33 +253,30 @@ Notes:
   server through invocation-scoped configuration, so user config files stay intact.
   Codex receives configuration overrides layered over its existing `config.toml`.
 
-## Configuration file
+## Persistent defaults
 
-`~/.agent-capsule/config` (or `AGENT_CAPSULE_CONFIG=/some/path`) holds defaults, so the
-integrations you always want are not retyped on every run:
+Every setting is an `AGENT_CAPSULE_*` environment variable. To stop retyping the
+integrations you always want, export them from `~/.bashrc` or `~/.zshrc`:
 
+```sh
+export AGENT_CAPSULE_WITH=superpowers,mcpvault
+export AGENT_CAPSULE_MOUNT_VAULT=1
+export AGENT_CAPSULE_VAULT="$HOME/Documents/Obsidian/MyVault"
+export AGENT_CAPSULE_KEEPID=1
 ```
-# ~/.agent-capsule/config
-AGENT_CAPSULE_WITH=superpowers,mcpvault
-AGENT_CAPSULE_MOUNT_VAULT=1
-AGENT_CAPSULE_VAULT=/home/you/Documents/Obsidian/MyVault
-AGENT_CAPSULE_KEEPID=1
-```
 
-One `KEY=value` per line, `#` comments and blank lines ignored. Values may use matching
-single or double quotes. Only `AGENT_CAPSULE_*` keys are accepted, and the file is
-parsed rather than sourced, so it cannot run commands.
+Precedence is command-line flag > environment > built-in default. A command-line
+`--with` replaces the exported list instead of adding to it, `--with none` selects
+nothing, and `--no-vault` skips the vault for a single run.
 
-Precedence is command-line flag > environment > config file > built-in default. A
-command-line `--with` replaces the configured list instead of adding to it,
-`--with none` selects nothing, and `--no-vault` skips the vault for a single run.
+A one-off run does not need an export: `AGENT_CAPSULE_AGENT=codex agent-capsule .`
+works, because the launcher reads the variable from its own environment.
 
 ## State layout
 
 Everything lives under `~/.agent-capsule/`:
 
 ```
-config                   optional defaults for the AGENT_CAPSULE_* settings
 auth-home/<agent>/       isolated login home for each agent
 homes/<session>/         one isolated /home/dev per session
 project-memory/<hash>/   per-project memory pooled across sessions (claude only)
