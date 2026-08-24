@@ -50,6 +50,19 @@ if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "images" ]]; then
+  [[ -f "${PODMAN_DANGLING:-}" ]] && cat "$PODMAN_DANGLING"
+  exit 0
+fi
+
+if [[ "${1:-}" == "rmi" ]]; then
+  if [[ -f "${PODMAN_DANGLING:-}" ]]; then
+    grep -vxF "${2:-}" "$PODMAN_DANGLING" > "$PODMAN_DANGLING.tmp" || true
+    mv "$PODMAN_DANGLING.tmp" "$PODMAN_DANGLING"
+  fi
+  exit 0
+fi
+
 if [[ "${1:-}" == "build" && -n "$image_ref" && -n "$bundle_hash" ]]; then
   sleep "${PODMAN_BUILD_DELAY:-0}"
   printf '%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
@@ -117,6 +130,7 @@ new_case() {
   mkdir -p "$CAPSULE_HOME" "$HOST_HOME"
   : > "$PODMAN_LOG"
   : > "$PODMAN_IMAGE_STATE"
+  PODMAN_DANGLING=""
   ((pass_count += 1))
 }
 
@@ -125,6 +139,7 @@ run_capsule() {
     PATH="$FAKE_BIN:$PATH" \
     PODMAN_LOG="$PODMAN_LOG" \
     PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
+    PODMAN_DANGLING="${PODMAN_DANGLING:-}" \
     AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
     AGENT_CAPSULE_DOCKERFILE="${AGENT_CAPSULE_DOCKERFILE:-$DOCKERFILE}" \
     XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
@@ -655,6 +670,37 @@ wait "$second_pid"
   fail "concurrent launches built the image more than once"
 [[ ! -e "$TEST_ROOT/xdg/agent-capsule-$UID/image.lock" ]] ||
   fail "image build lock was not removed"
+
+# Rebuilding strands the image it replaced, so a build prunes what it superseded.
+new_case
+PODMAN_DANGLING="$CASE_DIR/dangling"
+printf '%s\n' aaaa1111 bbbb2222 > "$PODMAN_DANGLING"
+run_capsule --shell --session prune-after-build "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_contains "$PODMAN_LOG" 'CALL=images'
+assert_arg_after "$PODMAN_LOG" rmi aaaa1111
+assert_arg_after "$PODMAN_LOG" rmi bbbb2222
+assert_contains "$OUTPUT" '>> Pruned  : 2 superseded image(s)'
+[[ ! -s "$PODMAN_DANGLING" ]] || fail "superseded images were not removed"
+
+# A launch that does not build leaves them alone.
+new_case
+PODMAN_DANGLING="$CASE_DIR/dangling"
+: > "$PODMAN_DANGLING"
+run_capsule --shell --session prune-no-build "$ROOT_DIR"
+printf '%s\n' cccc3333 > "$PODMAN_DANGLING"
+: > "$PODMAN_LOG"
+run_capsule --shell --session prune-no-build "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+assert_not_contains "$PODMAN_LOG" 'CALL=rmi'
+
+new_case
+PODMAN_DANGLING="$CASE_DIR/dangling"
+printf '%s\n' dddd4444 > "$PODMAN_DANGLING"
+AGENT_CAPSULE_PRUNE=0 run_capsule --shell --session prune-disabled "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_not_contains "$PODMAN_LOG" 'CALL=rmi'
+assert_not_contains "$OUTPUT" '>> Pruned'
 
 # The image lives in podman's store, not under AGENT_CAPSULE_HOME, so a second
 # capsule home reuses it rather than building its own.

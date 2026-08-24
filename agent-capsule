@@ -108,6 +108,9 @@ GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-}"
 # that. Age is the only signal for it: the bundle hash cannot see upstream move.
 MAX_IMAGE_AGE_DAYS="${AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS:-7}"
 
+# Each rebuild strands the image it replaced. Set to 0 to keep them.
+PRUNE_IMAGES="${AGENT_CAPSULE_PRUNE:-1}"
+
 # CLI to run inside the capsule. --agent overrides this. Only the selected CLI is
 # installed, so changing it rebuilds the image.
 AGENT="${AGENT_CAPSULE_AGENT:-claude}"
@@ -705,6 +708,32 @@ else
   exit 1
 fi
 
+# podman build moves the tag, leaving the image it replaced behind untagged.
+# Two things keep this safe: only images this tool labelled are candidates, so
+# podman's own intermediate layers are untouched, and only untagged ones are, so
+# a differently named AGENT_CAPSULE_IMAGE survives. rmi refuses an image a
+# container still uses, which is why a failure here is not an error.
+prune_superseded_images() {
+  local removed=0
+  local image_id
+
+  [[ "$PRUNE_IMAGES" != "0" ]] || return 0
+
+  while read -r image_id; do
+    [[ -n "$image_id" ]] || continue
+    if podman rmi "$image_id" >/dev/null 2>&1; then
+      removed=$((removed + 1))
+    fi
+  done < <(
+    podman images --filter 'label=io.agent-capsule.bundle' \
+      --filter 'dangling=true' --format '{{.ID}}' 2>/dev/null || true
+  )
+
+  if [[ "$removed" -gt 0 ]]; then
+    echo ">> Pruned  : $removed superseded image(s)"
+  fi
+}
+
 refresh_is_stale() { # refreshed-epoch
   local refreshed="$1"
 
@@ -1135,6 +1164,7 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     --label "io.agent-capsule.refreshed-at=$REFRESHED_AT" \
     --label "io.agent-capsule.selection=$AGENT:${EXTRAS:-none}" \
     -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
+  prune_superseded_images
 fi
 release_build_lock
 
