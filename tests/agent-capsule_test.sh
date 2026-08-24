@@ -7,8 +7,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT_DIR/agent-capsule"
 DOCKERFILE="$ROOT_DIR/Dockerfile"
 DOCKERIGNORE="$ROOT_DIR/.dockerignore"
+# The script owns its version; asserting a literal here breaks on every bump.
+LAUNCHER_VERSION="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$SCRIPT")"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
+
+# The suite is commonly run from inside a capsule, where AGENT_CAPSULE_* and
+# HERDR_* are exported. They would reach the script under test and change what
+# it does, so drop the whole namespace before the first case.
+for leaked_variable in $(env | sed -n 's/^\(AGENT_CAPSULE_[A-Za-z0-9_]*\)=.*/\1/p;s/^\(HERDR_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$leaked_variable"
+done
+unset leaked_variable
 
 FAKE_BIN="$TEST_ROOT/bin"
 mkdir -p "$FAKE_BIN"
@@ -197,7 +207,7 @@ assert_contains "$OUTPUT" '--shared-rules PATH'
 [[ "$(wc -l < "$OUTPUT")" -le 45 ]] || fail "--help is too verbose"
 AGENT_CAPSULE_CONFIG="$CASE_DIR/missing" "$BASH_BIN" "$SCRIPT" --version > "$OUTPUT" 2>&1 ||
   fail "--version was blocked by a missing config"
-assert_contains "$OUTPUT" 'agent-capsule 0.2.2'
+assert_contains "$OUTPUT" "agent-capsule $LAUNCHER_VERSION"
 
 new_case
 printf '%s\n' 'AGENT_CAPSULE_AGENT="codex' > "$CASE_DIR/config"
@@ -216,9 +226,9 @@ assert_contains "$OUTPUT" "$CAPSULE_HOME/config:1: ignoring line without '='"
 assert_not_contains "$OUTPUT" 'accidentally-pasted-secret'
 
 new_case
-AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 run_capsule --versions
+AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 AGENT_CAPSULE_CODEX_VERSION=6.5.4 run_capsule --versions
 assert_contains "$OUTPUT" 'claude-code 9.8.7'
-assert_contains "$OUTPUT" 'codex 0.147.0'
+assert_contains "$OUTPUT" 'codex 6.5.4'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 new_case
