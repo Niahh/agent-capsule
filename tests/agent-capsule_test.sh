@@ -140,24 +140,6 @@ run_capsule --shell --session rules-mode --shared-rules "$rules_file" "$ROOT_DIR
 [[ "$(stat -c %a "$rules_file")" == "644" ]] || fail "shared rules mode changed"
 
 new_case
-legacy_dir="$CAPSULE_HOME/homes/opencode-state/.config/opencode"
-mkdir -p "$legacy_dir"
-printf '%s\n' '{"legacy":true}' > "$legacy_dir/opencode.json"
-touch "$legacy_dir/.opencode.json.capsule"
-set +e
-run_capsule --agent opencode --shell --session opencode-state \
-  "$ROOT_DIR"
-status=$?
-set -e
-assert_status_fails "$status"
-assert_contains "$OUTPUT" "legacy OpenCode marker $legacy_dir/.opencode.json.capsule"
-assert_contains "$OUTPUT" 'No files were changed.'
-[[ "$(<"$legacy_dir/opencode.json")" == '{"legacy":true}' ]] ||
-  fail "legacy OpenCode config changed"
-[[ -e "$legacy_dir/.opencode.json.capsule" ]] || fail "legacy OpenCode marker changed"
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
-
-new_case
 vault_dir="$CASE_DIR/vault"
 config_dir="$CAPSULE_HOME/homes/opencode-state/.config/opencode"
 mkdir -p "$vault_dir"
@@ -287,26 +269,19 @@ for profile in \
   assert_arg_after "$PODMAN_LOG" "$command" '--version'
 done
 
-# Legacy credentials stop the launch without changing files.
-for profile in \
-  'claude|.claude/.credentials.json|.claude' \
-  'codex|.codex/auth.json|.codex' \
-  'opencode|.local/share/opencode/auth.json|.local/share/opencode/auth.json'; do
-  IFS='|' read -r agent credential_path detected_path <<< "$profile"
-  new_case
-  legacy_credential="$CAPSULE_HOME/auth-home/$credential_path"
-  mkdir -p "$(dirname "$legacy_credential")"
-  printf '%s\n' token > "$legacy_credential"
-  set +e
-  run_capsule --agent "$agent" --shell --session "credentials-$agent" "$ROOT_DIR"
-  status=$?
-  set -e
-  assert_status_fails "$status"
-  assert_contains "$OUTPUT" \
-    "legacy authentication state $CAPSULE_HOME/auth-home/$detected_path"
-  [[ "$(<"$legacy_credential")" == token ]] || fail "legacy $agent credential changed"
-  assert_not_contains "$PODMAN_LOG" 'CALL=run'
-done
+# The shared 0.1 authentication home stops the launch without changing files.
+new_case
+legacy_credential="$CAPSULE_HOME/auth-home/.claude/.credentials.json"
+mkdir -p "$(dirname "$legacy_credential")"
+printf '%s\n' token > "$legacy_credential"
+set +e
+run_capsule --shell --session legacy-auth-home "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" "Authentication state from agent-capsule 0.1: $CAPSULE_HOME/auth-home/.claude"
+[[ "$(<"$legacy_credential")" == token ]] || fail "0.1 credential changed"
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
 for agent in claude codex opencode; do
@@ -357,7 +332,7 @@ run_capsule --with hunkdiff --session removed-hunkdiff "$ROOT_DIR"
 status=$?
 set -e
 assert_status_fails "$status"
-assert_contains "$OUTPUT" 'legacy integration hunkdiff'
+assert_contains "$OUTPUT" 'Unknown extra tool: hunkdiff'
 assert_contains "$DOCKERFILE" "\"@anthropic-ai/claude-code@\$CLAUDE_CODE_VERSION\""
 assert_not_contains "$DOCKERFILE" 'hunkdiff'
 assert_contains "$DOCKERFILE" "if [[ -e \"\$marker\" ]]; then"
@@ -527,32 +502,6 @@ HOME="$HOST_HOME" \
 assert_contains "$PODMAN_LOG" 'CALL=run'
 [[ "$(stat -c %a "$CAPSULE_HOME/CLAUDE.md")" == "600" ]] || fail "default rules mode is not private"
 
-# Unmarked homes with agent state are rejected without assigning ownership.
-new_case
-mixed_home="$CAPSULE_HOME/homes/mixed-home"
-mkdir -p "$mixed_home/.claude" "$mixed_home/.codex"
-set +e
-run_capsule --shell --session mixed-home "$ROOT_DIR"
-status=$?
-set -e
-assert_status_fails "$status"
-assert_contains "$OUTPUT" "unmarked session state $mixed_home/.claude"
-[[ ! -e "$mixed_home/.agent" ]] || fail "legacy session was assigned an owner"
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
-
-new_case
-project_hash="$(printf '%s' "$ROOT_DIR" | sha256sum | cut -c1-12)"
-legacy_default_home="$CAPSULE_HOME/homes/$(basename "$ROOT_DIR")-$project_hash"
-mkdir -p "$legacy_default_home/.claude"
-set +e
-run_capsule --agent codex --shell "$ROOT_DIR"
-status=$?
-set -e
-assert_status_fails "$status"
-assert_contains "$OUTPUT" "unmarked session state $legacy_default_home/.claude"
-[[ ! -e "$legacy_default_home/.agent" ]] || fail "legacy default session was changed"
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
-
 new_case
 codex_home="$CAPSULE_HOME/homes/codex-owned"
 mkdir -p "$codex_home/.codex"
@@ -569,36 +518,12 @@ HERDR_AGENT=codex run_capsule --shell --session herdr-divergence "$ROOT_DIR"
 assert_contains "$OUTPUT" '>> Agent   : claude (HERDR_AGENT=codex)'
 
 new_case
-agents_md="$CASE_DIR/agents.md"
-touch "$agents_md"
-printf 'AGENT_CAPSULE_SHARED_AGENTS_MD=%s\n' "$agents_md" > "$CAPSULE_HOME/config"
 set +e
-run_capsule --shell --session agents-md-fallback "$ROOT_DIR"
+run_capsule --shared-claude-md "$CASE_DIR/x.md" --shell --session removed-flag "$ROOT_DIR"
 status=$?
 set -e
 assert_status_fails "$status"
-assert_contains "$OUTPUT" 'legacy variable AGENT_CAPSULE_SHARED_AGENTS_MD'
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
-
-new_case
-legacy_rules="$CAPSULE_HOME/AGENTS.md"
-touch "$legacy_rules"
-set +e
-run_capsule --shell --session legacy-rules-file "$ROOT_DIR"
-status=$?
-set -e
-assert_status_fails "$status"
-assert_contains "$OUTPUT" "legacy shared rules file $legacy_rules"
-[[ ! -e "$CAPSULE_HOME/CLAUDE.md" ]] || fail "new rules file was created during preflight"
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
-
-new_case
-set +e
-run_capsule --shared-claude-md "$agents_md" --shell --session legacy-rules "$ROOT_DIR"
-status=$?
-set -e
-assert_status_fails "$status"
-assert_contains "$OUTPUT" 'legacy option --shared-claude-md'
+assert_contains "$OUTPUT" 'Unknown option: --shared-claude-md'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case

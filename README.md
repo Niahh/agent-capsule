@@ -83,10 +83,11 @@ Use `--build` to pull the base image and reproduce the selected pins without cac
 
 ## Upgrading from 0.1
 
-Version 0.2 does not change legacy configuration or state automatically. If the
-launcher detects a known setting or state path from an earlier release, it stops
-before changing files and identifies the item to update. Back up
-`~/.agent-capsule` before upgrading.
+Version 0.2 does not change legacy configuration or state automatically. The
+launcher stops before changing files if it finds the 0.1 shared authentication
+home at `auth-home/.claude`, which would otherwise mix two agents' credentials.
+Every other item below is inert rather than detected, so work through the list.
+Back up `~/.agent-capsule` before upgrading.
 
 Update the old configuration and state before launching version 0.2:
 

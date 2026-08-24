@@ -87,17 +87,6 @@ usage() {
   awk 'NR==1{next} !/^#/{exit} {sub(/^# ?/,""); print}' "$0"
 }
 
-legacy_upgrade_required() {
-  local detected="$1"
-
-  echo "Configuration or state from an earlier agent-capsule version was detected." >&2
-  echo "Detected: $detected" >&2
-  echo "No files were changed." >&2
-  echo "Read the 'Upgrading from 0.1' section:" >&2
-  echo "https://github.com/Niahh/agent-capsule#upgrading-from-01" >&2
-  exit 1
-}
-
 # Help and version must remain available even when an explicitly selected config
 # file is missing or malformed. Skip option values so a file named --help is not
 # mistaken for the flag it follows.
@@ -206,17 +195,6 @@ load_config_file() {
 CONFIG_FILE="${AGENT_CAPSULE_CONFIG:-$CONFIG_DIR/config}"
 CONFIG_FILE_LOADED=0
 load_config_file "$CONFIG_FILE" "${AGENT_CAPSULE_CONFIG:+1}" && CONFIG_FILE_LOADED=1
-
-for legacy_variable in \
-  AGENT_CAPSULE_SHARED_CLAUDE_MD \
-  AGENT_CAPSULE_SHARED_CLAUDE_MD_ENABLED \
-  AGENT_CAPSULE_SHARED_CLAUDE_MD_READONLY \
-  AGENT_CAPSULE_SHARED_AGENTS_MD; do
-  if [[ -n "${!legacy_variable+x}" ]]; then
-    legacy_upgrade_required "legacy variable $legacy_variable"
-  fi
-done
-unset legacy_variable
 
 # ----------------------------------------------------------------------------
 # Defaults (config file and environment already applied)
@@ -463,54 +441,6 @@ ensure_session_agent_marker() {
   fi
 }
 
-detect_unmarked_legacy_session_home() {
-  local session_home="$1"
-  local rel
-
-  [[ -d "$session_home" && ! -e "$session_home/.agent" ]] || return 0
-
-  for rel in \
-    .claude \
-    .claude.json \
-    .codex \
-    .config/opencode \
-    .local/share/opencode; do
-    if [[ -e "$session_home/$rel" ]]; then
-      legacy_upgrade_required "unmarked session state $session_home/$rel"
-    fi
-  done
-}
-
-detect_legacy_state() {
-  local path
-
-  for path in \
-    "$AUTH_ROOT_DIR/.claude" \
-    "$AUTH_ROOT_DIR/.claude.json" \
-    "$AUTH_ROOT_DIR/.codex" \
-    "$AUTH_ROOT_DIR/.local/share/opencode/auth.json"; do
-    if [[ -e "$path" ]]; then
-      legacy_upgrade_required "legacy authentication state $path"
-    fi
-  done
-
-  if [[ -e "$CONFIG_DIR/AGENTS.md" ]]; then
-    legacy_upgrade_required "legacy shared rules file $CONFIG_DIR/AGENTS.md"
-  fi
-
-  if [[ "$AUTH_LOGIN" != "1" ]]; then
-    if [[ -e "$HOME_DIR/.config/opencode/.opencode.json.capsule" ]]; then
-      legacy_upgrade_required \
-        "legacy OpenCode marker $HOME_DIR/.config/opencode/.opencode.json.capsule"
-    fi
-
-    detect_unmarked_legacy_session_home "$HOME_DIR"
-    if [[ -n "$LEGACY_DEFAULT_HOME" && "$LEGACY_DEFAULT_HOME" != "$HOME_DIR" ]]; then
-      detect_unmarked_legacy_session_home "$LEGACY_DEFAULT_HOME"
-    fi
-  fi
-}
-
 resolve_file_path() {
   local path="$1"
   local must_exist="${2:-0}"
@@ -604,7 +534,6 @@ SESSION_NAME="${AGENT_CAPSULE_SESSION:-}"
 DISABLE_SHARED_RULES=0
 SHARED_RULES_EXPLICIT=0
 SESSION_EXPLICIT=0
-SESSION_DEFAULTED=0
 MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
 NO_VAULT=0
 MOUNT_SPECS=()
@@ -684,9 +613,6 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
     --shared-rules-rw)
       SHARED_RULES_READONLY=0
       shift
-      ;;
-    --shared-claude-md | --shared-claude-md=* | --no-shared-claude-md | --shared-claude-md-rw)
-      legacy_upgrade_required "legacy option $1"
       ;;
     --no-shared-memory)
       SHARED_MEMORY_ENABLED=0
@@ -894,9 +820,6 @@ fi
 
 for req in "${REQUESTED_EXTRAS[@]}"; do
   case "$req" in
-    superclaude | hunkdiff)
-      legacy_upgrade_required "legacy integration $req"
-      ;;
     none)
       SELECT_NONE=1
       ;;
@@ -1019,12 +942,10 @@ while [[ "$PROJECT_BASENAME" == .* ]]; do
   PROJECT_BASENAME="${PROJECT_BASENAME#.}"
 done
 [[ -n "$PROJECT_BASENAME" ]] || PROJECT_BASENAME="project"
-LEGACY_DEFAULT_SESSION_NAME="${PROJECT_BASENAME}-${PROJECT_HASH}"
 
 if [[ "$AUTH_LOGIN" == "1" ]]; then
   SESSION_NAME="_auth"
 elif [[ -z "$SESSION_NAME" ]]; then
-  SESSION_DEFAULTED=1
   SESSION_SUFFIX="-${PROJECT_HASH}"
   # Per-agent default homes, so two agents on one project never collide.
   # Claude keeps the unsuffixed name existing session homes already use.
@@ -1047,11 +968,6 @@ if [[ "$AUTH_LOGIN" == "1" ]]; then
   HOME_DIR="$AUTH_HOME_DIR"
 else
   HOME_DIR="$CONFIG_DIR/homes/$SESSION_NAME"
-fi
-
-LEGACY_DEFAULT_HOME=""
-if [[ "$SESSION_DEFAULTED" == "1" && "$AGENT" != "claude" ]]; then
-  LEGACY_DEFAULT_HOME="$CONFIG_DIR/homes/$LEGACY_DEFAULT_SESSION_NAME"
 fi
 
 # Shared memory lives outside the per-session home. The default agent derives
@@ -1140,7 +1056,15 @@ add_mount() { # src dest [ro]
 # ----------------------------------------------------------------------------
 # Prepare persistent dirs
 # ----------------------------------------------------------------------------
-detect_legacy_state
+# 0.1 kept one shared authentication home; 0.2 splits it per agent. Leaving the
+# old one in place would silently mix two agents' credentials, so refuse. Every
+# other 0.1 artifact is inert, and the README lists the migration steps.
+if [[ -e "$AUTH_ROOT_DIR/.claude" ]]; then
+  echo "Authentication state from agent-capsule 0.1: $AUTH_ROOT_DIR/.claude" >&2
+  echo "No files were changed. Read the 'Upgrading from 0.1' section:" >&2
+  echo "https://github.com/Niahh/agent-capsule#upgrading-from-01" >&2
+  exit 1
+fi
 
 mkdir -p "$BUILD_DIR" "$AUTH_ROOT_DIR" "$AUTH_HOME_DIR" "$HOME_DIR"
 chmod 700 "$CONFIG_DIR" "$AUTH_ROOT_DIR" "$AUTH_HOME_DIR" "$HOME_DIR" 2>/dev/null || true
