@@ -48,33 +48,6 @@ exit 0
 PODMAN
 chmod +x "$FAKE_BIN/podman"
 
-printf '#!%s\n' "$BASH_BIN" > "$FAKE_BIN/curl"
-cat >> "$FAKE_BIN/curl" <<'CURL'
-set -eu
-
-url=""
-for arg in "$@"; do
-  url="$arg"
-done
-
-if [[ -n "${FAKE_CURL_FAIL:-}" && "$url" == *"$FAKE_CURL_FAIL"* ]]; then
-  exit 22
-fi
-
-case "$url" in
-  *anthropic-ai*) printf '%s\n' '{"latest":"2.1.250"}' ;;
-  *openai*) printf '%s\n' '{"latest":"0.147.0"}' ;;
-  *opencode-ai*) printf '%s\n' '{"latest":"1.19.0"}' ;;
-  *firecrawl*) printf '%s\n' '{"latest":"0.1.9"}' ;;
-  *bitbonsai*) printf '%s\n' '{"latest":"0.17.0"}' ;;
-  */skills/dist-tags) printf '%s\n' '{"latest":"1.5.22"}' ;;
-  *obra/superpowers*) printf '%s\n' '{"tag_name": "v6.4.0"}' ;;
-  *golangci*) printf '%s\n' '{"tag_name": "v2.12.2"}' ;;
-  *) exit 22 ;;
-esac
-CURL
-chmod +x "$FAKE_BIN/curl"
-
 pass_count=0
 
 fail() {
@@ -219,7 +192,7 @@ status=$?
 set -e
 [[ "$status" -eq 0 ]] || fail "--help was blocked by a missing config"
 assert_contains "$OUTPUT" 'Usage:'
-assert_contains "$OUTPUT" '--check-updates'
+assert_contains "$OUTPUT" '--versions'
 assert_contains "$OUTPUT" '--shared-rules PATH'
 [[ "$(wc -l < "$OUTPUT")" -le 45 ]] || fail "--help is too verbose"
 AGENT_CAPSULE_CONFIG="$CASE_DIR/missing" "$BASH_BIN" "$SCRIPT" --version > "$OUTPUT" 2>&1 ||
@@ -246,30 +219,6 @@ new_case
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 run_capsule --versions
 assert_contains "$OUTPUT" 'claude-code 9.8.7'
 assert_contains "$OUTPUT" 'codex 0.147.0'
-assert_not_contains "$PODMAN_LOG" 'CALL='
-
-new_case
-run_capsule --check-updates
-assert_contains "$OUTPUT" 'TOOL             CONFIGURED       LATEST           STATUS'
-assert_contains "$OUTPUT" 'claude-code      2.1.234          2.1.250          available'
-assert_contains "$OUTPUT" 'codex            0.147.0          0.147.0          current'
-assert_contains "$OUTPUT" 'superpowers      v6.3.0           v6.4.0           available'
-assert_contains "$OUTPUT" 'golangci-lint    v2.12.2          v2.12.2          current'
-assert_not_contains "$PODMAN_LOG" 'CALL='
-
-new_case
-AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 run_capsule --check-updates
-assert_contains "$OUTPUT" 'claude-code      9.8.7            2.1.250          configured newer'
-assert_not_contains "$PODMAN_LOG" 'CALL='
-
-new_case
-set +e
-FAKE_CURL_FAIL=obra/superpowers run_capsule --check-updates
-status=$?
-set -e
-assert_status_fails "$status"
-assert_contains "$OUTPUT" 'superpowers      v6.3.0           unavailable      lookup failed'
-assert_contains "$OUTPUT" 'configured versions were not changed'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 new_case

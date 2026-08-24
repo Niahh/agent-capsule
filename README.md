@@ -116,16 +116,9 @@ Update the old configuration and state before launching version 0.2:
 
 ## Tool versions and upgrades
 
-Bundled tools are pinned, and agent-capsule does not check for newer releases at
-startup. Check the configured bundle against the latest stable releases with:
-
-```sh
-agent-capsule --check-updates
-```
-
-This command needs `curl` and network access. It only prints results. It does not
-change configuration or rebuild the image. To use another version, set its version
-variable in `~/.agent-capsule/config` and rebuild the image:
+Bundled tools are pinned, and agent-capsule does not check for newer releases. To
+use another version, set its version variable in `~/.agent-capsule/config` and
+rebuild the image:
 
 ```text
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=2.1.234
@@ -211,7 +204,6 @@ overrides.
 | Flag                                             | Effect                                                                             |
 |--------------------------------------------------|------------------------------------------------------------------------------------|
 | `--build`                                        | rebuild without cache and pull the configured base image                           |
-| `--check-updates`                                | compare configured tool versions with upstream stable releases                     |
 | `--shell`                                        | start bash instead of the agent                                                    |
 | `--keep-id`                                      | run as your UID inside too (needed for `--dangerously-skip-permissions`)           |
 | `--offline`                                      | no network inside the container                                                    |

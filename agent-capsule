@@ -22,12 +22,11 @@
 #   --no-shared-memory     disable Claude project memory
 #   --build                rebuild the universal image without cache
 #   --versions             print configured tool versions
-#   --check-updates        compare configured and upstream tool versions
 #   --version              print the launcher version
 #   -h, --help             show this help
 #
 # Integrations:
-#   superpowers, mcpvault, anydoc
+#   superpowers, explain-diff, mcpvault, anydoc
 #   mcpvault requires --vault. anydoc is available only with claude.
 #
 # Persistent defaults: ~/.agent-capsule/config
@@ -374,123 +373,6 @@ require_cmd() {
     echo "$1 is not installed or not on PATH." >&2
     exit 1
   }
-}
-
-json_string_field() {
-  local json="$1"
-  local field="$2"
-  local pattern
-
-  pattern="\"$field\"[[:space:]]*:[[:space:]]*\"([^\"]+)\""
-  [[ "$json" =~ $pattern ]] || return 1
-  printf '%s' "${BASH_REMATCH[1]}"
-}
-
-classify_version_status() {
-  local configured="${1#v}"
-  local latest="${2#v}"
-  local configured_release="${configured%%+*}"
-  local latest_release="${latest%%+*}"
-  local configured_base="${configured_release%%-*}"
-  local latest_base="${latest_release%%-*}"
-  local configured_pre=""
-  local latest_pre=""
-  local configured_major configured_minor configured_patch
-  local latest_major latest_minor latest_patch
-
-  [[ "$configured_release" == *-* ]] && configured_pre="${configured_release#*-}"
-  [[ "$latest_release" == *-* ]] && latest_pre="${latest_release#*-}"
-  IFS=. read -r configured_major configured_minor configured_patch <<< "$configured_base"
-  IFS=. read -r latest_major latest_minor latest_patch <<< "$latest_base"
-
-  if [[ ! "$configured_major" =~ ^[0-9]+$ ]] ||
-     [[ ! "$configured_minor" =~ ^[0-9]+$ ]] ||
-     [[ ! "$configured_patch" =~ ^[0-9]+$ ]] ||
-     [[ ! "$latest_major" =~ ^[0-9]+$ ]] ||
-     [[ ! "$latest_minor" =~ ^[0-9]+$ ]] ||
-     [[ ! "$latest_patch" =~ ^[0-9]+$ ]]; then
-    printf '%s' different
-    return 0
-  fi
-
-  configured_major=$((10#$configured_major))
-  configured_minor=$((10#$configured_minor))
-  configured_patch=$((10#$configured_patch))
-  latest_major=$((10#$latest_major))
-  latest_minor=$((10#$latest_minor))
-  latest_patch=$((10#$latest_patch))
-
-  if ((latest_major > configured_major)) ||
-     ((latest_major == configured_major && latest_minor > configured_minor)) ||
-     ((latest_major == configured_major && latest_minor == configured_minor &&
-       latest_patch > configured_patch)); then
-    printf '%s' available
-  elif ((latest_major < configured_major)) ||
-       ((latest_major == configured_major && latest_minor < configured_minor)) ||
-       ((latest_major == configured_major && latest_minor == configured_minor &&
-         latest_patch < configured_patch)); then
-    printf '%s' 'configured newer'
-  elif [[ -n "$configured_pre" && -z "$latest_pre" ]]; then
-    printf '%s' available
-  elif [[ -z "$configured_pre" && -n "$latest_pre" ]]; then
-    printf '%s' 'configured newer'
-  elif [[ "$configured_pre" == "$latest_pre" ]]; then
-    printf '%s' current
-  else
-    printf '%s' different
-  fi
-}
-
-print_update_status() {
-  local tool="$1"
-  local configured="$2"
-  local url="$3"
-  local field="$4"
-  local response
-  local latest
-  local status
-
-  if ! response="$(
-    curl -fsSL --connect-timeout 5 --max-time 15 \
-      -H 'Accept: application/json' \
-      -A "agent-capsule/$VERSION" \
-      "$url" 2>/dev/null
-  )" || ! latest="$(json_string_field "$response" "$field")"; then
-    printf '%-16s %-16s %-16s %s\n' "$tool" "$configured" unavailable 'lookup failed'
-    UPDATE_CHECK_FAILED=1
-    return 0
-  fi
-
-  status="$(classify_version_status "$configured" "$latest")"
-  printf '%-16s %-16s %-16s %s\n' "$tool" "$configured" "$latest" "$status"
-}
-
-check_updates() {
-  require_cmd curl
-  UPDATE_CHECK_FAILED=0
-
-  printf '%-16s %-16s %-16s %s\n' TOOL CONFIGURED LATEST STATUS
-  print_update_status claude-code "$CLAUDE_CODE_VERSION" \
-    'https://registry.npmjs.org/-/package/%40anthropic-ai%2Fclaude-code/dist-tags' latest
-  print_update_status codex "$CODEX_VERSION" \
-    'https://registry.npmjs.org/-/package/%40openai%2Fcodex/dist-tags' latest
-  print_update_status opencode "$OPENCODE_VERSION" \
-    'https://registry.npmjs.org/-/package/opencode-ai/dist-tags' latest
-  print_update_status anydoc "$ANYDOC_VERSION" \
-    'https://registry.npmjs.org/-/package/%40firecrawl%2Fanydoc/dist-tags' latest
-  print_update_status mcpvault "$MCPVAULT_VERSION" \
-    'https://registry.npmjs.org/-/package/%40bitbonsai%2Fmcpvault/dist-tags' latest
-  print_update_status skills "$SKILLS_VERSION" \
-    'https://registry.npmjs.org/-/package/skills/dist-tags' latest
-  print_update_status superpowers "$SUPERPOWERS_VERSION" \
-    'https://api.github.com/repos/obra/superpowers/releases/latest' tag_name
-  print_update_status golangci-lint "$GOLANGCI_LINT_VERSION" \
-    'https://api.github.com/repos/golangci/golangci-lint/releases/latest' tag_name
-
-  if [[ "$UPDATE_CHECK_FAILED" == "1" ]]; then
-    echo "One or more update checks failed; configured versions were not changed." >&2
-    return 1
-  fi
 }
 
 ensure_minimal_gitconfig() {
@@ -933,13 +815,6 @@ superpowers $SUPERPOWERS_VERSION
 golangci-lint $GOLANGCI_LINT_VERSION
 VERSIONS
       exit 0
-      ;;
-    --check-updates)
-      if check_updates; then
-        exit 0
-      else
-        exit 1
-      fi
       ;;
     -h|--help)
       usage
