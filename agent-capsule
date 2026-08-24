@@ -241,15 +241,6 @@ AGENT="${AGENT_CAPSULE_AGENT:-claude}"
 # canonical so status output does not depend on how the user spelled the list.
 KNOWN_EXTRAS=(anydoc explain-diff mcpvault superpowers)
 
-# Some extras ship files for ~/.claude and are useless to other agents.
-extra_supported_by_agent() { # $1=extra $2=agent
-  case "$1:$2" in
-    anydoc:claude) return 0 ;;
-    anydoc:*) return 1 ;;
-    *) return 0 ;;
-  esac
-}
-
 BUILD_DIR="$CONFIG_DIR/build"
 AUTH_ROOT_DIR="$CONFIG_DIR/auth-home"
 
@@ -304,8 +295,6 @@ load_agent_profile() {
       # Where the shared rules file is mounted, rel to /home/dev.
       AGENT_RULES_REL=".claude/CLAUDE.md"
       AGENT_SKILLS_REL=".claude/skills"
-      # Resolved after the project and its main Git worktree are known.
-      AGENT_MEMORY_REL="dynamic"
       # flag: pass a generated file with --mcp-config.
       # override: use CLI settings. env: merge invocation-scoped config.
       AGENT_MCP_MODE="flag"
@@ -320,7 +309,6 @@ load_agent_profile() {
       AGENT_CRED_REL=.codex/auth.json
       AGENT_RULES_REL=.codex/AGENTS.md
       AGENT_SKILLS_REL=.codex/skills
-      AGENT_MEMORY_REL=""
       AGENT_MCP_MODE="override"
       AGENT_ENV_PASS=(OPENAI_API_KEY)
       AGENT_AUTH_DEVICE_DEFAULT=1
@@ -334,7 +322,6 @@ load_agent_profile() {
       AGENT_CRED_REL=".local/share/opencode/auth.json"
       AGENT_RULES_REL=".config/opencode/AGENTS.md"
       AGENT_SKILLS_REL=".config/opencode/skills"
-      AGENT_MEMORY_REL=""
       AGENT_MCP_MODE="env"
       AGENT_ENV_PASS=(ANTHROPIC_API_KEY OPENAI_API_KEY)
       AGENT_AUTH_DEVICE_DEFAULT=0
@@ -630,6 +617,14 @@ EXTRAS_REQUESTED=()
 WITH_EXPLICIT=0
 
 while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
+  # Split the =VALUE form once, so each value-taking flag is implemented once.
+  # --vault is deliberately absent: its bare form takes no separate value.
+  case "$1" in
+    --agent=* | --session=* | --shared-rules=* | --with=* | --mount=*)
+      set -- "${1%%=*}" "${1#*=}" "${@:2}"
+      ;;
+  esac
+
   case "$1" in
     --build)
       FORCE_BUILD=1
@@ -663,14 +658,6 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       AGENT="$2"
       shift 2
       ;;
-    --agent=*)
-      [[ "${1#--agent=}" == "list" ]] && {
-        printf '%s\n' "${KNOWN_AGENTS[@]}"
-        exit 0
-      }
-      AGENT="${1#--agent=}"
-      shift
-      ;;
     --session)
       [[ -n "${2:-}" ]] || {
         echo "--session requires a name." >&2
@@ -679,15 +666,6 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       SESSION_NAME="$2"
       SESSION_EXPLICIT=1
       shift 2
-      ;;
-    --session=*)
-      SESSION_NAME="${1#--session=}"
-      [[ -n "$SESSION_NAME" ]] || {
-        echo "--session= requires a name." >&2
-        exit 1
-      }
-      SESSION_EXPLICIT=1
-      shift
       ;;
     --shared-rules)
       [[ -n "${2:-}" ]] || {
@@ -698,12 +676,6 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       SHARED_RULES_ENABLED=1
       SHARED_RULES_EXPLICIT=1
       shift 2
-      ;;
-    --shared-rules=*)
-      SHARED_RULES="${1#*=}"
-      SHARED_RULES_ENABLED=1
-      SHARED_RULES_EXPLICIT=1
-      shift
       ;;
     --no-shared-rules)
       DISABLE_SHARED_RULES=1
@@ -738,20 +710,6 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       EXTRAS_REQUESTED+=("$2")
       shift 2
       ;;
-    --with=*)
-      [[ -n "${1#--with=}" ]] || {
-        echo "--with= requires a tool list (or 'list'/'none'). Known: ${KNOWN_EXTRAS[*]}" >&2
-        exit 1
-      }
-      [[ "${1#--with=}" == "list" ]] && {
-        printf '%s\n' "${KNOWN_EXTRAS[@]}"
-        exit 0
-      }
-      [[ "$WITH_EXPLICIT" == "0" ]] && EXTRAS_REQUESTED=()
-      WITH_EXPLICIT=1
-      EXTRAS_REQUESTED+=("${1#--with=}")
-      shift
-      ;;
     -m|--mount)
       [[ -n "${2:-}" ]] || {
         echo "--mount requires an argument: SRC[:DEST][:ro]" >&2
@@ -759,10 +717,6 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       }
       MOUNT_SPECS+=("$2")
       shift 2
-      ;;
-    --mount=*)
-      MOUNT_SPECS+=("${1#--mount=}")
-      shift
       ;;
     --vault)
       # Bare form only: a space-separated optional path would be ambiguous with
@@ -833,11 +787,9 @@ AGENT_ENV_PASS+=(
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 )
 
-# Per-project memory is a Claude Code mechanism; agents without an equivalent
-# get it disabled outright (the memory flags become accepted no-ops).
-if [[ -z "$AGENT_MEMORY_REL" ]]; then
-  SHARED_MEMORY_ENABLED=0
-fi
+# Per-project memory is a Claude Code mechanism; other agents get it disabled
+# outright (the memory flags become accepted no-ops).
+[[ "$AGENT" == "claude" ]] || SHARED_MEMORY_ENABLED=0
 if [[ "$DISABLE_SHARED_RULES" == "1" ]]; then
   SHARED_RULES_ENABLED=0
 fi
@@ -933,77 +885,70 @@ sha256_file() {
 # --with b --with a --with a must produce the same runtime selection.
 EXTRAS=""
 SELECT_NONE=0
+REQUESTED_EXTRAS=()
+
 if [[ "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
-  read -r -a requested <<<"$(printf '%s ' "${EXTRAS_REQUESTED[@]}" | tr 'A-Z,' 'a-z ')"
-
-  # `none` selects nothing, the escape hatch from a config-file default.
-  for req in "${requested[@]}"; do
-    case "$req" in
-      superclaude | hunkdiff)
-        legacy_upgrade_required "legacy integration $req"
-        ;;
-    esac
-    [[ "$req" == "none" ]] && SELECT_NONE=1
-  done
-
-  # Combining `none` with real tools is contradictory; silently dropping the
-  # tools would look like they were selected.
-  if [[ "$SELECT_NONE" == "1" ]]; then
-    for req in "${requested[@]}"; do
-      [[ "$req" == "none" ]] || {
-        echo "--with none cannot be combined with other tools (got: $req)" >&2
-        exit 1
-      }
-    done
-  fi
+  # tr does two jobs here: fold case, and split the comma lists into words.
+  read -r -a REQUESTED_EXTRAS <<<"$(printf '%s ' "${EXTRAS_REQUESTED[@]}" | tr 'A-Z,' 'a-z ')"
 fi
 
-if [[ "$SELECT_NONE" == "0" && "${#EXTRAS_REQUESTED[@]}" -gt 0 ]]; then
-  for req in "${requested[@]}"; do
-    known=0
-    for extra in "${KNOWN_EXTRAS[@]}"; do
-      [[ "$req" == "$extra" ]] && known=1 && break
-    done
-    [[ "$known" == "1" ]] || {
-      echo "Unknown extra tool: $req (known: ${KNOWN_EXTRAS[*]})" >&2
+for req in "${REQUESTED_EXTRAS[@]}"; do
+  case "$req" in
+    superclaude | hunkdiff)
+      legacy_upgrade_required "legacy integration $req"
+      ;;
+    none)
+      SELECT_NONE=1
+      ;;
+    *)
+      known=0
+      for extra in "${KNOWN_EXTRAS[@]}"; do
+        [[ "$req" == "$extra" ]] && known=1 && break
+      done
+      [[ "$known" == "1" ]] || {
+        echo "Unknown extra tool: $req (known: ${KNOWN_EXTRAS[*]})" >&2
+        exit 1
+      }
+      ;;
+  esac
+done
+
+# Combining `none` with real tools is contradictory; silently dropping the
+# tools would look like they were selected.
+if [[ "$SELECT_NONE" == "1" ]]; then
+  for req in "${REQUESTED_EXTRAS[@]}"; do
+    [[ "$req" == "none" ]] || {
+      echo "--with none cannot be combined with other tools (got: $req)" >&2
       exit 1
     }
-  done
-
-  for extra in "${KNOWN_EXTRAS[@]}"; do
-    for req in "${requested[@]}"; do
-      [[ "$req" == "$extra" ]] && {
-        EXTRAS="${EXTRAS:+$EXTRAS,}$extra"
-        break
-      }
-    done
   done
 fi
 
 # Authentication uses a dedicated home without project integrations or mounts.
 if [[ "$AUTH_LOGIN" == "1" ]]; then
-  EXTRAS=""
+  REQUESTED_EXTRAS=()
   SHARED_MEMORY_ENABLED=0
   MOUNT_VAULT=0
 fi
 
-# Agent-specific integrations never activate under an unsupported agent. An explicit
-# --with fails loudly; a config-file default is dropped so a persistent
-# AGENT_CAPSULE_WITH does not block switching agents.
-if [[ -n "$EXTRAS" ]]; then
-  KEPT_EXTRAS=""
-  for extra in ${EXTRAS//,/ }; do
-    if extra_supported_by_agent "$extra" "$AGENT"; then
-      KEPT_EXTRAS="${KEPT_EXTRAS:+$KEPT_EXTRAS,}$extra"
+# Emit in canonical order. Agent-specific integrations never activate under an
+# unsupported agent: an explicit --with fails loudly, while an ambient default
+# is dropped so a persistent AGENT_CAPSULE_WITH does not block switching agents.
+for extra in "${KNOWN_EXTRAS[@]}"; do
+  for req in "${REQUESTED_EXTRAS[@]}"; do
+    [[ "$req" == "$extra" ]] || continue
+    # anydoc ships files for ~/.claude and is useless to the other agents.
+    if [[ "$extra" != "anydoc" || "$AGENT" == "claude" ]]; then
+      EXTRAS="${EXTRAS:+$EXTRAS,}$extra"
     elif [[ "$WITH_EXPLICIT" == "1" ]]; then
       echo "Extra '$extra' is not available with --agent $AGENT." >&2
       exit 1
     else
       echo ">> Extras  : dropping '$extra' (unsupported by agent $AGENT)" >&2
     fi
+    break
   done
-  EXTRAS="$KEPT_EXTRAS"
-fi
+done
 
 # A custom image may include its own tag. Untagged names use one stable tag for
 # every agent and runtime integration selection.
@@ -1069,10 +1014,12 @@ fi
 project_hash_full="$(printf '%s' "$PROJECT_DIR" | sha256_stream)"
 PROJECT_HASH="${project_hash_full:0:12}"
 PROJECT_BASENAME="$(sanitize_name "$(basename "$PROJECT_DIR")")"
+# A leading dot is rejected below, and a project directory may well be hidden.
+while [[ "$PROJECT_BASENAME" == .* ]]; do
+  PROJECT_BASENAME="${PROJECT_BASENAME#.}"
+done
 [[ -n "$PROJECT_BASENAME" ]] || PROJECT_BASENAME="project"
 LEGACY_DEFAULT_SESSION_NAME="${PROJECT_BASENAME}-${PROJECT_HASH}"
-
-MAX_SESSION_NAME_LENGTH=120
 
 if [[ "$AUTH_LOGIN" == "1" ]]; then
   SESSION_NAME="_auth"
@@ -1082,24 +1029,17 @@ elif [[ -z "$SESSION_NAME" ]]; then
   # Per-agent default homes, so two agents on one project never collide.
   # Claude keeps the unsuffixed name existing session homes already use.
   [[ "$AGENT" != "claude" ]] && SESSION_SUFFIX="${SESSION_SUFFIX}-${AGENT}"
-  PROJECT_BASENAME="${PROJECT_BASENAME:0:$((MAX_SESSION_NAME_LENGTH - ${#SESSION_SUFFIX}))}"
+  # Keep the generated name inside the 120 characters the check below allows.
+  PROJECT_BASENAME="${PROJECT_BASENAME:0:$((120 - ${#SESSION_SUFFIX}))}"
   SESSION_NAME="${PROJECT_BASENAME}${SESSION_SUFFIX}"
 fi
 
-if [[ ! "$SESSION_NAME" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-  echo "Invalid session name. Use only letters, digits, dots, underscores, and hyphens." >&2
-  exit 1
-fi
-
-if [[ "${#SESSION_NAME}" -gt "$MAX_SESSION_NAME_LENGTH" ]]; then
-  echo "Session name is too long (${#SESSION_NAME} characters; maximum $MAX_SESSION_NAME_LENGTH)." >&2
-  exit 1
-fi
-
-# A name of "." or ".." would make HOME_DIR resolve to homes/ or the whole
-# config dir and mount sibling sessions, auth state, and project memory.
-if [[ "$SESSION_NAME" == "." || "$SESSION_NAME" == ".." ]]; then
-  echo "Invalid session name: '$SESSION_NAME' (resolves outside the session home)." >&2
+# Charset, length, and the "." / ".." cases in one rule. Excluding a leading
+# dot is what covers the last two: either would make HOME_DIR resolve to homes/
+# or the whole state dir and mount sibling sessions, auth state, and memory.
+if [[ ! "$SESSION_NAME" =~ ^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,119}$ ]]; then
+  echo "Invalid session name: '$SESSION_NAME'." >&2
+  echo "Use 1 to 120 letters, digits, dots, underscores, or hyphens, not starting with a dot." >&2
   exit 1
 fi
 
@@ -1119,16 +1059,18 @@ fi
 # converge on the same host directory. The in-container path must follow the
 # agent's cwd instead: claude derives its projects slug from where it runs.
 PROJECT_MEMORY_KEY="$PROJECT_DIR"
+AGENT_MEMORY_REL=""
+CONTAINER_MEMORY_PATH=""
 if [[ "$AGENT" == "claude" ]]; then
   [[ -n "$GIT_MAIN_WORKTREE" ]] && PROJECT_MEMORY_KEY="$GIT_MAIN_WORKTREE"
   project_memory_hash_full="$(printf '%s' "$PROJECT_MEMORY_KEY" | sha256_stream)"
   PROJECT_MEMORY_HASH="${project_memory_hash_full:0:12}"
   AGENT_MEMORY_SLUG="$(printf '%s' "$CONTAINER_PROJECT_DIR" | tr -c 'a-zA-Z0-9' '-')"
   AGENT_MEMORY_REL=".claude/projects/$AGENT_MEMORY_SLUG/memory"
+  CONTAINER_MEMORY_PATH="/home/dev/$AGENT_MEMORY_REL"
 else
   PROJECT_MEMORY_HASH="$PROJECT_HASH"
 fi
-CONTAINER_MEMORY_PATH="/home/dev/$AGENT_MEMORY_REL"
 PROJECT_MEMORY_DIR="$CONFIG_DIR/project-memory/$PROJECT_MEMORY_HASH"
 
 if [[ "$MOUNT_VAULT" == "1" ]]; then
@@ -1360,28 +1302,28 @@ fi
 # ----------------------------------------------------------------------------
 # Environment passed to container
 # ----------------------------------------------------------------------------
-EXTRA=()
+ENV_ARGS=()
 
 # The entrypoint activates only the integrations selected for this invocation.
-EXTRA+=(-e "AGENT_CAPSULE_AGENT=$AGENT")
-EXTRA+=(-e "AGENT_CAPSULE_WITH=$EXTRAS")
-EXTRA+=(-e "AGENT_CAPSULE_SKILLS_DIR=/home/dev/$AGENT_SKILLS_REL")
+ENV_ARGS+=(-e "AGENT_CAPSULE_AGENT=$AGENT")
+ENV_ARGS+=(-e "AGENT_CAPSULE_WITH=$EXTRAS")
+ENV_ARGS+=(-e "AGENT_CAPSULE_SKILLS_DIR=/home/dev/$AGENT_SKILLS_REL")
 
 # Do not place the secret values directly in the podman command line.
 for key in "${AGENT_ENV_PASS[@]}"; do
   if [[ -n "${!key:-}" ]]; then
-    EXTRA+=(-e "$key")
+    ENV_ARGS+=(-e "$key")
   fi
 done
 
 if [[ -n "$OPENCODE_RUNTIME_CONFIG" ]]; then
-  EXTRA+=(-e "OPENCODE_CONFIG_CONTENT=$OPENCODE_RUNTIME_CONFIG")
+  ENV_ARGS+=(-e "OPENCODE_CONFIG_CONTENT=$OPENCODE_RUNTIME_CONFIG")
 fi
 
 # Herdr wrapper hint. The host foreground process is podman, while the agent
 # runs inside the container.
 export HERDR_AGENT="${HERDR_AGENT:-$AGENT}"
-EXTRA+=(-e "HERDR_AGENT=$HERDR_AGENT")
+ENV_ARGS+=(-e "HERDR_AGENT=$HERDR_AGENT")
 
 # ----------------------------------------------------------------------------
 # Extra mounts: SRC[:DEST][:ro] -> -v SRC:DEST[:opts]
@@ -1586,7 +1528,7 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
   mem_mode="read-write"
   [[ "$SHARED_MEMORY_READONLY" == "1" ]] && mem_mode="read-only"
   echo ">> ProjMem : $PROJECT_MEMORY_DIR -> $CONTAINER_MEMORY_PATH (shared per-project, $mem_mode)"
-elif [[ -z "$AGENT_MEMORY_REL" && "$AUTH_LOGIN" != "1" ]]; then
+elif [[ "$AGENT" != "claude" && "$AUTH_LOGIN" != "1" ]]; then
   echo ">> ProjMem : not supported by $AGENT"
 fi
 
@@ -1636,7 +1578,7 @@ exec podman run "${TTY_ARGS[@]}" --rm --init \
   --label "ai.agent=$AGENT" \
   --label "ai.session=$SESSION_NAME" \
   -e TERM="${TERM:-xterm-256color}" \
-  "${EXTRA[@]}" \
+  "${ENV_ARGS[@]}" \
   "${MOUNT_ARGS[@]}" \
   -w "$CONTAINER_PROJECT_DIR" \
   "$IMAGE_REF" "${RUN_CMD[@]}"

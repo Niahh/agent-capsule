@@ -407,7 +407,7 @@ run_capsule --with= --shell --session empty-extra "$ROOT_DIR"
 status=$?
 set -e
 assert_status_fails "$status"
-assert_contains "$OUTPUT" '--with= requires a tool list'
+assert_contains "$OUTPUT" '--with requires a tool list'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
@@ -451,7 +451,7 @@ run_capsule --shell --session "$long_session" "$ROOT_DIR"
 status=$?
 set -e
 assert_status_fails "$status"
-assert_contains "$OUTPUT" 'Session name is too long'
+assert_contains "$OUTPUT" 'not starting with a dot'
 
 new_case
 set +e
@@ -459,7 +459,7 @@ run_capsule --shell --session 'fix/auth' "$ROOT_DIR"
 status=$?
 set -e
 assert_status_fails "$status"
-assert_contains "$OUTPUT" 'Invalid session name. Use only letters, digits, dots, underscores, and hyphens.'
+assert_contains "$OUTPUT" "Invalid session name: 'fix/auth'."
 [[ ! -e "$CAPSULE_HOME/homes/fixauth" ]] || fail "invalid session name was normalized"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -469,8 +469,15 @@ run_capsule --shell --session= "$ROOT_DIR"
 status=$?
 set -e
 assert_status_fails "$status"
-assert_contains "$OUTPUT" '--session= requires a name.'
+assert_contains "$OUTPUT" '--session requires a name.'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
+
+new_case
+hidden_project="$CASE_DIR/.dotfiles"
+mkdir -p "$hidden_project"
+run_capsule --shell "$hidden_project"
+assert_contains "$OUTPUT" '>> Session : dotfiles-'
+assert_not_contains "$OUTPUT" 'Invalid session name'
 
 for invalid_session in . ..; do
   new_case
