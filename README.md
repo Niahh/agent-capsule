@@ -29,8 +29,8 @@ limits. Everything else on the host stays out of reach.
 - Shared knowledge: one global rules file (`~/.agent-capsule/CLAUDE.md`) is mounted
   into every session at the agent's expected path, and Claude's per-project memory
   is pooled across sessions and linked worktrees of the same repo.
-- One reusable image: every supported agent and integration is bundled once.
-  `--agent` selects the CLI, and `--with` activates only the requested integrations.
+- Nothing you did not ask for: the image holds the agent `--agent` picked and the
+  integrations `--with` activated, and rebuilds when that selection changes.
 - Defaults you keep: exported `AGENT_CAPSULE_*` variables hold your usual add-ons
   so they are not retyped on every run.
 
@@ -73,13 +73,19 @@ Leaving out `$HOME:$HOME` breaks the launch, since agent-capsule bind-mounts
 
 ```sh
 make install                    # -> ~/.local/bin/agent-capsule
-                                #    ~/.local/share/agent-capsule/Dockerfile
+                                #    ~/.local/share/agent-capsule/{Dockerfile,entrypoint.sh}
 make install PREFIX=/usr/local  # alternative destination
 ```
 
-The container image builds automatically on first run and when its Dockerfile, base
-tags, or tool version pins change. Agent and integration selection never rebuild it.
-Use `--build` to pull the base image and reproduce the selected pins without cache.
+The image builds on first run and again whenever the selection changes, because it
+contains only the agent and integrations the run asked for. Switching back is
+usually seconds: the layers of a combination you have built before are cached, so
+only the first build of each is slow. Each rebuild also removes the untagged image
+it replaced, which `AGENT_CAPSULE_PRUNE=0` disables.
+
+It also rebuilds once the image is more than seven days old, to pick up new tool
+releases. See [Tool versions and upgrades](#tool-versions-and-upgrades).
+Use `--build` to rebuild from scratch at any time.
 
 ## Upgrading from 0.1
 
@@ -98,10 +104,9 @@ Update the old configuration and state before launching version 0.2:
   with `AGENT_CAPSULE_SHARED_RULES`. Rename the related `_ENABLED` and `_READONLY`
   variables in the same way.
 - Replace the `--shared-claude-md*` flags with their `--shared-rules*` equivalents.
-- The launcher now uses one image, `<AGENT_CAPSULE_IMAGE>:latest`. Older `:base`,
-  hashed integration, and agent-specific images are not selected or removed automatically.
-- Tools are pinned. `--build` reproduces the configured versions instead of selecting
-  newer package releases.
+- The launcher uses one tag, `<AGENT_CAPSULE_IMAGE>:latest`, rebuilt per selection.
+  Older `:base` and hashed integration images are never selected again; remove them
+  with `podman rmi`.
 - Credentials now live in `auth-home/<agent>/`. Move the legacy root entries
   (`.claude`, `.claude.json`, `.codex`, and `.local/share/opencode/auth.json`)
   out of `auth-home/`, then authenticate each agent again with
@@ -117,19 +122,29 @@ Update the old configuration and state before launching version 0.2:
 
 ## Tool versions and upgrades
 
-Bundled tools are pinned, and agent-capsule does not check for newer releases. To
-use another version, export its version variable and rebuild the image:
+Every bundled tool installs its latest release when the image is built. There is
+nothing to pin and nothing to bump.
 
-```text
-AGENT_CAPSULE_CLAUDE_CODE_VERSION=2.1.234
-```
+Because "latest" is only true as of the build, the image is rebuilt once it is
+older than seven days, pulling the base image and bypassing the layer cache.
+Change the window or switch it off:
 
 ```sh
+export AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=14   # refresh fortnightly
+export AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=0    # never refresh on age alone
+```
+
+`agent-capsule --build .` refreshes immediately, whatever the setting.
+
+If an upstream release breaks something, pin that one tool and rebuild:
+
+```sh
+export AGENT_CAPSULE_CLAUDE_CODE_VERSION=2.1.234
 agent-capsule --build .
 ```
 
-The variable must stay set on later runs, or that package returns to the version
-the installed agent-capsule release ships. The available variables are:
+The variable must stay set on later runs, or the tool goes back to tracking
+latest. The available variables are:
 
 ```text
 AGENT_CAPSULE_CLAUDE_CODE_VERSION
@@ -143,7 +158,7 @@ AGENT_CAPSULE_GOLANGCI_LINT_VERSION
 ```
 
 Superpowers and golangci-lint use Git tags, including the leading `v`.
-Use `agent-capsule --versions` to inspect the selected pins.
+`agent-capsule --versions` prints `latest` for everything unpinned.
 
 ## Quick start
 
@@ -167,16 +182,17 @@ Claude Code is the default. `--agent codex` runs the OpenAI Codex CLI and `--age
 opencode` runs [opencode](https://opencode.ai); `AGENT_CAPSULE_AGENT` sets the same
 default, and `--agent list` prints the known agents.
 
-All agents use one image. Each gets its own default session per project and its own
+Only the selected agent's CLI is installed, so `--agent` rebuilds the image. Each
+agent gets its own default session per project and its own
 login: run `agent-capsule --agent NAME --auth-login` once. Credentials live under
 separate agent directories, and only the selected agent's credential file is mounted
 into a session. The global rules file is the same for every agent, mounted as `CLAUDE.md`
 for claude and `AGENTS.md` for Codex and opencode. A session home stays bound to the
 agent that created it.
 
-The `superpowers` integration activates the bundled
-[Superpowers](https://github.com/obra/superpowers) checkout through each agent's
-plugin mechanism. It does not need network access to load after the image is built.
+The `superpowers` integration activates the [Superpowers](https://github.com/obra/superpowers)
+checkout through each agent's plugin mechanism. It is cloned into the image when
+selected, so it needs no network access to load afterwards.
 
 The `explain-diff` integration activates Geoffrey Litt's
 [HTML diff explanation skill](https://gist.github.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524)
@@ -202,7 +218,7 @@ overrides.
 
 | Flag                                             | Effect                                                                             |
 |--------------------------------------------------|------------------------------------------------------------------------------------|
-| `--build`                                        | rebuild without cache and pull the configured base image                           |
+| `--build`                                        | rebuild from scratch: pull the base image and bypass the layer cache               |
 | `--shell`                                        | start bash instead of the agent                                                    |
 | `--keep-id`                                      | run as your UID inside too (needed for `--dangerously-skip-permissions`)           |
 | `--offline`                                      | no network inside the container                                                    |
@@ -217,7 +233,7 @@ overrides.
 | `--shared-rules PATH`                            | use a specific global rules file                                                   |
 | `--shared-rules-rw`, `--no-shared-rules`         | writable or disabled global rules file                                              |
 | `--version`                                      | print the version and exit                                                         |
-| `--versions`                                     | print the pinned tool bundle and exit                                              |
+| `--versions`                                     | print each tool's pin, or `latest` where none is set, and exit                     |
 
 ## Obsidian vault over MCP
 
