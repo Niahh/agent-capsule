@@ -104,6 +104,10 @@ SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-}"
 SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-}"
 GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-}"
 
+# Unpinned tools track latest at build time, so an old image quietly stops doing
+# that. Age is the only signal for it: the bundle hash cannot see upstream move.
+MAX_IMAGE_AGE_DAYS="${AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS:-7}"
+
 # CLI to run inside the capsule. --agent overrides this. Only the selected CLI is
 # installed, so changing it rebuilds the image.
 AGENT="${AGENT_CAPSULE_AGENT:-claude}"
@@ -681,9 +685,15 @@ for tagged_version in "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION"; do
 done
 unset tagged_version
 
+if [[ ! "$MAX_IMAGE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "Invalid AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS: $MAX_IMAGE_AGE_DAYS (whole days, 0 disables)." >&2
+  exit 1
+fi
+
 require_cmd podman
 require_cmd awk
 require_cmd tr
+require_cmd date
 
 if command -v sha256sum >/dev/null 2>&1; then
   SHA256_COMMAND=(sha256sum)
@@ -694,6 +704,13 @@ else
   echo "sha256sum or shasum is required but neither is installed or on PATH." >&2
   exit 1
 fi
+
+refresh_is_stale() { # refreshed-epoch
+  local refreshed="$1"
+
+  [[ "$MAX_IMAGE_AGE_DAYS" != "0" ]] || return 1
+  [[ "$(($(date +%s) - refreshed))" -gt "$((MAX_IMAGE_AGE_DAYS * 86400))" ]]
+}
 
 sha256_stream() {
   "${SHA256_COMMAND[@]}" | awk '{print $1}'
@@ -1040,12 +1057,40 @@ mkdir -p "$LOCK_ROOT"
 chmod 700 "$LOCK_ROOT"
 acquire_build_lock "$LOCK_ROOT/image.lock"
 
-IMAGE_BUNDLE_HASH="$(
-  podman image inspect --format '{{ index .Labels "io.agent-capsule.bundle" }}' \
+# The refresh label records the last pull plus no-cache build. Image creation
+# time cannot represent that: cached selection builds create a new image without
+# refreshing upstream tools, and Podman exposes .Created as an ISO 8601 string.
+IMAGE_STATE="$(
+  podman image inspect \
+    --format '{{ index .Labels "io.agent-capsule.bundle" }} {{ index .Labels "io.agent-capsule.refreshed-at" }}' \
     "$IMAGE_REF" 2>/dev/null || true
 )"
+IMAGE_BUNDLE_HASH="${IMAGE_STATE%% *}"
+IMAGE_REFRESHED_AT="${IMAGE_STATE##* }"
 
-if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
+NEEDS_BUILD=0
+REFRESH_REASON=""
+if [[ "$FORCE_BUILD" == "1" ]]; then
+  NEEDS_BUILD=1
+  REFRESH_REASON=forced
+elif [[ "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
+  NEEDS_BUILD=1
+fi
+
+# Missing or legacy metadata gets one full refresh even when age checks are
+# disabled. The resulting label makes later AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=0
+# launches stable.
+if [[ ! "$IMAGE_REFRESHED_AT" =~ ^[0-9]+$ ]]; then
+  REFRESH_REASON=metadata
+elif refresh_is_stale "$IMAGE_REFRESHED_AT"; then
+  REFRESH_REASON=stale
+fi
+
+if [[ -n "$REFRESH_REASON" ]]; then
+  NEEDS_BUILD=1
+fi
+
+if [[ "$NEEDS_BUILD" == "1" ]]; then
   mkdir -p "$BUILD_CONTEXT_DIR"
   cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
   cp -f "$ENTRYPOINT_SRC" "$BUILD_CONTEXT_DIR/entrypoint.sh"
@@ -1061,9 +1106,18 @@ if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
     fi
   done
 
-  echo ">> Building $IMAGE_REF ($AGENT, ${EXTRAS:-no integrations})..."
+  build_note="$AGENT, ${EXTRAS:-no integrations}"
   BUILD_REFRESH_ARGS=()
-  [[ "$FORCE_BUILD" == "1" ]] && BUILD_REFRESH_ARGS=(--pull=always --no-cache)
+  REFRESHED_AT="$IMAGE_REFRESHED_AT"
+  # An unpinned install produces the same RUN string every time, so a refresh
+  # has to bypass the layer cache or it reinstalls what is already there.
+  if [[ -n "$REFRESH_REASON" ]]; then
+    BUILD_REFRESH_ARGS=(--pull=always --no-cache)
+    REFRESHED_AT="$(date +%s)"
+    [[ "$REFRESH_REASON" == "stale" ]] &&
+      build_note="$build_note; over $MAX_IMAGE_AGE_DAYS days old, refreshing"
+  fi
+  echo ">> Building $IMAGE_REF ($build_note)..."
   podman build \
     "${BUILD_REFRESH_ARGS[@]}" \
     --build-arg "NODE_TAG=$NODE_TAG" \
@@ -1078,6 +1132,7 @@ if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
     --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
     "${BUILD_SELECTION_ARGS[@]}" \
     --label "io.agent-capsule.bundle=$HASH" \
+    --label "io.agent-capsule.refreshed-at=$REFRESHED_AT" \
     --label "io.agent-capsule.selection=$AGENT:${EXTRAS:-none}" \
     -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
 fi

@@ -43,14 +43,17 @@ done
 
 if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
   for arg in "$@"; do image_ref="$arg"; done
-  awk -F '\t' -v image="$image_ref" '$1 == image { value = $2 } END { if (value != "") print value }' \
-    "$PODMAN_IMAGE_STATE"
+  awk -F '\t' -v image="$image_ref" '
+    $1 == image { hash = $2; created = $3 }
+    END { if (hash != "") print hash " " created }
+  ' "$PODMAN_IMAGE_STATE"
   exit 0
 fi
 
 if [[ "${1:-}" == "build" && -n "$image_ref" && -n "$bundle_hash" ]]; then
   sleep "${PODMAN_BUILD_DELAY:-0}"
-  printf '%s\t%s\n' "$image_ref" "$bundle_hash" >> "$PODMAN_IMAGE_STATE"
+  printf '%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
+    "${PODMAN_BUILD_EPOCH:-$(date +%s)}" >> "$PODMAN_IMAGE_STATE"
 fi
 
 exit 0
@@ -227,6 +230,33 @@ AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --shell --session pinned-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
+
+# An image older than the age limit is refreshed without the layer cache, or an
+# unpinned install would reproduce exactly what is already there.
+new_case
+PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-image "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+: > "$PODMAN_LOG"
+run_capsule --shell --session stale-image "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+assert_contains "$OUTPUT" 'days old, refreshing'
+
+new_case
+PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session age-disabled "$ROOT_DIR"
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=0 \
+  run_capsule --shell --session age-disabled "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+
+new_case
+set +e
+AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=weekly run_capsule --shell "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" 'Invalid AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS: weekly'
+assert_not_contains "$PODMAN_LOG" 'CALL='
 
 new_case
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=1.2.3-beta.1+build.7 run_capsule --versions
@@ -535,7 +565,7 @@ assert_not_contains "$PODMAN_LOG" 'traffic-secret'
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"
-for tool in bash awk tr mkdir chmod touch cp cat dirname basename shasum rm sleep; do
+for tool in bash awk tr mkdir chmod touch cp cat date dirname basename shasum rm sleep; do
   ln -s "$(command -v "$tool")" "$portable_bin/$tool"
 done
 HOME="$HOST_HOME" \
