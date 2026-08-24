@@ -671,6 +671,34 @@ wait "$second_pid"
 [[ ! -e "$TEST_ROOT/xdg/agent-capsule-$UID/image.lock" ]] ||
   fail "image build lock was not removed"
 
+# Shell completion asks the launcher for these two lists, so the contract is
+# one value per line, exit 0, and no podman anywhere near it.
+new_case
+PATH="$CASE_DIR:$PATH" run_capsule --agent list
+[[ "$(cat "$OUTPUT")" == "$(printf 'claude\ncodex\nopencode')" ]] ||
+  fail "--agent list is not one agent per line"
+assert_not_contains "$PODMAN_LOG" 'CALL='
+run_capsule --with list
+[[ "$(cat "$OUTPUT")" == "$(printf 'anydoc\nexplain-diff\nmcpvault\nsuperpowers')" ]] ||
+  fail "--with list is not one integration per line"
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# Both must work with no podman on PATH at all: completion runs in shells that
+# have never launched a capsule.
+new_case
+nopodman_bin="$CASE_DIR/nopodman-bin"
+mkdir -p "$nopodman_bin"
+for tool in bash awk tr cat; do
+  ln -s "$(command -v "$tool")" "$nopodman_bin/$tool"
+done
+for subcommand in '--agent list' '--with list'; do
+  # shellcheck disable=SC2086
+  HOME="$HOST_HOME" PATH="$nopodman_bin" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+    "$BASH_BIN" "$SCRIPT" $subcommand > "$OUTPUT" 2>&1 ||
+    fail "$subcommand failed with no podman on PATH"
+  [[ -s "$OUTPUT" ]] || fail "$subcommand printed nothing"
+done
+
 # Rebuilding strands the image it replaced, so a build prunes what it superseded.
 new_case
 PODMAN_DANGLING="$CASE_DIR/dangling"

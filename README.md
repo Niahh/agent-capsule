@@ -308,6 +308,28 @@ the container. The repository's common Git directory is mounted at its host path
 it is outside the selected worktree. `/workspace` remains a second project mount for
 existing scripts, but worktree commands should run from the default working directory.
 
+## Shell completion
+
+`make install` places both files where bash and zsh look for them:
+
+```
+$PREFIX/share/bash-completion/completions/agent-capsule
+$PREFIX/share/zsh/site-functions/_agent-capsule
+```
+
+Bash picks its copy up automatically. For zsh, `$PREFIX/share/zsh/site-functions`
+has to be on `$fpath` before `compinit` runs; with the default `PREFIX`, add:
+
+```sh
+fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
+```
+
+Agents, integrations and sessions are completed from live data: the first two
+come from `agent-capsule --agent list` and `agent-capsule --with list`, the third
+from the session homes that exist. `--with` completes one element at a time after
+each comma and drops what you have already picked, and `anydoc` disappears once
+`--agent codex` or `--agent opencode` is on the line.
+
 ## Command help
 
 `agent-capsule --help` prints a short option summary. This README is the detailed
