@@ -115,6 +115,7 @@ run_capsule() {
     PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
     AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
     AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
+    XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
     "$BASH_BIN" "$SCRIPT" "$@" > "$OUTPUT" 2>&1
 }
 
@@ -486,7 +487,7 @@ new_case
 run_capsule --build --shell --session forced-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
 assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
-assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/build/contexts/"
+assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/build/context"
 
 new_case
 SUPERPOWERS_DISABLE_TELEMETRY=superpowers-secret \
@@ -644,9 +645,8 @@ wait "$first_pid"
 wait "$second_pid"
 [[ "$(grep -c '^CALL=build$' "$PODMAN_LOG")" == "1" ]] ||
   fail "concurrent launches built the image more than once"
-build_lock_key="$(printf '%s' agent-capsule-dev:latest | sha256sum | cut -d' ' -f1)"
-lock_root="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-capsule-$UID"
-[[ ! -e "$lock_root/image-$build_lock_key.lock" ]] || fail "image build lock was not removed"
+[[ ! -e "$TEST_ROOT/xdg/agent-capsule-$UID/image.lock" ]] ||
+  fail "image build lock was not removed"
 
 new_case
 other_capsule_home="$CASE_DIR/other-capsule"

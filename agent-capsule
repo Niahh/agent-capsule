@@ -34,60 +34,49 @@
 #
 set -euo pipefail
 
-ACTIVE_LOCK_DIRS=()
+# The image build is the only critical section, and there is one image, so one
+# lock. Assigned only after the atomic file creation wins, or the EXIT trap
+# would delete a lock this process does not own.
+BUILD_LOCK_PATH=""
+trap 'if [[ -n "$BUILD_LOCK_PATH" ]]; then rm -f "$BUILD_LOCK_PATH"; fi' EXIT
 
-release_lock() {
-  local lock_dir="$1"
-  local remaining=()
-  local active
+acquire_build_lock() {
+  local lock_path="$1"
+  local announced=0
+  local lock_owner=""
+  local stale_path=""
 
-  rm -rf "$lock_dir"
-  for active in "${ACTIVE_LOCK_DIRS[@]}"; do
-    [[ "$active" == "$lock_dir" ]] || remaining+=("$active")
-  done
-  ACTIVE_LOCK_DIRS=("${remaining[@]}")
-}
-
-release_all_locks() {
-  local lock_dir
-
-  for lock_dir in "${ACTIVE_LOCK_DIRS[@]}"; do
-    rm -rf "$lock_dir"
-  done
-}
-
-acquire_lock() {
-  local lock_dir="$1"
-  local missing_owner_attempts=0
-  local owner
-
-  while ! mkdir "$lock_dir" 2>/dev/null; do
-    if [[ -f "$lock_dir/pid" ]]; then
-      owner="$(<"$lock_dir/pid")"
-      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-        rm -rf "$lock_dir"
-        continue
+  while ! (set -o noclobber; printf '%s\n' "$$" > "$lock_path") 2>/dev/null; do
+    # Versions before 0.3 used a directory lock with no owner metadata. It may
+    # belong to a live older launcher, so only the user can decide it is stale.
+    if [[ -d "$lock_path" ]]; then
+      echo "Legacy directory lock found: $lock_path" >&2
+      echo "Wait for older builds to finish, then remove the legacy directory lock." >&2
+      return 1
+    elif [[ -f "$lock_path" ]]; then
+      lock_owner="$(<"$lock_path")"
+      if [[ "$lock_owner" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_owner" 2>/dev/null; then
+        stale_path="$lock_path.stale.$$"
+        if mv "$lock_path" "$stale_path" 2>/dev/null; then
+          rm -f "$stale_path"
+          continue
+        fi
       fi
-      if [[ "$owner" =~ ^[0-9]+$ ]]; then
-        missing_owner_attempts=0
-      else
-        ((missing_owner_attempts += 1))
-      fi
-    else
-      ((missing_owner_attempts += 1))
     fi
-    if [[ "$missing_owner_attempts" -ge 10 ]]; then
-      rm -rf "$lock_dir"
-      missing_owner_attempts=0
-      continue
+
+    if [[ "$announced" == "0" ]]; then
+      echo ">> Build   : waiting for another agent-capsule to finish the image" >&2
+      announced=1
     fi
     sleep 0.1
   done
-  printf '%s\n' "$$" > "$lock_dir/pid"
-  ACTIVE_LOCK_DIRS+=("$lock_dir")
+  BUILD_LOCK_PATH="$lock_path"
 }
 
-trap release_all_locks EXIT
+release_build_lock() {
+  rm -f "$BUILD_LOCK_PATH"
+  BUILD_LOCK_PATH=""
+}
 
 # ----------------------------------------------------------------------------
 # Config
@@ -1260,54 +1249,43 @@ HASH="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" \
   "$DOCKERFILE_HASH" | sha256_stream)"
-BUILD_CONTEXT_DIR="$BUILD_DIR/contexts/$HASH"
-NEED_BUILD=0
+BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
-[[ "$FORCE_BUILD" == "1" ]] && NEED_BUILD=1
+# Freshness is checked inside the lock only. An unlocked pre-check would save a
+# podman image inspect on runs that do not build, at the cost of running the
+# same query twice on the runs that do.
+LOCK_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-capsule-$UID"
+mkdir -p "$LOCK_ROOT"
+chmod 700 "$LOCK_ROOT"
+acquire_build_lock "$LOCK_ROOT/image.lock"
+
 IMAGE_BUNDLE_HASH="$(
   podman image inspect --format '{{ index .Labels "io.agent-capsule.bundle" }}' \
     "$IMAGE_REF" 2>/dev/null || true
 )"
-[[ "$IMAGE_BUNDLE_HASH" == "$HASH" ]] || NEED_BUILD=1
 
-if [[ "$NEED_BUILD" == "1" ]]; then
-  LOCK_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-capsule-$UID"
-  mkdir -p "$LOCK_ROOT"
-  chmod 700 "$LOCK_ROOT"
-  BUILD_LOCK_KEY="$(printf '%s' "$IMAGE_REF" | sha256_stream)"
-  BUILD_LOCK_DIR="$LOCK_ROOT/image-$BUILD_LOCK_KEY.lock"
-  acquire_lock "$BUILD_LOCK_DIR"
-  IMAGE_BUNDLE_HASH="$(
-    podman image inspect --format '{{ index .Labels "io.agent-capsule.bundle" }}' \
-      "$IMAGE_REF" 2>/dev/null || true
-  )"
-  if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
-    mkdir -p "$BUILD_CONTEXT_DIR"
-    cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
-    if [[ "$(sha256_file "$BUILD_CONTEXT_DIR/Dockerfile")" != "$DOCKERFILE_HASH" ]]; then
-      echo "Dockerfile changed while preparing the image; retry the launch." >&2
-      exit 1
-    fi
-    echo ">> Building $IMAGE_REF..."
-    BUILD_REFRESH_ARGS=()
-    [[ "$FORCE_BUILD" == "1" ]] && BUILD_REFRESH_ARGS=(--pull=always --no-cache)
-    podman build \
-      "${BUILD_REFRESH_ARGS[@]}" \
-      --build-arg "NODE_TAG=$NODE_TAG" \
-      --build-arg "GO_TAG=$GO_TAG" \
-      --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
-      --build-arg "CODEX_VERSION=$CODEX_VERSION" \
-      --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
-      --build-arg "ANYDOC_VERSION=$ANYDOC_VERSION" \
-      --build-arg "MCPVAULT_VERSION=$MCPVAULT_VERSION" \
-      --build-arg "SKILLS_VERSION=$SKILLS_VERSION" \
-      --build-arg "SUPERPOWERS_VERSION=$SUPERPOWERS_VERSION" \
-      --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
-      --label "io.agent-capsule.bundle=$HASH" \
-      -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
-  fi
-  release_lock "$BUILD_LOCK_DIR"
+if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
+  mkdir -p "$BUILD_CONTEXT_DIR"
+  cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
+  echo ">> Building $IMAGE_REF..."
+  BUILD_REFRESH_ARGS=()
+  [[ "$FORCE_BUILD" == "1" ]] && BUILD_REFRESH_ARGS=(--pull=always --no-cache)
+  podman build \
+    "${BUILD_REFRESH_ARGS[@]}" \
+    --build-arg "NODE_TAG=$NODE_TAG" \
+    --build-arg "GO_TAG=$GO_TAG" \
+    --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
+    --build-arg "CODEX_VERSION=$CODEX_VERSION" \
+    --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
+    --build-arg "ANYDOC_VERSION=$ANYDOC_VERSION" \
+    --build-arg "MCPVAULT_VERSION=$MCPVAULT_VERSION" \
+    --build-arg "SKILLS_VERSION=$SKILLS_VERSION" \
+    --build-arg "SUPERPOWERS_VERSION=$SUPERPOWERS_VERSION" \
+    --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
+    --label "io.agent-capsule.bundle=$HASH" \
+    -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
 fi
+release_build_lock
 
 # ----------------------------------------------------------------------------
 # Command
