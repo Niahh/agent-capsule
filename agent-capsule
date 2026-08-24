@@ -447,7 +447,7 @@ copy_agent_auth_from_auth_home() {
   done
 
   # Don't leave the OAuth token sprawled across every session home: the live
-  # credentials are bind-mounted read-write at runtime (see SHARED_CRED_MOUNT),
+  # credentials are bind-mounted read-write at runtime (see SHARED_CRED_MOUNTED),
   # so the copy above is redundant and would strand a stale token on disk.
   rm -f "$session_home/$AGENT_CRED_REL"
 
@@ -1173,20 +1173,27 @@ fi
 if [[ -n "${AGENT_CAPSULE_VOLOPT+x}" ]]; then
   VOL_OPT="$AGENT_CAPSULE_VOLOPT"
 elif command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
-  VOL_OPT=":z"
+  VOL_OPT="z"
 else
   VOL_OPT=""
 fi
 
-if [[ -n "$VOL_OPT" && "$VOL_OPT" != :* ]]; then
-  VOL_OPT=":$VOL_OPT"
-fi
+# Stored without the leading colon; add_mount adds one where it concatenates.
+VOL_OPT="${VOL_OPT#:}"
 
-# Mounts shared across concurrent sessions (credentials, CLAUDE.md, project
-# memory, vault) must use :z (shared relabel), never :Z (private per-container
-# label): with :Z the second session would lose access.
-SHARED_VOL_OPT="$VOL_OPT"
-[[ "$SHARED_VOL_OPT" == ":Z" ]] && SHARED_VOL_OPT=":z"
+# Most mounts are shared across concurrent sessions (credentials, CLAUDE.md,
+# project memory, vault) and need :z (shared relabel), never :Z (private
+# per-container label): with :Z the second session would lose access.
+[[ "$VOL_OPT" == "Z" ]] && VOL_OPT="z"
+
+# The one place that knows how a -v argument is spelled.
+MOUNT_ARGS=()
+add_mount() { # src dest [ro]
+  local opts="$VOL_OPT"
+
+  [[ "${3:-}" == "ro" ]] && opts="${opts:+$opts,}ro"
+  MOUNT_ARGS+=(-v "$1:$2${opts:+:$opts}")
+}
 
 # ----------------------------------------------------------------------------
 # Prepare persistent dirs
@@ -1379,7 +1386,8 @@ EXTRA+=(-e "HERDR_AGENT=$HERDR_AGENT")
 # ----------------------------------------------------------------------------
 # Extra mounts: SRC[:DEST][:ro] -> -v SRC:DEST[:opts]
 # ----------------------------------------------------------------------------
-MOUNT_ARGS=()
+# The session home is the first mount; user mounts follow, then the rest.
+add_mount "$HOME_DIR" /home/dev
 
 for spec in "${MOUNT_SPECS[@]}"; do
   src="${spec%%:*}"
@@ -1423,14 +1431,11 @@ for spec in "${MOUNT_SPECS[@]}"; do
     exit 1
   fi
 
-  opts="${VOL_OPT#:}"
-  [[ "$ro" == "1" ]] && opts="${opts:+$opts,}ro"
-
-  MOUNT_ARGS+=(-v "$src:$dest${opts:+:$opts}")
-
   if [[ "$ro" == "1" ]]; then
+    add_mount "$src" "$dest" ro
     echo ">> Mount   : $src  ->  $dest (read-only)"
   else
+    add_mount "$src" "$dest"
     echo ">> Mount   : $src  ->  $dest"
   fi
 done
@@ -1438,21 +1443,18 @@ done
 # Keep the working directory identical to its host path so Git worktree
 # metadata remains portable across the bind boundary. /workspace remains as a
 # compatibility alias for existing scripts and prompts.
-PROJECT_MOUNTS=(-v "$PROJECT_DIR:$CONTAINER_PROJECT_DIR$SHARED_VOL_OPT")
+add_mount "$PROJECT_DIR" "$CONTAINER_PROJECT_DIR"
 if [[ "$CONTAINER_PROJECT_DIR" != "/workspace" ]]; then
-  PROJECT_MOUNTS+=(-v "$PROJECT_DIR:/workspace$SHARED_VOL_OPT")
+  add_mount "$PROJECT_DIR" /workspace
 fi
 
-GIT_COMMON_MOUNT=()
 if [[ "$GIT_COMMON_EXTERNAL" == "1" ]]; then
-  GIT_COMMON_MOUNT=(-v "$GIT_COMMON_DIR:$GIT_COMMON_DIR$SHARED_VOL_OPT")
+  add_mount "$GIT_COMMON_DIR" "$GIT_COMMON_DIR"
 fi
 
 # ----------------------------------------------------------------------------
 # Obsidian vault mount (--vault)
 # ----------------------------------------------------------------------------
-VAULT_MOUNT=()
-
 if [[ "$MOUNT_VAULT" == "1" ]]; then
   RESOLVED_VAULT="$(cd -P "$VAULT_DIR" 2>/dev/null && pwd)" || {
     echo "Vault not found: $VAULT_DIR" >&2
@@ -1460,42 +1462,29 @@ if [[ "$MOUNT_VAULT" == "1" ]]; then
     exit 1
   }
 
-  vault_opts="${SHARED_VOL_OPT#:}"
-  VAULT_MOUNT+=(-v "$RESOLVED_VAULT:$VAULT_DEST${vault_opts:+:$vault_opts}")
+  add_mount "$RESOLVED_VAULT" "$VAULT_DEST"
 fi
 
 # ----------------------------------------------------------------------------
 # Shared global rules file mount
 # ----------------------------------------------------------------------------
-SHARED_RULES_MOUNT=()
-
 if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then
-  rules_opts="${SHARED_VOL_OPT#:}"
-
   if [[ "$SHARED_RULES_READONLY" == "1" ]]; then
-    rules_opts="${rules_opts:+$rules_opts,}ro"
+    add_mount "$RESOLVED_SHARED_RULES" "/home/dev/$AGENT_RULES_REL" ro
+  else
+    add_mount "$RESOLVED_SHARED_RULES" "/home/dev/$AGENT_RULES_REL"
   fi
-
-  SHARED_RULES_MOUNT+=(
-    -v "$RESOLVED_SHARED_RULES:/home/dev/$AGENT_RULES_REL${rules_opts:+:$rules_opts}"
-  )
 fi
 
 # ----------------------------------------------------------------------------
 # Shared per-project memory mount
 # ----------------------------------------------------------------------------
-SHARED_MEMORY_MOUNT=()
-
 if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
-  mem_opts="${SHARED_VOL_OPT#:}"
-
   if [[ "$SHARED_MEMORY_READONLY" == "1" ]]; then
-    mem_opts="${mem_opts:+$mem_opts,}ro"
+    add_mount "$PROJECT_MEMORY_DIR" "$CONTAINER_MEMORY_PATH" ro
+  else
+    add_mount "$PROJECT_MEMORY_DIR" "$CONTAINER_MEMORY_PATH"
   fi
-
-  SHARED_MEMORY_MOUNT+=(
-    -v "$PROJECT_MEMORY_DIR:$CONTAINER_MEMORY_PATH${mem_opts:+:$mem_opts}"
-  )
 fi
 
 # ----------------------------------------------------------------------------
@@ -1507,7 +1496,7 @@ fi
 # Concurrency note: two sessions refreshing at the exact same instant race on
 # this file (last-writer-wins). If the refresh rotates the refresh token, one
 # session may need to refresh again. Acceptable for the herdr workflow; no lock.
-SHARED_CRED_MOUNT=()
+SHARED_CRED_MOUNTED=0
 AUTH_CRED_FILE="$AUTH_HOME_DIR/$AGENT_CRED_REL"
 CONTAINER_CRED_PATH="/home/dev/$AGENT_CRED_REL"
 
@@ -1515,10 +1504,8 @@ if [[ "$SHARE_AUTH" == "1" && "$AUTH_LOGIN" != "1" ]]; then
   if [[ -s "$AUTH_CRED_FILE" ]]; then
     # The target parent must exist for the mount.
     mkdir -p "$HOME_DIR/$(dirname "$AGENT_CRED_REL")"
-    cred_opts="${SHARED_VOL_OPT#:}"
-    SHARED_CRED_MOUNT+=(
-      -v "$AUTH_CRED_FILE:$CONTAINER_CRED_PATH${cred_opts:+:$cred_opts}"
-    )
+    add_mount "$AUTH_CRED_FILE" "$CONTAINER_CRED_PATH"
+    SHARED_CRED_MOUNTED=1
   else
     echo ">> Auth    : no shared credentials yet. Run: agent-capsule --agent $AGENT --auth-login" >&2
   fi
@@ -1569,7 +1556,7 @@ fi
 echo ">> Session : $SESSION_NAME"
 echo ">> State   : $HOME_DIR"
 echo ">> Auth    : $AUTH_HOME_DIR"
-if [[ "${#SHARED_CRED_MOUNT[@]}" -gt 0 ]]; then
+if [[ "$SHARED_CRED_MOUNTED" == "1" ]]; then
   echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_PATH (shared, read-write)"
 fi
 # HERDR_AGENT can be pinned by the wrapper; when it diverges from --agent,
@@ -1650,13 +1637,6 @@ exec podman run "${TTY_ARGS[@]}" --rm --init \
   --label "ai.session=$SESSION_NAME" \
   -e TERM="${TERM:-xterm-256color}" \
   "${EXTRA[@]}" \
-  -v "$HOME_DIR:/home/dev$VOL_OPT" \
-  "${PROJECT_MOUNTS[@]}" \
-  "${GIT_COMMON_MOUNT[@]}" \
-  "${SHARED_RULES_MOUNT[@]}" \
-  "${SHARED_MEMORY_MOUNT[@]}" \
-  "${SHARED_CRED_MOUNT[@]}" \
-  "${VAULT_MOUNT[@]}" \
   "${MOUNT_ARGS[@]}" \
   -w "$CONTAINER_PROJECT_DIR" \
   "$IMAGE_REF" "${RUN_CMD[@]}"
