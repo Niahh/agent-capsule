@@ -3,6 +3,3 @@ ignored:
   # pulls the base image and bypasses the cache to refresh them.
   - DL3008
   - DL3016
-  # The entrypoint is written via printf with single-quoted lines that must
-  # stay literal until the container runs.
-  - SC2016

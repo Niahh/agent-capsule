@@ -81,51 +81,7 @@ RUN npm install -g \
     && git -C /opt/superpowers/source checkout -B main \
     && npm cache clean --force
 
-# Codex has no invocation-only local plugin flag, so the entrypoint reconciles
-# only the capsule-managed plugin before starting Codex.
-# Written via printf (single-quoted lines stay literal) so it works on builders
-# without Dockerfile heredoc support.
-RUN printf '%s\n' \
-      '#!/usr/bin/env bash' \
-      'set -e' \
-      'skills_dir="${AGENT_CAPSULE_SKILLS_DIR:-}"' \
-      'if [[ -n "$skills_dir" ]]; then' \
-      '  skill="$skills_dir/explain-diff-html"' \
-      '  marker="$skills_dir/.explain-diff-html-capsule-managed"' \
-      '  case ",${AGENT_CAPSULE_WITH:-}," in' \
-      '    *,explain-diff,*)' \
-      '      mkdir -p "$skills_dir"' \
-      '      if [[ ( -e "$skill" || -L "$skill" ) && ! -e "$marker" ]]; then' \
-      '        echo "explain-diff-html already exists and is not capsule-managed: $skill" >&2' \
-      '        exit 1' \
-      '      fi' \
-      '      ln -sfn /opt/explain-diff-html "$skill"' \
-      '      touch "$marker" ;;' \
-      '    *)' \
-      '      if [[ -e "$marker" ]]; then' \
-      '        rm -f "$skill" "$marker"' \
-      '      fi ;;' \
-      '  esac' \
-      'fi' \
-      'if [[ "${AGENT_CAPSULE_AGENT:-}" == codex ]]; then' \
-      '      codex_home="${CODEX_HOME:-${HOME:-/home/dev}/.codex}"' \
-      '      marker="$codex_home/.superpowers-capsule-managed"' \
-      '      case ",${AGENT_CAPSULE_WITH:-}," in' \
-      '        *,superpowers,*)' \
-      '          mkdir -p "$codex_home"' \
-      '          CODEX_HOME="$codex_home" codex plugin marketplace add /opt/superpowers/source >/dev/null' \
-      '          CODEX_HOME="$codex_home" codex plugin add superpowers@superpowers-dev >/dev/null' \
-      '          touch "$marker" ;;' \
-      '        *)' \
-      '          if [[ -e "$marker" ]]; then' \
-      '            CODEX_HOME="$codex_home" codex plugin remove superpowers@superpowers-dev >/dev/null' \
-      '            rm -f "$marker"' \
-      '          fi ;;' \
-      '      esac' \
-      'fi' \
-      'exec "$@"' \
-      > /usr/local/bin/agent-capsule-entrypoint.sh \
-    && chmod +x /usr/local/bin/agent-capsule-entrypoint.sh
+COPY entrypoint.sh /usr/local/bin/agent-capsule-entrypoint.sh
 
 ENV HOME=/home/dev \
     GOPATH=/home/dev/go \

@@ -123,7 +123,7 @@ run_capsule() {
     PODMAN_LOG="$PODMAN_LOG" \
     PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
     AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-    AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
+    AGENT_CAPSULE_DOCKERFILE="${AGENT_CAPSULE_DOCKERFILE:-$DOCKERFILE}" \
     XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
     "$BASH_BIN" "$SCRIPT" "$@" > "$OUTPUT" 2>&1
 }
@@ -465,6 +465,24 @@ for invalid_session in . ..; do
   assert_not_contains "$PODMAN_LOG" 'CALL=run'
 done
 
+
+# Editing the entrypoint must invalidate the image, or a fix to it never ships.
+new_case
+entrypoint_copy="$CASE_DIR/entrypoint.sh"
+cp "$ROOT_DIR/entrypoint.sh" "$entrypoint_copy"
+# Nix store sources are read-only, but this case intentionally mutates its copy.
+chmod u+w "$entrypoint_copy"
+dockerfile_copy="$CASE_DIR/Dockerfile"
+cp "$ROOT_DIR/Dockerfile" "$dockerfile_copy"
+AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+printf '\n' >> "$entrypoint_copy"
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
 new_case
 run_capsule --build --shell --session forced-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=--pull=always'

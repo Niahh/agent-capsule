@@ -1111,17 +1111,25 @@ fi
 
 DOCKERFILE_SRC="$(resolve_dockerfile)"
 DOCKERFILE_HASH="$(sha256_file "$DOCKERFILE_SRC")"
+# The entrypoint ships beside the Dockerfile in every install layout, so
+# resolve_dockerfile already found its directory.
+ENTRYPOINT_SRC="$(dirname "$DOCKERFILE_SRC")/entrypoint.sh"
+[[ -f "$ENTRYPOINT_SRC" ]] || {
+  echo "Container entrypoint not found: $ENTRYPOINT_SRC" >&2
+  exit 1
+}
+ENTRYPOINT_HASH="$(sha256_file "$ENTRYPOINT_SRC")"
 
 # ----------------------------------------------------------------------------
 # Build image if needed
 # ----------------------------------------------------------------------------
 # Agent and integration choices are runtime-only, so they do not participate in
 # image freshness. Only inputs that change image contents belong in this hash.
-HASH="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+HASH="$(printf '%s\n' \
   "$NODE_TAG" "$GO_TAG" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" \
-  "$DOCKERFILE_HASH" | sha256_stream)"
+  "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" | sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
 # Freshness is checked inside the lock only. An unlocked pre-check would save a
@@ -1140,6 +1148,8 @@ IMAGE_BUNDLE_HASH="$(
 if [[ "$FORCE_BUILD" == "1" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
   mkdir -p "$BUILD_CONTEXT_DIR"
   cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
+  cp -f "$ENTRYPOINT_SRC" "$BUILD_CONTEXT_DIR/entrypoint.sh"
+  chmod 0755 "$BUILD_CONTEXT_DIR/entrypoint.sh"
   echo ">> Building $IMAGE_REF..."
   BUILD_REFRESH_ARGS=()
   [[ "$FORCE_BUILD" == "1" ]] && BUILD_REFRESH_ARGS=(--pull=always --no-cache)

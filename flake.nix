@@ -40,6 +40,7 @@
             runHook preInstall
             install -Dm755 agent-capsule $out/bin/agent-capsule
             install -Dm644 Dockerfile $out/share/agent-capsule/Dockerfile
+            install -Dm755 entrypoint.sh $out/share/agent-capsule/entrypoint.sh
             runHook postInstall
           '';
 
@@ -76,7 +77,6 @@
           packages = with pkgs; [
             shellcheck
             hadolint
-            go-task
           ];
         };
       });
@@ -88,7 +88,8 @@
         package = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-capsule;
         shellcheck =
           pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-            shellcheck ${self}/agent-capsule ${self}/tests/agent-capsule_test.sh
+            shellcheck ${self}/agent-capsule ${self}/tests/agent-capsule_test.sh \
+              ${self}/entrypoint.sh
             touch $out
           '';
         hadolint = pkgs.runCommand "hadolint" { nativeBuildInputs = [ pkgs.hadolint ]; } ''
