@@ -1,5 +1,6 @@
 {
-  description = "Run Claude Code, Codex, or opencode inside a rootless Podman container that shares one project directory with the host";
+  description =
+    "Run Claude Code, Codex, or OpenCode in rootless Podman with one shared project directory";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
