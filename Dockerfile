@@ -85,9 +85,9 @@ RUN if [ "$WITH_ANYDOC" = 1 ]; then \
 # Pinned to a gist revision, so image rebuilds are reproducible.
 RUN if [ "$WITH_EXPLAIN_DIFF" = 1 ]; then \
       mkdir -p /opt/explain-diff-html \
-      && curl -sSfL \
-        https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/e4982a26bc8975dd45eeb96ad8c68f2f25fc42c7/explain-diff-html.md \
-        -o /opt/explain-diff-html/SKILL.md; \
+      && explain_diff_url='https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/' \
+      && explain_diff_url="${explain_diff_url}e4982a26bc8975dd45eeb96ad8c68f2f25fc42c7/explain-diff-html.md" \
+      && curl -sSfL "$explain_diff_url" -o /opt/explain-diff-html/SKILL.md; \
     fi
 
 RUN if [ "$WITH_MCPVAULT" = 1 ]; then \
