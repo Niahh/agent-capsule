@@ -14,7 +14,10 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 # The suite is commonly run from inside a capsule, where AGENT_CAPSULE_* and
 # HERDR_* are exported. They would reach the script under test and change what
 # it does, so drop the whole namespace before the first case.
-for leaked_variable in $(env | sed -n 's/^\(AGENT_CAPSULE_[A-Za-z0-9_]*\)=.*/\1/p;s/^\(HERDR_[A-Za-z0-9_]*\)=.*/\1/p'); do
+for leaked_variable in $(
+  env | sed -n \
+    's/^\(AGENT_CAPSULE_[A-Za-z0-9_]*\)=.*/\1/p;s/^\(HERDR_[A-Za-z0-9_]*\)=.*/\1/p'
+); do
   unset "$leaked_variable"
 done
 unset leaked_variable
@@ -178,7 +181,9 @@ config_dir="$CAPSULE_HOME/homes/opencode-state/.config/opencode"
 mkdir -p "$vault_dir"
 run_capsule --agent opencode --shell --session opencode-state \
   --with superpowers,mcpvault --vault="$vault_dir" "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT={"plugin":["/opt/superpowers/source"],"mcp":{"obsidian":{"type":"local","command":["mcpvault","/vault"]}}}'
+opencode_mcp='"mcp":{"obsidian":{"type":"local","command":["mcpvault","/vault"]}}'
+assert_contains "$PODMAN_LOG" \
+  "OPENCODE_CONFIG_CONTENT={\"plugin\":[\"/opt/superpowers/source\"],$opencode_mcp}"
 
 : > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state \
@@ -193,7 +198,7 @@ printf '%s\n' '{"theme":"user-owned"}' > "$user_config"
 run_capsule --agent opencode --shell --session opencode-state \
   --with mcpvault --vault="$vault_dir" "$ROOT_DIR"
 [[ "$(<"$user_config")" == '{"theme":"user-owned"}' ]] || fail "user OpenCode config changed"
-assert_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT={"mcp":{"obsidian":{"type":"local","command":["mcpvault","/vault"]}}}'
+assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}"
 
 : > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state --with none "$ROOT_DIR"
@@ -204,7 +209,7 @@ assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
 : > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state \
   --with mcpvault --no-vault --vault="$vault_dir" "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT={"mcp":{"obsidian":{"type":"local","command":["mcpvault","/vault"]}}}'
+assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}"
 
 : > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state \
