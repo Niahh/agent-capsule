@@ -2,7 +2,7 @@
 # ~/.local/share/agent-capsule.
 #
 #   make install      # copy agent-capsule -> ~/.local/bin/agent-capsule (0755)
-#                     # copy Dockerfile  -> ~/.local/share/agent-capsule/Dockerfile (0644)
+#                     # copy Dockerfile and entrypoint.sh -> ~/.local/share/agent-capsule/
 #   make uninstall    # remove both
 #
 # Override the destination if needed:
@@ -11,20 +11,33 @@
 PREFIX ?= $(HOME)/.local
 BINDIR = $(PREFIX)/bin
 SHAREDIR = $(PREFIX)/share/agent-capsule
+BASHCOMPDIR = $(PREFIX)/share/bash-completion/completions
+ZSHCOMPDIR = $(PREFIX)/share/zsh/site-functions
 
-.PHONY: help install uninstall
+.PHONY: help test install uninstall
 
 help:
-	@echo "install      Install agent-capsule and its Dockerfile"
-	@echo "uninstall    Remove the installed script and Dockerfile"
+	@echo "test         Run launcher behavior tests"
+	@echo "install      Install agent-capsule, its container files, and completions"
+	@echo "uninstall    Remove the installed script and container files"
+
+test:
+	@bash tests/agent-capsule_test.sh
 
 install:
 	@install -d "$(BINDIR)"
 	@install -m 0755 agent-capsule "$(BINDIR)/agent-capsule"
 	@install -d "$(SHAREDIR)"
 	@install -m 0644 Dockerfile "$(SHAREDIR)/Dockerfile"
+	@install -m 0755 entrypoint.sh "$(SHAREDIR)/entrypoint.sh"
+	@install -d "$(BASHCOMPDIR)" "$(ZSHCOMPDIR)"
+	@install -m 0644 completions/agent-capsule.bash "$(BASHCOMPDIR)/agent-capsule"
+	@install -m 0644 completions/_agent-capsule "$(ZSHCOMPDIR)/_agent-capsule"
 	@echo "Installed $(BINDIR)/agent-capsule"
 	@echo "Installed $(SHAREDIR)/Dockerfile"
+	@echo "Installed $(SHAREDIR)/entrypoint.sh"
+	@echo "Installed $(BASHCOMPDIR)/agent-capsule"
+	@echo "Installed $(ZSHCOMPDIR)/_agent-capsule"
 	@case ":$$PATH:" in \
 	  *":$(BINDIR):"*) ;; \
 	  *) echo "WARNING: $(BINDIR) is not on your PATH, add it, e.g.:"; \
@@ -34,6 +47,12 @@ install:
 uninstall:
 	@rm -f "$(BINDIR)/agent-capsule"
 	@rm -f "$(SHAREDIR)/Dockerfile"
+	@rm -f "$(SHAREDIR)/entrypoint.sh"
+	@rm -f "$(BASHCOMPDIR)/agent-capsule"
+	@rm -f "$(ZSHCOMPDIR)/_agent-capsule"
 	@rmdir "$(SHAREDIR)" 2>/dev/null || true
 	@echo "Removed $(BINDIR)/agent-capsule"
 	@echo "Removed $(SHAREDIR)/Dockerfile"
+	@echo "Removed $(SHAREDIR)/entrypoint.sh"
+	@echo "Removed $(BASHCOMPDIR)/agent-capsule"
+	@echo "Removed $(ZSHCOMPDIR)/_agent-capsule"

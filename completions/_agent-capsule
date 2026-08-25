@@ -1,0 +1,70 @@
+#compdef agent-capsule
+
+# zsh completion for agent-capsule
+#
+# Enumerable values come from the launcher itself (`--agent list`, `--with list`),
+# so nothing here duplicates a list the script already owns. Both are local, need
+# no podman, and exit before any state is touched. The launcher is always invoked
+# through PATH: under Nix the installed script is a wrapper.
+
+_agent_capsule_agents() {
+  local -a agents
+  agents=(${(f)"$(agent-capsule --agent list 2>/dev/null)"} list)
+  _describe -t agents 'agent' agents
+}
+
+_agent_capsule_sessions() {
+  local homes="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}/homes"
+  local -a sessions
+
+  [[ -d $homes ]] || return 1
+  # _auth is the reserved home --auth-login uses.
+  sessions=(${homes}/*(/N:t))
+  sessions=(${sessions:#_auth})
+  (( $#sessions )) || return 1
+  _describe -t sessions 'session' sessions
+}
+
+_agent_capsule_extras() {
+  local -a extras
+  local agent index
+
+  # --with filters on the agent already named on the line.
+  for (( index = 1; index < CURRENT; index++ )); do
+    case $words[index] in
+      --agent) agent=$words[index+1] ;;
+      --agent=*) agent=${words[index]#--agent=} ;;
+    esac
+  done
+
+  extras=(${(f)"$(agent-capsule --with list 2>/dev/null)"})
+  # anydoc ships files for ~/.claude; the launcher rejects it for other agents.
+  [[ -n $agent && $agent != claude ]] && extras=(${extras:#anydoc})
+  extras+=(none)
+
+  # Comma-separated and repeatable, so complete one element at a time.
+  _values -s , 'integration' $extras
+}
+
+_arguments -S \
+  '--agent=[pick the agent CLI]:agent:_agent_capsule_agents' \
+  '--session=[use a named isolated home]:session:_agent_capsule_sessions' \
+  '--auth-login[authenticate the selected agent]' \
+  '--shell[start bash instead of the agent]' \
+  '--offline[disable container networking]' \
+  '--keep-id[run with the host UID and GID inside]' \
+  '--with=[activate integrations]:integrations:_agent_capsule_extras' \
+  '*'{-m,--mount=}'[mount SRC\[:DEST\]\[:ro\]]:mount spec:_files' \
+  '--vault=-[mount the configured vault, or the directory given after =]::vault:_files -/' \
+  '--no-vault[disable the vault and mcpvault for this run]' \
+  '--shared-rules=[select the global rules file]:rules file:_files' \
+  '--shared-rules-rw[mount the global rules file read-write]' \
+  '--no-shared-rules[disable the global rules file]' \
+  '--shared-memory-ro[mount Claude project memory read-only]' \
+  '--no-shared-memory[disable Claude project memory]' \
+  '--build[rebuild the image from scratch]' \
+  '(- *)--versions[print configured tool versions]' \
+  '(- *)--version[print the launcher version]' \
+  '(- *)'{-h,--help}'[show this help]' \
+  '1:project directory:_files -/' \
+  '*::agent args:_normal'

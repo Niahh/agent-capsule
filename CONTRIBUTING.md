@@ -2,10 +2,11 @@
 
 ## Before pushing
 
-Lint both files; CI runs the same checks:
+Run the behavior tests and lint both files. CI runs the same checks:
 
 ```sh
-shellcheck agent-capsule
+make test
+shellcheck agent-capsule tests/agent-capsule_test.sh
 hadolint Dockerfile
 ```
 
@@ -18,5 +19,5 @@ hadolint Dockerfile
 
 ## Documentation
 
-The script header is the single source of truth: `--help` prints it. Update it
-together with any behavior change; keep the README short and in sync.
+Keep the short `--help` summary aligned with the option parser. Document detailed
+behavior in the README and update it with every user-visible change.

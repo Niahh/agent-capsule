@@ -6,23 +6,117 @@ on:
   pull_request:
 
 jobs:
+  launcher-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make test
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: shellcheck agent-capsule
+      - uses: actions/checkout@v7
+      - run: |
+          shellcheck agent-capsule tests/agent-capsule_test.sh entrypoint.sh \
+            completions/agent-capsule.bash
 
   hadolint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hadolint/hadolint-action@v3.1.0
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
+          config: .hadolint.yaml
+
+  # Every image now carries one agent and only the selected integrations, so
+  # each agent needs its own build. anydoc is claude-only, matching the launcher.
+  image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [claude, codex, opencode]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the ${{ matrix.agent }} image with every supported integration
+        run: |
+          anydoc=0
+          if [ "${{ matrix.agent }}" = claude ]; then anydoc=1; fi
+          docker build -t agent-capsule:test \
+            --build-arg "AGENT=${{ matrix.agent }}" \
+            --build-arg "WITH_ANYDOC=$anydoc" \
+            --build-arg WITH_EXPLAIN_DIFF=1 \
+            --build-arg WITH_MCPVAULT=1 \
+            --build-arg WITH_SUPERPOWERS=1 \
+            .
+      - name: Only the selected agent is installed
+        run: |
+          docker run --rm -e "AGENT_CAPSULE_AGENT=${{ matrix.agent }}" \
+            agent-capsule:test "${{ matrix.agent }}" --version
+          for other in claude codex opencode; do
+            if [ "$other" = "${{ matrix.agent }}" ]; then continue; fi
+            if docker run --rm agent-capsule:test bash -c "command -v $other"; then
+              echo "$other is present in the ${{ matrix.agent }} image" >&2
+              exit 1
+            fi
+          done
+      - name: Selected integrations are present
+        run: |
+          docker run --rm agent-capsule:test bash -c 'test -d /opt/superpowers/source'
+          docker run --rm agent-capsule:test bash -c 'test -f /opt/explain-diff-html/SKILL.md'
+          docker run --rm agent-capsule:test mcpvault --help
+      - name: The explain-diff skill is linked and then removed again
+        run: |
+          skills_home="capsule-skills-smoke-${GITHUB_RUN_ID}-${{ matrix.agent }}"
+          trap 'docker volume rm "$skills_home" >/dev/null' EXIT
+          docker volume create "$skills_home"
+          docker run --rm -v "$skills_home:/home/dev" \
+            -e AGENT_CAPSULE_SKILLS_DIR=/home/dev/skills \
+            -e AGENT_CAPSULE_WITH=explain-diff \
+            agent-capsule:test bash -c 'test -f /home/dev/skills/explain-diff-html/SKILL.md'
+          docker run --rm -v "$skills_home:/home/dev" \
+            -e AGENT_CAPSULE_SKILLS_DIR=/home/dev/skills \
+            -e AGENT_CAPSULE_WITH= \
+            agent-capsule:test bash -c 'test ! -e /home/dev/skills/explain-diff-html'
+      - name: Claude loads both plugin directories
+        if: matrix.agent == 'claude'
+        run: |
+          docker run --rm agent-capsule:test \
+            claude --plugin-dir /opt/superpowers/source --version
+          docker run --rm agent-capsule:test \
+            claude --plugin-dir /opt/anydoc/plugin --version
+      - name: OpenCode loads superpowers from invocation-scoped config
+        if: matrix.agent == 'opencode'
+        run: |
+          docker run --rm -e AGENT_CAPSULE_AGENT=opencode \
+            -e AGENT_CAPSULE_WITH=superpowers \
+            -e 'OPENCODE_CONFIG_CONTENT={"plugin":["/opt/superpowers/source"]}' \
+            agent-capsule:test opencode debug config | \
+            grep -F '/opt/superpowers/source'
+      - name: Codex adds and removes the superpowers plugin
+        if: matrix.agent == 'codex'
+        run: |
+          codex_home="capsule-codex-smoke-${GITHUB_RUN_ID}"
+          trap 'docker volume rm "$codex_home" >/dev/null' EXIT
+          docker volume create "$codex_home"
+          docker run --rm -v "$codex_home:/home/dev" \
+            -e AGENT_CAPSULE_AGENT=codex \
+            -e AGENT_CAPSULE_WITH=superpowers \
+            agent-capsule:test bash -c \
+            'test -e /home/dev/.codex/.superpowers-capsule-managed && \
+             ! codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
+          docker run --rm -v "$codex_home:/home/dev" \
+            -e AGENT_CAPSULE_AGENT=codex \
+            -e AGENT_CAPSULE_WITH= \
+            agent-capsule:test bash -c \
+            'test ! -e /home/dev/.codex/.superpowers-capsule-managed && \
+             codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
 
   nix:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
       - run: nix flake check

@@ -1,8 +1,19 @@
 # Base image tags are injected by agent-capsule via --build-arg
 # (defaults mirror AGENT_CAPSULE_NODE_TAG / AGENT_CAPSULE_GO_TAG).
-ARG NODE_TAG=26-trixie-slim
-ARG GO_TAG=1.26.4-trixie
-ARG GOLANGCI_LINT_VERSION=v2.12.2
+ARG NODE_TAG=trixie-slim
+ARG GO_TAG=trixie
+
+# Tool versions are empty by default, which means latest at build time.
+# agent-capsule passes a value only when AGENT_CAPSULE_*_VERSION pins one, so
+# there is no second set of defaults here to drift out of step with the script.
+ARG GOLANGCI_LINT_VERSION=""
+ARG SUPERPOWERS_VERSION=""
+ARG CLAUDE_CODE_VERSION=""
+ARG CODEX_VERSION=""
+ARG OPENCODE_VERSION=""
+ARG ANYDOC_VERSION=""
+ARG MCPVAULT_VERSION=""
+ARG SKILLS_VERSION=""
 
 FROM golang:${GO_TAG} AS go-toolchain
 
@@ -10,15 +21,16 @@ FROM node:${NODE_TAG}
 
 # Re-declare after FROM so the build arg is visible to the RUN step below.
 ARG GOLANGCI_LINT_VERSION
+ARG SUPERPOWERS_VERSION
+ARG CLAUDE_CODE_VERSION
+ARG CODEX_VERSION
+ARG OPENCODE_VERSION
+ARG ANYDOC_VERSION
+ARG MCPVAULT_VERSION
+ARG SKILLS_VERSION
 
 # pipefail so a failing curl cannot feed an empty script to sh (DL4006).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# When the superclaude extra is selected, the @bifrost_inc/superclaude npm
-# postinstall pip-installs SuperClaude from PyPI. Debian's system Python is
-# externally managed (PEP 668), so allow the system-wide install inside this
-# disposable container image.
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 
@@ -27,73 +39,88 @@ COPY --from=go-toolchain /usr/local/go /usr/local/go
 # any cgo package fail.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git curl ca-certificates ripgrep less procps openssh-client bash \
-      python3 python3-pip \
       gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Both agents ship in every image; agent-capsule's --agent flag is a purely
-# runtime choice, so the --with image-tag scheme (see agent-capsule) is
-# untouched by which one a run selects.
-RUN npm install -g @anthropic-ai/claude-code @openai/codex
-
 # Install golangci-lint from the official prebuilt binary (the project advises
 # against `go install`). Land it in /usr/local/bin, not $GOPATH/bin: /home/dev is
-# bind-mounted at runtime and would mask /home/dev/go/bin. Pin install.sh to the
-# release tag (not HEAD) so the installer matches the version it installs.
-RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh \
-      | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}"
+# bind-mounted at runtime and would mask /home/dev/go/bin. When pinned, install.sh
+# comes from the same release tag so the installer matches what it installs.
+RUN if [ -n "$GOLANGCI_LINT_VERSION" ]; then \
+      curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/$GOLANGCI_LINT_VERSION/install.sh" \
+        | sh -s -- -b /usr/local/bin "$GOLANGCI_LINT_VERSION"; \
+    else \
+      curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+        | sh -s -- -b /usr/local/bin; \
+    fi
 
-# Optional extra tools, selected per run with `agent-capsule --with`. Empty by
-# default, so the base image stays lean. Keep the case branches in sync with
-# KNOWN_EXTRAS in agent-capsule.
-# Extras that ship files for ~/.claude (SuperClaude commands, the anydoc skill)
-# are baked into a non-masked path: at runtime /home/dev is bind-mounted from
-# the host session home, which would hide them; instead they install under
-# /opt/<extra> and the entrypoint seeds the session home from there.
-ARG EXTRAS=""
-RUN set -eu; \
-    for extra in $(printf '%s' "$EXTRAS" | tr ',' ' '); do \
-      case "$extra" in \
-        anydoc) \
-          npm install -g @firecrawl/anydoc; \
-          HOME=/opt/anydoc npx -y skills add firecrawl/anydoc -g -a claude-code -y; \
-          rm -rf /opt/anydoc/.npm /opt/anydoc/.agents ;; \
-        superclaude) \
-          npm install -g @bifrost_inc/superclaude; \
-          HOME=/opt/superclaude superclaude install --force ;; \
-        hunkdiff) \
-          npm install -g hunkdiff ;; \
-        mcpvault) \
-          npm install -g @bitbonsai/mcpvault ;; \
-        *) \
-          echo "unknown extra: $extra" >&2; exit 1 ;; \
-      esac; \
-    done; \
-    npm cache clean --force
+# Selection. The launcher passes these from --agent and --with; the defaults
+# mirror its own, so a bare `docker build .` still produces a usable image.
+ARG AGENT=claude
+ARG WITH_ANYDOC=0
+ARG WITH_EXPLAIN_DIFF=0
+ARG WITH_MCPVAULT=0
+ARG WITH_SUPERPOWERS=0
 
-# On first start of a session, seed /home/dev/.claude from every /opt/<extra>/.claude
-# baked into the image, then exec. One marker per extra keeps steady-state launches
-# fast and still seeds a home first used with a smaller image variant. With no seed
-# dirs the loop matches nothing, so the same entrypoint serves every variant.
-# Written via printf (single-quoted lines stay literal) so it works on builders
-# without Dockerfile heredoc support.
-RUN printf '%s\n' \
-      '#!/usr/bin/env bash' \
-      'set -e' \
-      'DEST="${HOME:-/home/dev}/.claude"' \
-      'for seed in /opt/*/.claude; do' \
-      '  [[ -d "$seed" ]] || continue' \
-      '  name="${seed%/.claude}"; name="${name##*/}"' \
-      '  if [[ ! -e "$DEST/.$name-seeded" ]]; then' \
-      '    mkdir -p "$DEST"' \
-      '    # -n: never clobber user files or the read-only CLAUDE.md/credentials mounts.' \
-      '    cp -an "$seed/." "$DEST/" 2>/dev/null || true' \
-      '    touch "$DEST/.$name-seeded" 2>/dev/null || true' \
-      '  fi' \
-      'done' \
-      'exec "$@"' \
-      > /usr/local/bin/agent-capsule-entrypoint.sh \
-    && chmod +x /usr/local/bin/agent-capsule-entrypoint.sh
+# Integrations are installed only when selected, one layer each: a RUN's cache
+# key is its expanded command, so toggling one leaves the others cached.
+# Files that become agent state stay under /opt because /home/dev is
+# bind-mounted from the host session home at runtime.
+RUN if [ "$WITH_ANYDOC" = 1 ]; then \
+      npm install -g "@firecrawl/anydoc@${ANYDOC_VERSION:-latest}" \
+      && anydoc_root="$(npm root -g)/@firecrawl/anydoc" \
+      && anydoc_installed="$(node -p "require('$anydoc_root/package.json').version")" \
+      && anydoc_ref="https://github.com/firecrawl/anydoc/tree/v$anydoc_installed" \
+      && HOME=/opt/anydoc npx -y "skills@${SKILLS_VERSION:-latest}" \
+        add "$anydoc_ref" -g -a claude-code -y \
+      && rm -rf /opt/anydoc/.npm /opt/anydoc/.agents \
+      && mkdir -p /opt/anydoc/plugin/.claude-plugin \
+      && cp -a /opt/anydoc/.claude/skills /opt/anydoc/plugin/skills \
+      && printf '%s\n' \
+        "{\"name\":\"anydoc\",\"version\":\"$anydoc_installed\",\"description\":\"Convert documents to Markdown\"}" \
+        > /opt/anydoc/plugin/.claude-plugin/plugin.json \
+      && npm cache clean --force; \
+    fi
+
+# Pinned to a gist revision, so image rebuilds are reproducible.
+RUN if [ "$WITH_EXPLAIN_DIFF" = 1 ]; then \
+      mkdir -p /opt/explain-diff-html \
+      && explain_diff_url='https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/' \
+      && explain_diff_url="${explain_diff_url}e4982a26bc8975dd45eeb96ad8c68f2f25fc42c7/explain-diff-html.md" \
+      && curl -sSfL "$explain_diff_url" -o /opt/explain-diff-html/SKILL.md; \
+    fi
+
+RUN if [ "$WITH_MCPVAULT" = 1 ]; then \
+      npm install -g "@bitbonsai/mcpvault@${MCPVAULT_VERSION:-latest}" \
+      && npm cache clean --force; \
+    fi
+
+# Codex activates Superpowers from /opt/superpowers/source at startup, so its
+# .git must survive. Resolve the latest release tag when no version is pinned,
+# then put the tagged checkout on a real branch for the local marketplace clone.
+RUN if [ "$WITH_SUPERPOWERS" = 1 ]; then \
+      superpowers_ref="${SUPERPOWERS_VERSION:-latest}" \
+      && if [ "$superpowers_ref" = latest ]; then \
+        release_url="$(curl -sSfL -o /dev/null -w '%{url_effective}' \
+          https://github.com/obra/superpowers/releases/latest)" \
+        && superpowers_ref="${release_url##*/}"; \
+      fi \
+      && git clone --depth 1 --branch "$superpowers_ref" \
+        https://github.com/obra/superpowers.git /opt/superpowers/source \
+      && git -C /opt/superpowers/source checkout -B main; \
+    fi
+
+# One CLI, not three: a run uses exactly one agent and each package is large.
+# Last of the selected installs, so switching agents reuses every layer above.
+RUN case "$AGENT" in \
+      claude) npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}" ;; \
+      codex) npm install -g "@openai/codex@${CODEX_VERSION:-latest}" ;; \
+      opencode) npm install -g "opencode-ai@${OPENCODE_VERSION:-latest}" ;; \
+      *) echo "unknown agent: $AGENT" >&2; exit 1 ;; \
+    esac \
+    && npm cache clean --force
+
+COPY entrypoint.sh /usr/local/bin/agent-capsule-entrypoint.sh
 
 ENV HOME=/home/dev \
     GOPATH=/home/dev/go \
@@ -101,4 +128,6 @@ ENV HOME=/home/dev \
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/agent-capsule-entrypoint.sh"]
-CMD ["claude"]
+# Manual-run fallback only: agent-capsule always passes the command explicitly,
+# and which agent binary exists now depends on the AGENT build arg.
+CMD ["bash"]

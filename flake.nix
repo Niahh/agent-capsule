@@ -1,5 +1,6 @@
 {
-  description = "Run Claude Code inside a rootless Podman container that shares one project directory with the host";
+  description =
+    "Run Claude Code, Codex, or OpenCode in rootless Podman with one shared project directory";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -40,6 +41,11 @@
             runHook preInstall
             install -Dm755 agent-capsule $out/bin/agent-capsule
             install -Dm644 Dockerfile $out/share/agent-capsule/Dockerfile
+            install -Dm755 entrypoint.sh $out/share/agent-capsule/entrypoint.sh
+            install -Dm644 completions/agent-capsule.bash \
+              $out/share/bash-completion/completions/agent-capsule
+            install -Dm644 completions/_agent-capsule \
+              $out/share/zsh/site-functions/_agent-capsule
             runHook postInstall
           '';
 
@@ -61,7 +67,7 @@
           '';
 
           meta = {
-            description = "Run Claude Code in a rootless Podman container sharing one project directory";
+            description = "Run a coding agent in a rootless Podman container sharing one project directory";
             homepage = "https://github.com/Niahh/agent-capsule";
             license = nixpkgs.lib.licenses.mit;
             platforms = systems;
@@ -76,7 +82,6 @@
           packages = with pkgs; [
             shellcheck
             hadolint
-            go-task
           ];
         };
       });
@@ -88,13 +93,21 @@
         package = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-capsule;
         shellcheck =
           pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-            shellcheck ${self}/agent-capsule
+            shellcheck ${self}/agent-capsule ${self}/tests/agent-capsule_test.sh \
+              ${self}/entrypoint.sh ${self}/completions/agent-capsule.bash
             touch $out
           '';
         hadolint = pkgs.runCommand "hadolint" { nativeBuildInputs = [ pkgs.hadolint ]; } ''
           hadolint --config ${self}/.hadolint.yaml ${self}/Dockerfile
           touch $out
         '';
+        launcher-tests =
+          pkgs.runCommand "launcher-tests"
+            { nativeBuildInputs = with pkgs; [ bash coreutils git perl ]; }
+            ''
+              bash ${self}/tests/agent-capsule_test.sh
+              touch $out
+            '';
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Reconcile the capsule-managed pieces of /home/dev, then start the agent.
+#
+# /home/dev is bind-mounted from a persistent host session home, so anything
+# this places there outlives the run. Each piece carries a marker file: without
+# one there is no way to tell capsule-managed state from the user's own, and no
+# safe way to remove it when the integration is deactivated.
+set -e
+
+skills_dir="${AGENT_CAPSULE_SKILLS_DIR:-}"
+if [[ -n "$skills_dir" ]]; then
+  skill="$skills_dir/explain-diff-html"
+  marker="$skills_dir/.explain-diff-html-capsule-managed"
+
+  case ",${AGENT_CAPSULE_WITH:-}," in
+    *,explain-diff,*)
+      mkdir -p "$skills_dir"
+      if [[ (-e "$skill" || -L "$skill") && ! -e "$marker" ]]; then
+        echo "explain-diff-html already exists and is not capsule-managed: $skill" >&2
+        exit 1
+      fi
+      ln -sfn /opt/explain-diff-html "$skill"
+      touch "$marker"
+      ;;
+    *)
+      if [[ -e "$marker" ]]; then
+        rm -f "$skill" "$marker"
+      fi
+      ;;
+  esac
+fi
+
+# Codex has no invocation-only local plugin flag, so its plugin list is state
+# that has to be reconciled rather than passed per run.
+if [[ "${AGENT_CAPSULE_AGENT:-}" == codex ]]; then
+  codex_home="${CODEX_HOME:-${HOME:-/home/dev}/.codex}"
+  marker="$codex_home/.superpowers-capsule-managed"
+
+  case ",${AGENT_CAPSULE_WITH:-}," in
+    *,superpowers,*)
+      mkdir -p "$codex_home"
+      CODEX_HOME="$codex_home" codex plugin marketplace add /opt/superpowers/source >/dev/null
+      CODEX_HOME="$codex_home" codex plugin add superpowers@superpowers-dev >/dev/null
+      touch "$marker"
+      ;;
+    *)
+      if [[ -e "$marker" ]]; then
+        CODEX_HOME="$codex_home" codex plugin remove superpowers@superpowers-dev >/dev/null
+        rm -f "$marker"
+      fi
+      ;;
+  esac
+fi
+
+exec "$@"
