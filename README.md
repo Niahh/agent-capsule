@@ -4,7 +4,7 @@
 
 # agent-capsule
 
- [![lint](https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml/badge.svg)](https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml)
+[![lint][lint-badge]][lint-workflow]
 
 Run a coding agent, [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by
 default, [OpenAI Codex CLI](https://github.com/openai/codex), or
@@ -37,7 +37,8 @@ limits. Everything else on the host stays out of reach.
 ## Requirements
 
 - Linux with rootless Podman configured, **or** macOS with Podman (see below)
-- `make` for `make install` (or copy the two files manually)
+- `make` for `make install` (or copy `agent-capsule`, `Dockerfile`, and
+  `entrypoint.sh` manually)
 
 ### macOS
 
@@ -81,21 +82,40 @@ The image builds on first run and again whenever the selection changes, because 
 contains only the agent and integrations the run asked for. Switching back is
 usually seconds: the layers of a combination you have built before are cached, so
 only the first build of each is slow. Each rebuild also removes the untagged image
-it replaced, which `AGENT_CAPSULE_PRUNE=0` disables.
+it replaced, which `AGENT_CAPSULE_PRUNE=0` disables. Podman keeps shared layers and
+cannot remove an old image while a running container still uses it, so the guarantee
+is one tagged runnable image rather than one physical object in container storage.
 
-It also rebuilds once the image is more than seven days old, to pick up new tool
-releases. See [Tool versions and upgrades](#tool-versions-and-upgrades).
-Use `--build` to rebuild from scratch at any time.
+It also performs a full rebuild once the last no-cache refresh is more than seven
+days old, to pick up new tool releases. See
+[Tool versions and upgrades](#tool-versions-and-upgrades). Use `--build` to rebuild
+from scratch at any time.
+
+## Upgrading from 0.2
+
+- The config file is gone. `~/.agent-capsule/config` is no longer read, and
+  `AGENT_CAPSULE_CONFIG` no longer selects one. Move its contents into `export`
+  lines in `~/.bashrc` or `~/.zshrc`, see [Persistent defaults](#persistent-defaults).
+  A leftover file is inert, not an error.
+- `--check-updates` is removed. Nothing is pinned to compare against.
+- Tools are no longer pinned by default. Every tool tracks its latest release and
+  the image refreshes weekly; `AGENT_CAPSULE_*_VERSION` pins one if needed.
+- The image is built for one agent and one set of integrations, so `--agent` and
+  `--with` now rebuild it. Each rebuild prunes the image it replaced.
+- The legacy `--shared-claude-md*` flags and the `superclaude` and `hunkdiff`
+  integrations are no longer recognised by name; they fail as an unknown option
+  and an unknown extra.
+- Session names may no longer begin with a dot.
 
 ## Upgrading from 0.1
 
-Version 0.2 does not change legacy configuration or state automatically. The
+Version 0.3 does not change legacy configuration or state automatically. The
 launcher stops before changing files if it finds the 0.1 shared authentication
 home at `auth-home/.claude`, which would otherwise mix two agents' credentials.
 Every other item below is inert rather than detected, so work through the list.
 Back up `~/.agent-capsule` before upgrading.
 
-Update the old configuration and state before launching version 0.2:
+Update the old configuration and state before launching version 0.3:
 
 - Replace `superclaude` with `superpowers` in `AGENT_CAPSULE_WITH` and `--with`.
   They provide different features, so review the Superpowers workflow before enabling it.
@@ -122,12 +142,14 @@ Update the old configuration and state before launching version 0.2:
 
 ## Tool versions and upgrades
 
-Every bundled tool installs its latest release when the image is built. There is
-nothing to pin and nothing to bump.
+Every bundled tool tracks its latest release by default. No version updates are
+required in agent-capsule itself.
 
-Because "latest" is only true as of the build, the image is rebuilt once it is
-older than seven days, pulling the base image and bypassing the layer cache.
-Change the window or switch it off:
+Because "latest" is only true as of a full refresh, the image records when it last
+pulled the base image and bypassed the layer cache. It repeats that refresh after
+seven days. Cached agent or integration changes preserve the earlier refresh time,
+so changing the selection cannot postpone an overdue update. Change the window or
+switch it off:
 
 ```sh
 export AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=14   # refresh fortnightly
@@ -159,6 +181,8 @@ AGENT_CAPSULE_GOLANGCI_LINT_VERSION
 
 Superpowers and golangci-lint use Git tags, including the leading `v`.
 `agent-capsule --versions` prints `latest` for everything unpinned.
+The default base tags are the floating `node:trixie-slim` and `golang:trixie` tags.
+Set `AGENT_CAPSULE_NODE_TAG` or `AGENT_CAPSULE_GO_TAG` to override them.
 
 ## Quick start
 
@@ -206,8 +230,7 @@ Their values are not placed in the Podman command line.
 Differences under opencode: per-project memory is unavailable (it is a Claude Code
 mechanism), Superpowers and MCP servers use invocation-scoped configuration, and the
 claude-only `anydoc` integration is rejected. User-owned OpenCode configuration files
-are left untouched. A config marker created by agent-capsule 0.2.0 triggers the legacy
-preflight and must be handled using the upgrade instructions above.
+are left untouched.
 
 Codex also has no shared Claude memory. Its `--auth-login` defaults to device-code
 authentication because its browser callback stays inside the container. Custom login
@@ -216,24 +239,26 @@ overrides.
 
 ## Flags at a glance
 
-| Flag                                             | Effect                                                                             |
-|--------------------------------------------------|------------------------------------------------------------------------------------|
-| `--build`                                        | rebuild from scratch: pull the base image and bypass the layer cache               |
-| `--shell`                                        | start bash instead of the agent                                                    |
-| `--keep-id`                                      | run as your UID inside too (needed for `--dangerously-skip-permissions`)           |
-| `--offline`                                      | no network inside the container                                                    |
-| `--auth-login`                                   | authenticate the selected agent in its isolated auth home                          |
-| `--agent NAME`                                   | pick the agent (`claude` default, `codex`, `opencode`); `list` prints them         |
-| `--session NAME`                                 | named per-session home, for parallel agents on one repo                            |
-| `--with TOOL[,TOOL]`                             | activate bundled integrations (`superpowers`, `explain-diff`, `mcpvault`, `anydoc`); `list`, `none` |
-| `--mount SRC[:DEST][:ro]`                        | extra file or directory bind mounts (repeatable)                                   |
-| `--vault[=PATH]`                                 | mount a configured vault read-write; `=PATH` picks it for one run                    |
-| `--no-vault`                                     | skip the vault (and mcpvault) for one run, overriding the environment              |
-| `--shared-memory-ro`, `--no-shared-memory`       | restrict or disable pooled per-project memory (claude only)                        |
-| `--shared-rules PATH`                            | use a specific global rules file                                                   |
-| `--shared-rules-rw`, `--no-shared-rules`         | writable or disabled global rules file                                              |
-| `--version`                                      | print the version and exit                                                         |
-| `--versions`                                     | print each tool's pin, or `latest` where none is set, and exit                     |
+- `--agent NAME`: use `claude`, `codex`, or `opencode`; `list` prints the choices.
+- `--session NAME`: use a named per-session home.
+- `--auth-login`: authenticate the selected agent in its isolated auth home.
+- `--shell`: start Bash instead of the agent.
+- `--offline`: disable container networking.
+- `--keep-id`: use the host UID and GID inside the container.
+- `--with TOOL[,TOOL]`: activate integrations; `list` prints them and `none` clears
+  the selection.
+- `--mount SRC[:DEST][:ro]`: add a file or directory bind mount; repeat as needed.
+- `--vault[=PATH]`: mount the configured vault read-write, or select one with
+  `=PATH`.
+- `--no-vault`: disable the vault and mcpvault for one run.
+- `--shared-memory-ro`: mount Claude project memory read-only.
+- `--no-shared-memory`: disable Claude project memory.
+- `--shared-rules PATH`: select the global rules file.
+- `--shared-rules-rw`: mount the global rules file read-write.
+- `--no-shared-rules`: disable the global rules file.
+- `--build`: pull the base image and rebuild without the layer cache.
+- `--version`: print the launcher version.
+- `--versions`: print each configured tool pin, or `latest` when unpinned.
 
 ## Obsidian vault over MCP
 
@@ -287,6 +312,48 @@ nothing, and `--no-vault` skips the vault for a single run.
 
 A one-off run does not need an export: `AGENT_CAPSULE_AGENT=codex agent-capsule .`
 works, because the launcher reads the variable from its own environment.
+
+### Environment reference
+
+Selection and image lifecycle:
+
+- `AGENT_CAPSULE_AGENT=claude`: default agent (`claude`, `codex`, or `opencode`).
+- `AGENT_CAPSULE_WITH=`: comma-separated default integrations.
+- `AGENT_CAPSULE_IMAGE=agent-capsule-dev`: image name or full tagged reference.
+- `AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=7`: days between full refreshes; `0` disables
+  refreshes based on age.
+- `AGENT_CAPSULE_PRUNE=1`: prune superseded capsule images after a build.
+- `AGENT_CAPSULE_NODE_TAG=trixie-slim`: Node base image tag.
+- `AGENT_CAPSULE_GO_TAG=trixie`: Go toolchain image tag.
+- `AGENT_CAPSULE_DOCKERFILE=`: explicit path to the installed Dockerfile.
+- `AGENT_CAPSULE_*_VERSION=`: optional tool pins listed under
+  [Tool versions and upgrades](#tool-versions-and-upgrades).
+
+Sessions and runtime limits:
+
+- `AGENT_CAPSULE_HOME=~/.agent-capsule`: persistent state root.
+- `AGENT_CAPSULE_SESSION=`: default named session.
+- `AGENT_CAPSULE_MEMORY=8g`: container memory limit.
+- `AGENT_CAPSULE_CPUS=4`: container CPU limit.
+- `AGENT_CAPSULE_PIDS_LIMIT=512`: container process limit.
+- `AGENT_CAPSULE_KEEPID=0`: set to `1` to use the host UID and GID inside.
+- `AGENT_CAPSULE_OFFLINE=0`: set to `1` to disable container networking.
+
+Shared state and mounts:
+
+- `AGENT_CAPSULE_SHARED_RULES=~/.agent-capsule/CLAUDE.md`: global rules file.
+- `AGENT_CAPSULE_SHARED_RULES_ENABLED=1`: set to `0` to disable global rules.
+- `AGENT_CAPSULE_SHARED_RULES_READONLY=1`: set to `0` for a writable rules mount.
+- `AGENT_CAPSULE_SHARED_MEMORY_ENABLED=1`: set to `0` to disable Claude project
+  memory sharing.
+- `AGENT_CAPSULE_SHARED_MEMORY_READONLY=0`: set to `1` for read-only shared memory.
+- `AGENT_CAPSULE_SHARE_AUTH=1`: set to `0` to stop sharing the selected credentials
+  file across sessions.
+- `AGENT_CAPSULE_VAULT=`: default host vault directory.
+- `AGENT_CAPSULE_VAULT_DEST=/vault`: vault path inside the container.
+- `AGENT_CAPSULE_MOUNT_VAULT=0`: set to `1` to mount the configured vault by default.
+- `AGENT_CAPSULE_VOLOPT=`: explicit Podman volume option, normally detected from
+  SELinux support.
 
 ## State layout
 
@@ -342,9 +409,11 @@ MIT, see [LICENSE](LICENSE).
 
 ## Contributors
 
-| Name                                               | Contribution                                                                  |
-|----------------------------------------------------|-------------------------------------------------------------------------------|
-| [@linouxis9](https://github.com/linouxis9)         | Original script concept                                                       |
-| [@Niahh](https://github.com/Niahh)                 | Core launcher, multi-agent support, universal image, integrations, and tests |
-| [@alcelafranque](https://github.com/alcelafranque) | Nix flake, dev shell, and CI check                                            |
-| [@citizen8](https://github.com/citizen8)           | macOS support in the Nix flake                                                |
+- [@linouxis9](https://github.com/linouxis9): original script concept.
+- [@Niahh](https://github.com/Niahh): core launcher, multi-agent support, image,
+  integrations, and tests.
+- [@alcelafranque](https://github.com/alcelafranque): Nix flake, dev shell, and CI.
+- [@citizen8](https://github.com/citizen8): macOS support in the Nix flake.
+
+[lint-badge]: https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml/badge.svg
+[lint-workflow]: https://github.com/Niahh/agent-capsule/actions/workflows/lint.yml
