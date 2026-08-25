@@ -1476,7 +1476,9 @@ if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
     fi
   elif [[ "$AGENT_MCP_MODE" == "override" ]]; then
     if [[ "$SHELL_MODE" == "1" ]]; then
-      echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: codex -c 'mcp_servers.obsidian.command=\"mcpvault\"' -c 'mcp_servers.obsidian.args=[\"$VAULT_DEST\"]')"
+      echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: codex -c" \
+        "'mcp_servers.obsidian.command=\"mcpvault\"' -c" \
+        "'mcp_servers.obsidian.args=[\"$VAULT_DEST\"]')"
     else
       echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian', configuration overrides)"
     fi
@@ -1496,7 +1498,8 @@ if [[ "$AUTH_LOGIN" == "1" && "$AGENT" == "codex" ]]; then
   elif [[ "${#AGENT_ARGS[@]}" -eq 0 ]]; then
     echo ">> Login   : device-code flow; approve the code codex prints at the URL it shows, from any browser."
   else
-    echo ">> Login   : custom login args; note the browser flow does not work in the capsule (callback port unreachable)."
+    echo ">> Login   : custom login args; note the browser flow does not work" \
+      "in the capsule (callback port unreachable)."
   fi
 fi
 [[ "$OFFLINE" == "1" ]] && echo ">> Network : disabled"
