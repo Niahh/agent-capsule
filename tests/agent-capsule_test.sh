@@ -29,11 +29,15 @@ set -eu
 printf 'CALL=%s\n' "${1:-}" >> "$PODMAN_LOG"
 previous=""
 bundle_hash=""
+refreshed_at=""
 image_ref=""
 for arg in "$@"; do
   printf 'ARG=%s\n' "$arg" >> "$PODMAN_LOG"
   if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.bundle=* ]]; then
     bundle_hash="${arg#*=}"
+  fi
+  if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.refreshed-at=* ]]; then
+    refreshed_at="${arg#*=}"
   fi
   if [[ "$previous" == "-t" ]]; then
     image_ref="$arg"
@@ -44,8 +48,8 @@ done
 if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
   for arg in "$@"; do image_ref="$arg"; done
   awk -F '\t' -v image="$image_ref" '
-    $1 == image { hash = $2; created = $3 }
-    END { if (hash != "") print hash " " created }
+    $1 == image { hash = $2; refreshed = $3 }
+    END { if (hash != "") print hash " " refreshed }
   ' "$PODMAN_IMAGE_STATE"
   exit 0
 fi
@@ -66,7 +70,7 @@ fi
 if [[ "${1:-}" == "build" && -n "$image_ref" && -n "$bundle_hash" ]]; then
   sleep "${PODMAN_BUILD_DELAY:-0}"
   printf '%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
-    "${PODMAN_BUILD_EPOCH:-$(date +%s)}" >> "$PODMAN_IMAGE_STATE"
+    "${PODMAN_BUILD_EPOCH:-$refreshed_at}" >> "$PODMAN_IMAGE_STATE"
 fi
 
 exit 0
@@ -135,6 +139,8 @@ new_case() {
 }
 
 run_capsule() {
+  local run_output="${RUN_OUTPUT:-$OUTPUT}"
+
   HOME="$HOST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     PODMAN_LOG="$PODMAN_LOG" \
@@ -143,7 +149,7 @@ run_capsule() {
     AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
     AGENT_CAPSULE_DOCKERFILE="${AGENT_CAPSULE_DOCKERFILE:-$DOCKERFILE}" \
     XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
-    "$BASH_BIN" "$SCRIPT" "$@" > "$OUTPUT" 2>&1
+    "$BASH_BIN" "$SCRIPT" "$@" > "$run_output" 2>&1
 }
 
 new_case
@@ -257,6 +263,24 @@ assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
 assert_contains "$OUTPUT" 'days old, refreshing'
 
+# The first build establishes the refresh epoch and cannot trust old builder
+# cache left behind after an earlier tag was removed.
+new_case
+run_capsule --shell --session first-refresh "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
+assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.refreshed-at='
+
+# Selection and freshness are independent. A stale image must refresh even when
+# the requested agent also changes its bundle hash.
+new_case
+PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-selection "$ROOT_DIR"
+: > "$PODMAN_LOG"
+run_capsule --agent codex --shell --session stale-selection-codex "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
+assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+
 new_case
 PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session age-disabled "$ROOT_DIR"
 : > "$PODMAN_LOG"
@@ -362,6 +386,7 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
 : > "$PODMAN_LOG"
 run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
+selection_refreshed_at="$(awk -F '\t' 'NF == 3 { value = $3 } END { print value }' "$PODMAN_IMAGE_STATE")"
 
 # Switching the agent changes what is installed, so it must rebuild.
 : > "$PODMAN_LOG"
@@ -375,6 +400,10 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'AGENT=codex'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=1'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_ANYDOC=0'
 assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.selection=codex:superpowers'
+assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
+
+# A recent refresh survives a cached selection rebuild instead of being reset.
+assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.refreshed-at=$selection_refreshed_at"
 
 # So does changing the integrations, with the agent held fixed.
 : > "$PODMAN_LOG"
@@ -655,13 +684,13 @@ assert_contains "$PODMAN_LOG" \
 
 new_case
 (
-  OUTPUT="$CASE_DIR/first.output"
-  PODMAN_BUILD_DELAY=0.2 run_capsule --shell --session concurrent-first "$ROOT_DIR"
+  RUN_OUTPUT="$CASE_DIR/first.output" PODMAN_BUILD_DELAY=0.2 \
+    run_capsule --shell --session concurrent-first "$ROOT_DIR"
 ) &
 first_pid=$!
 (
-  OUTPUT="$CASE_DIR/second.output"
-  PODMAN_BUILD_DELAY=0.2 run_capsule --shell --session concurrent-second "$ROOT_DIR"
+  RUN_OUTPUT="$CASE_DIR/second.output" PODMAN_BUILD_DELAY=0.2 \
+    run_capsule --shell --session concurrent-second "$ROOT_DIR"
 ) &
 second_pid=$!
 wait "$first_pid"
@@ -670,6 +699,49 @@ wait "$second_pid"
   fail "concurrent launches built the image more than once"
 [[ ! -e "$TEST_ROOT/xdg/agent-capsule-$UID/image.lock" ]] ||
   fail "image build lock was not removed"
+
+# A process killed before its EXIT trap leaves a stale lock. The next launch
+# must reclaim it instead of waiting forever.
+new_case
+stale_lock_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+mkdir -p "$stale_lock_root"
+printf '%s\n' 999999 > "$stale_lock_root/image.lock"
+set +e
+timeout 2 env \
+  HOME="$HOST_HOME" \
+  PATH="$FAKE_BIN:$PATH" \
+  PODMAN_LOG="$PODMAN_LOG" \
+  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
+  AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
+  XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  "$BASH_BIN" "$SCRIPT" --shell --session stale-lock "$ROOT_DIR" > "$OUTPUT" 2>&1
+status=$?
+set -e
+[[ "$status" == "0" ]] || fail "stale image lock was not reclaimed"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+
+# A directory lock belongs to an older launcher and has no owner metadata. It
+# must be preserved because that launcher may still be building.
+new_case
+legacy_lock_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+mkdir -p "$legacy_lock_root/image.lock"
+set +e
+timeout 2 env \
+  HOME="$HOST_HOME" \
+  PATH="$FAKE_BIN:$PATH" \
+  PODMAN_LOG="$PODMAN_LOG" \
+  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
+  AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
+  XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  "$BASH_BIN" "$SCRIPT" --shell --session legacy-lock "$ROOT_DIR" > "$OUTPUT" 2>&1
+status=$?
+set -e
+assert_status_fails "$status"
+[[ -d "$legacy_lock_root/image.lock" ]] || fail "legacy image lock was removed"
+assert_contains "$OUTPUT" 'legacy directory lock'
+rmdir "$legacy_lock_root/image.lock"
 
 # Shell completion asks the launcher for these two lists, so the contract is
 # one value per line, exit 0, and no podman anywhere near it.
@@ -740,5 +812,22 @@ assert_contains "$PODMAN_LOG" 'CALL=build'
 : > "$PODMAN_LOG"
 CAPSULE_HOME="$other_capsule_home" run_capsule --shell --session second-home "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
+
+# Floating distro tags keep both toolchains on their latest upstream release.
+assert_contains "$SCRIPT" "NODE_TAG=\"\${AGENT_CAPSULE_NODE_TAG:-trixie-slim}\""
+assert_contains "$SCRIPT" "GO_TAG=\"\${AGENT_CAPSULE_GO_TAG:-trixie}\""
+assert_contains "$DOCKERFILE" 'ARG NODE_TAG=trixie-slim'
+assert_contains "$DOCKERFILE" 'ARG GO_TAG=trixie'
+assert_contains "$DOCKERFILE" 'SUPERPOWERS_VERSION:-latest'
+assert_contains "$DOCKERFILE" "tree/v\$anydoc_installed"
+for version_variable in \
+  ANYDOC_VERSION \
+  MCPVAULT_VERSION \
+  SKILLS_VERSION \
+  CLAUDE_CODE_VERSION \
+  CODEX_VERSION \
+  OPENCODE_VERSION; do
+  assert_contains "$DOCKERFILE" "\${$version_variable:-latest}"
+done
 
 echo "PASS: $pass_count launcher scenarios"
