@@ -6,7 +6,8 @@ Run the behavior tests and linters. CI runs the same checks:
 
 ```sh
 make test
-shellcheck agent-capsule tests/agent-capsule_test.sh tests/worklog_test.sh entrypoint.sh \
+shellcheck agent-capsule entrypoint.sh scripts/check-shell-completion \
+  tests/agent-capsule_test.sh tests/worklog_test.sh tests/install_test.sh \
   completions/agent-capsule.bash
 hadolint Dockerfile
 ```

@@ -96,9 +96,10 @@
         package = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-capsule;
         shellcheck =
           pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-            shellcheck ${self}/agent-capsule ${self}/tests/agent-capsule_test.sh \
-              ${self}/tests/worklog_test.sh \
-              ${self}/entrypoint.sh ${self}/completions/agent-capsule.bash
+            shellcheck ${self}/agent-capsule ${self}/entrypoint.sh \
+              ${self}/scripts/check-shell-completion \
+              ${self}/tests/agent-capsule_test.sh ${self}/tests/worklog_test.sh \
+              ${self}/tests/install_test.sh ${self}/completions/agent-capsule.bash
             touch $out
           '';
         hadolint = pkgs.runCommand "hadolint" { nativeBuildInputs = [ pkgs.hadolint ]; } ''
@@ -111,6 +112,7 @@
             ''
               bash ${self}/tests/agent-capsule_test.sh
               bash ${self}/tests/worklog_test.sh
+              bash ${self}/tests/install_test.sh
               touch $out
             '';
       });
