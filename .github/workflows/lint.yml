@@ -67,6 +67,11 @@ jobs:
           docker run --rm agent-capsule:test bash -c 'test -d /opt/superpowers/source'
           docker run --rm agent-capsule:test bash -c 'test -f /opt/explain-diff-html/SKILL.md'
           docker run --rm agent-capsule:test mcpvault --help
+      - name: Cluster CLIs are installed
+        run: |
+          docker run --rm agent-capsule:test kubectl version --client
+          docker run --rm agent-capsule:test helm version
+          docker run --rm agent-capsule:test talosctl version --client
       - name: The explain-diff skill is linked and then removed again
         run: |
           skills_home="capsule-skills-smoke-${GITHUB_RUN_ID}-${{ matrix.agent }}"

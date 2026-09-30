@@ -243,6 +243,9 @@ assert_contains "$OUTPUT" 'codex 6.5.4'
 # Everything without an override tracks the latest release at build time.
 assert_contains "$OUTPUT" 'opencode latest'
 assert_contains "$OUTPUT" 'superpowers latest'
+assert_contains "$OUTPUT" 'kubectl latest'
+assert_contains "$OUTPUT" 'helm latest'
+assert_contains "$OUTPUT" 'talosctl latest'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # An unset pin reaches the build as an empty arg, which the Dockerfile reads as
@@ -251,11 +254,25 @@ new_case
 run_capsule --shell --session unpinned-build "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'SUPERPOWERS_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'KUBECTL_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'HELM_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'TALOSCTL_VERSION='
 : > "$PODMAN_LOG"
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --shell --session pinned-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
+
+# Each cluster CLI pin must be part of the bundle hash, or pinning it after an
+# unpinned build would keep the old image.
+new_case
+for cluster_pin in KUBECTL_VERSION=v1.2.3 HELM_VERSION=v4.5.6 TALOSCTL_VERSION=v7.8.9; do
+  run_capsule --shell --session cluster-pins "$ROOT_DIR"
+  : > "$PODMAN_LOG"
+  (export "AGENT_CAPSULE_$cluster_pin" && run_capsule --shell --session cluster-pins "$ROOT_DIR")
+  assert_contains "$PODMAN_LOG" 'CALL=build'
+  assert_arg_after "$PODMAN_LOG" --build-arg "$cluster_pin"
+done
 
 # An image older than the age limit is refreshed without the layer cache, or an
 # unpinned install would reproduce exactly what is already there.
@@ -317,6 +334,16 @@ status=$?
 set -e
 assert_status_fails "$status"
 assert_contains "$OUTPUT" 'Invalid pinned package version: invalid'
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# Cluster CLI releases are tagged with a leading v, which the download URLs need.
+new_case
+set +e
+AGENT_CAPSULE_KUBECTL_VERSION=1.37.1 run_capsule --shell "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" 'Invalid pinned tagged version: 1.37.1'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # A session from the environment is an ambient default; only an
@@ -833,6 +860,10 @@ for version_variable in \
   CODEX_VERSION \
   OPENCODE_VERSION; do
   assert_contains "$DOCKERFILE" "\${$version_variable:-latest}"
+done
+# An undeclared build arg is dropped with only a warning, so a pin would be ignored.
+for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION; do
+  assert_contains "$DOCKERFILE" "ARG $version_variable"
 done
 
 echo "PASS: $pass_count launcher scenarios"

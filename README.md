@@ -13,8 +13,8 @@ default, [OpenAI Codex CLI](https://github.com/openai/codex), or
 
 One shell script, one Dockerfile. The container uses the project's resolved host path
 as its working directory and also exposes it at `/workspace` for compatibility. It
-gets an isolated home at `/home/dev`, a Node and Go toolchain, and hard resource
-limits. Everything else on the host stays out of reach.
+gets an isolated home at `/home/dev`, a Node and Go toolchain, `kubectl`, `helm`,
+`talosctl`, and hard resource limits. Everything else on the host stays out of reach.
 
 ## What you get
 
@@ -177,9 +177,13 @@ AGENT_CAPSULE_MCPVAULT_VERSION
 AGENT_CAPSULE_SKILLS_VERSION
 AGENT_CAPSULE_SUPERPOWERS_VERSION
 AGENT_CAPSULE_GOLANGCI_LINT_VERSION
+AGENT_CAPSULE_KUBECTL_VERSION
+AGENT_CAPSULE_HELM_VERSION
+AGENT_CAPSULE_TALOSCTL_VERSION
 ```
 
-Superpowers and golangci-lint use Git tags, including the leading `v`.
+Superpowers, golangci-lint, kubectl, Helm, and talosctl use Git tags, including the
+leading `v`.
 `agent-capsule --versions` prints `latest` for everything unpinned.
 The default base tags are the floating `node:trixie-slim` and `golang:trixie` tags.
 Set `AGENT_CAPSULE_NODE_TAG` or `AGENT_CAPSULE_GO_TAG` to override them.
@@ -293,6 +297,20 @@ Notes:
   `--mcp-config`, so a project's own `.mcp.json` still loads. OpenCode receives the
   server through invocation-scoped configuration, so user config files stay intact.
   Codex receives configuration overrides layered over its existing `config.toml`.
+
+## Kubernetes and Talos
+
+Every image includes `kubectl`, `helm`, and `talosctl`. Their configuration stays on
+the host until you mount it:
+
+```sh
+agent-capsule -m ~/.kube/config:/home/dev/.kube/config:ro \
+  -m ~/.talos/config:/home/dev/.talos/config:ro .
+```
+
+The cluster must be reachable from the container, so these commands fail under
+`--offline`. A kubeconfig that calls an exec credential plugin also needs that plugin
+inside the image.
 
 ## Persistent defaults
 

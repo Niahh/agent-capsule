@@ -103,6 +103,9 @@ MCPVAULT_VERSION="${AGENT_CAPSULE_MCPVAULT_VERSION:-}"
 SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-}"
 SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-}"
 GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-}"
+KUBECTL_VERSION="${AGENT_CAPSULE_KUBECTL_VERSION:-}"
+HELM_VERSION="${AGENT_CAPSULE_HELM_VERSION:-}"
+TALOSCTL_VERSION="${AGENT_CAPSULE_TALOSCTL_VERSION:-}"
 
 # Unpinned tools track latest at build time, so an old image quietly stops doing
 # that. Age is the only signal for it: the bundle hash cannot see upstream move.
@@ -587,6 +590,9 @@ mcpvault $(selected_version "$MCPVAULT_VERSION")
 skills $(selected_version "$SKILLS_VERSION")
 superpowers $(selected_version "$SUPERPOWERS_VERSION")
 golangci-lint $(selected_version "$GOLANGCI_LINT_VERSION")
+kubectl $(selected_version "$KUBECTL_VERSION")
+helm $(selected_version "$HELM_VERSION")
+talosctl $(selected_version "$TALOSCTL_VERSION")
 VERSIONS
       exit 0
       ;;
@@ -679,7 +685,12 @@ for package_version in \
 done
 unset package_version
 
-for tagged_version in "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION"; do
+for tagged_version in \
+  "$SUPERPOWERS_VERSION" \
+  "$GOLANGCI_LINT_VERSION" \
+  "$KUBECTL_VERSION" \
+  "$HELM_VERSION" \
+  "$TALOSCTL_VERSION"; do
   [[ -n "$tagged_version" ]] || continue
   if [[ ! "$tagged_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
     echo "Invalid pinned tagged version: $tagged_version" >&2
@@ -1074,8 +1085,8 @@ ENTRYPOINT_HASH="$(sha256_file "$ENTRYPOINT_SRC")"
 HASH="$(printf '%s\n' \
   "$NODE_TAG" "$GO_TAG" "$AGENT" "$EXTRAS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
-  "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" \
-  "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" | sha256_stream)"
+  "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" "$KUBECTL_VERSION" "$HELM_VERSION" \
+  "$TALOSCTL_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" | sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
 # Freshness is checked inside the lock only. An unlocked pre-check would save a
@@ -1159,6 +1170,9 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     --build-arg "SKILLS_VERSION=$SKILLS_VERSION" \
     --build-arg "SUPERPOWERS_VERSION=$SUPERPOWERS_VERSION" \
     --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
+    --build-arg "KUBECTL_VERSION=$KUBECTL_VERSION" \
+    --build-arg "HELM_VERSION=$HELM_VERSION" \
+    --build-arg "TALOSCTL_VERSION=$TALOSCTL_VERSION" \
     "${BUILD_SELECTION_ARGS[@]}" \
     --label "io.agent-capsule.bundle=$HASH" \
     --label "io.agent-capsule.refreshed-at=$REFRESHED_AT" \
