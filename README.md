@@ -6,7 +6,7 @@
 
 [![lint][lint-badge]][lint-workflow]
 
-Run a coding agent, [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by
+Run a coding agent, [Claude Code](https://code.claude.com/docs) by
 default, [OpenAI Codex CLI](https://github.com/openai/codex), or
 [opencode](https://opencode.ai), inside a rootless
 [Podman](https://podman.io/) container that shares a single project directory with the host.
