@@ -2,11 +2,12 @@
 
 ## Before pushing
 
-Run the behavior tests and lint both files. CI runs the same checks:
+Run the behavior tests and linters. CI runs the same checks:
 
 ```sh
 make test
-shellcheck agent-capsule tests/agent-capsule_test.sh
+shellcheck agent-capsule tests/agent-capsule_test.sh entrypoint.sh \
+  completions/agent-capsule.bash
 hadolint Dockerfile
 ```
 
