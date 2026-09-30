@@ -13,8 +13,8 @@ default, [OpenAI Codex CLI](https://github.com/openai/codex), or
 
 One shell script, one Dockerfile. The container uses the project's resolved host path
 as its working directory and also exposes it at `/workspace` for compatibility. It
-gets an isolated home at `/home/dev`, a Node and Go toolchain, `kubectl`, `helm`,
-`talosctl`, and hard resource limits. Everything else on the host stays out of reach.
+gets an isolated home at `/home/dev`, a Node and Go toolchain, and hard resource
+limits. Everything else on the host stays out of reach.
 
 ## What you get
 
@@ -199,6 +199,7 @@ agent-capsule --session fix-auth ~/code/myapp   # named session for parallel age
 agent-capsule --with superpowers .              # activate bundled development skills
 agent-capsule --with explain-diff .             # explain a change as interactive HTML
 agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
+agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
 agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
 agent-capsule --agent codex --auth-login        # once: log in to Codex instead
 agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on a project
@@ -300,13 +301,18 @@ Notes:
 
 ## Kubernetes and Talos
 
-Every image includes `kubectl`, `helm`, and `talosctl`. Their configuration stays on
-the host until you mount it:
+`--with kubernetes` installs `kubectl` and `helm`, and `--with talos` installs
+`talosctl`. Both work with every agent. Their configuration stays on the host until
+you mount it:
 
 ```sh
-agent-capsule -m ~/.kube/config:/home/dev/.kube/config:ro \
+agent-capsule --with kubernetes,talos \
+  -m ~/.kube/config:/home/dev/.kube/config:ro \
   -m ~/.talos/config:/home/dev/.talos/config:ro .
 ```
+
+To keep them in every session, add them to `AGENT_CAPSULE_WITH`, see
+[Persistent defaults](#persistent-defaults).
 
 The cluster must be reachable from the container, so these commands fail under
 `--offline`. A kubeconfig that calls an exec credential plugin also needs that plugin

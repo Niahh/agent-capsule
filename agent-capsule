@@ -26,8 +26,9 @@
 #   -h, --help             show this help
 #
 # Integrations:
-#   superpowers, explain-diff, mcpvault, anydoc
+#   superpowers, explain-diff, mcpvault, anydoc, kubernetes, talos
 #   mcpvault requires --vault. anydoc is available only with claude.
+#   kubernetes installs kubectl and helm. talos installs talosctl.
 #
 # Documentation: https://github.com/Niahh/agent-capsule
 #
@@ -125,7 +126,7 @@ selected_version() {
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
-KNOWN_EXTRAS=(anydoc explain-diff mcpvault superpowers)
+KNOWN_EXTRAS=(anydoc explain-diff kubernetes mcpvault superpowers talos)
 
 BUILD_DIR="$STATE_DIR/build"
 AUTH_ROOT_DIR="$STATE_DIR/auth-home"
