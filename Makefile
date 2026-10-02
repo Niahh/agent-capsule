@@ -17,12 +17,13 @@ ZSHCOMPDIR = $(PREFIX)/share/zsh/site-functions
 .PHONY: help test install uninstall
 
 help:
-	@echo "test         Run launcher behavior tests"
+	@echo "test         Run launcher and worklog tests"
 	@echo "install      Install agent-capsule, its container files, and completions"
 	@echo "uninstall    Remove the installed script, container files, and completions"
 
 test:
 	@bash tests/agent-capsule_test.sh
+	@bash tests/worklog_test.sh
 
 install:
 	@install -d "$(BINDIR)"

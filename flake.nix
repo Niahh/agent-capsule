@@ -94,6 +94,7 @@
         shellcheck =
           pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
             shellcheck ${self}/agent-capsule ${self}/tests/agent-capsule_test.sh \
+              ${self}/tests/worklog_test.sh \
               ${self}/entrypoint.sh ${self}/completions/agent-capsule.bash
             touch $out
           '';
@@ -103,9 +104,10 @@
         '';
         launcher-tests =
           pkgs.runCommand "launcher-tests"
-            { nativeBuildInputs = with pkgs; [ bash coreutils git perl ]; }
+            { nativeBuildInputs = with pkgs; [ bash coreutils git nodejs perl ]; }
             ''
               bash ${self}/tests/agent-capsule_test.sh
+              bash ${self}/tests/worklog_test.sh
               touch $out
             '';
       });

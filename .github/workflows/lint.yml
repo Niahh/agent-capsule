@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: |
-          shellcheck agent-capsule tests/agent-capsule_test.sh entrypoint.sh \
+          shellcheck agent-capsule tests/agent-capsule_test.sh tests/worklog_test.sh entrypoint.sh \
             completions/agent-capsule.bash
 
   hadolint:
