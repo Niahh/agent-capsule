@@ -761,6 +761,21 @@ sha256_file() {
   "${SHA256_COMMAND[@]}" "$1" | awk '{print $1}'
 }
 
+# Containers default to UTC, so pass the host zone: $TZ, else the /etc/localtime link target.
+host_time_zone() {
+  local target
+
+  if [[ -n "${TZ:-}" && "${TZ:0:1}" != ":" ]]; then
+    printf '%s\n' "$TZ"
+    return 0
+  fi
+  target="$(readlink /etc/localtime 2>/dev/null || true)"
+  if [[ "$target" == *zoneinfo/* ]]; then
+    printf '%s\n' "${target#*zoneinfo/}"
+  fi
+  return 0
+}
+
 # ----------------------------------------------------------------------------
 # Resolve the requested runtime integrations
 # ----------------------------------------------------------------------------
@@ -1255,6 +1270,11 @@ ENV_ARGS=()
 ENV_ARGS+=(-e "AGENT_CAPSULE_AGENT=$AGENT")
 ENV_ARGS+=(-e "AGENT_CAPSULE_WITH=$EXTRAS")
 ENV_ARGS+=(-e "AGENT_CAPSULE_SKILLS_DIR=/home/dev/$AGENT_SKILLS_REL")
+
+HOST_TZ="$(host_time_zone)"
+if [[ -n "$HOST_TZ" ]]; then
+  ENV_ARGS+=(-e "TZ=$HOST_TZ")
+fi
 
 # Do not place the secret values directly in the podman command line.
 for key in "${AGENT_ENV_PASS[@]}"; do
