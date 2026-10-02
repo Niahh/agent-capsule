@@ -26,8 +26,9 @@
 #   -h, --help             show this help
 #
 # Integrations:
-#   superpowers, explain-diff, mcpvault, anydoc, kubernetes, talos
-#   mcpvault requires --vault. anydoc is available only with claude.
+#   superpowers, explain-diff, mcpvault, anydoc, worklog, kubernetes, talos
+#   mcpvault requires --vault, and worklog requires mcpvault.
+#   anydoc and worklog are available only with claude.
 #   kubernetes installs kubectl and helm. talos installs talosctl.
 #
 # Documentation: https://github.com/Niahh/agent-capsule
@@ -126,7 +127,7 @@ selected_version() {
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
-KNOWN_EXTRAS=(anydoc explain-diff kubernetes mcpvault superpowers talos)
+KNOWN_EXTRAS=(anydoc explain-diff kubernetes mcpvault superpowers talos worklog)
 
 BUILD_DIR="$STATE_DIR/build"
 AUTH_ROOT_DIR="$STATE_DIR/auth-home"
@@ -136,6 +137,9 @@ AUTH_ROOT_DIR="$STATE_DIR/auth-home"
 SHARED_RULES="${AGENT_CAPSULE_SHARED_RULES:-$STATE_DIR/CLAUDE.md}"
 SHARED_RULES_ENABLED="${AGENT_CAPSULE_SHARED_RULES_ENABLED:-1}"
 SHARED_RULES_READONLY="${AGENT_CAPSULE_SHARED_RULES_READONLY:-1}"
+
+# Worklog procedure override. The default is $STATE_DIR/log-work.md, used when it exists and never created.
+WORKLOG_PROCEDURE="${AGENT_CAPSULE_WORKLOG_PROCEDURE:-}"
 
 # Shared per-project memory (claude only; the container path comes from the
 # agent profile). Keyed by project (not session) so parallel agents on the
@@ -761,6 +765,14 @@ sha256_file() {
   "${SHA256_COMMAND[@]}" "$1" | awk '{print $1}'
 }
 
+# One hash of the sorted relative paths and contents, so renames and edits both change it.
+sha256_dir() {
+  (cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r file; do
+    printf '%s\n' "$file"
+    "${SHA256_COMMAND[@]}" "$file" | awk '{print $1}'
+  done) | sha256_stream
+}
+
 # Containers default to UTC, so pass the host zone: $TZ, else the /etc/localtime link target.
 host_time_zone() {
   local target
@@ -833,8 +845,8 @@ fi
 for extra in "${KNOWN_EXTRAS[@]}"; do
   for req in "${REQUESTED_EXTRAS[@]}"; do
     [[ "$req" == "$extra" ]] || continue
-    # anydoc ships files for ~/.claude and is useless to the other agents.
-    if [[ "$extra" != "anydoc" || "$AGENT" == "claude" ]]; then
+    # anydoc and worklog are Claude Code plugins and useless to the other agents.
+    if [[ "$extra" != "anydoc" && "$extra" != "worklog" || "$AGENT" == "claude" ]]; then
       EXTRAS="${EXTRAS:+$EXTRAS,}$extra"
     elif [[ "$WITH_EXPLICIT" == "1" ]]; then
       echo "Extra '$extra' is not available with --agent $AGENT." >&2
@@ -999,6 +1011,39 @@ if [[ ",$EXTRAS," == *,mcpvault,* ]]; then
 fi
 
 # ----------------------------------------------------------------------------
+# worklog
+# ----------------------------------------------------------------------------
+# The session logs through the mcpvault tools, so worklog needs mcpvault.
+WORKLOG_ENABLED=0
+WORKLOG_PROCEDURE_SRC=""
+
+if [[ ",$EXTRAS," == *,worklog,* ]]; then
+  if [[ "$NO_VAULT" == "1" ]]; then
+    echo ">> Worklog : disabled for this run (--no-vault)" >&2
+  elif [[ "$MCPVAULT_ENABLED" != "1" ]]; then
+    echo "--with worklog needs mcpvault." >&2
+    echo "Add mcpvault to --with or AGENT_CAPSULE_WITH." >&2
+    exit 1
+  else
+    # Logging a vault edit would trigger another log, so a project in the vault is left alone.
+    worklog_vault="$(cd -P "$VAULT_DIR" 2>/dev/null && pwd)" || worklog_vault=""
+    if [[ -n "$worklog_vault" && ( "$PROJECT_DIR" == "$worklog_vault" ||
+      "$PROJECT_DIR" == "${worklog_vault%/}"/* ) ]]; then
+      echo ">> Worklog : disabled for this run (the project is inside the vault)" >&2
+    else
+      WORKLOG_ENABLED=1
+    fi
+  fi
+  if [[ "$WORKLOG_ENABLED" == "1" ]]; then
+    if [[ -n "$WORKLOG_PROCEDURE" ]]; then
+      WORKLOG_PROCEDURE_SRC="$(resolve_file_path "$WORKLOG_PROCEDURE" 1)"
+    elif [[ -e "$STATE_DIR/log-work.md" || -L "$STATE_DIR/log-work.md" ]]; then
+      WORKLOG_PROCEDURE_SRC="$(resolve_file_path "$STATE_DIR/log-work.md" 1)"
+    fi
+  fi
+fi
+
+# ----------------------------------------------------------------------------
 # SELinux volume option
 # ----------------------------------------------------------------------------
 if [[ -n "${AGENT_CAPSULE_VOLOPT+x}" ]]; then
@@ -1093,6 +1138,16 @@ ENTRYPOINT_SRC="$(dirname "$DOCKERFILE_SRC")/entrypoint.sh"
 }
 ENTRYPOINT_HASH="$(sha256_file "$ENTRYPOINT_SRC")"
 
+WORKLOG_PLUGIN_SRC="$(dirname "$DOCKERFILE_SRC")/plugins/worklog"
+[[ -f "$WORKLOG_PLUGIN_SRC/.claude-plugin/plugin.json" ]] || {
+  echo "Container plugin not found: $WORKLOG_PLUGIN_SRC" >&2
+  exit 1
+}
+WORKLOG_HASH=""
+if [[ ",$EXTRAS," == *,worklog,* ]]; then
+  WORKLOG_HASH="$(sha256_dir "$WORKLOG_PLUGIN_SRC")"
+fi
+
 # ----------------------------------------------------------------------------
 # Build image if needed
 # ----------------------------------------------------------------------------
@@ -1102,7 +1157,7 @@ HASH="$(printf '%s\n' \
   "$NODE_TAG" "$GO_TAG" "$AGENT" "$EXTRAS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" "$KUBECTL_VERSION" "$HELM_VERSION" \
-  "$TALOSCTL_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" | sha256_stream)"
+  "$TALOSCTL_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" "$WORKLOG_HASH" | sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
 # Freshness is checked inside the lock only. An unlocked pre-check would save a
@@ -1151,6 +1206,14 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
   cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
   cp -f "$ENTRYPOINT_SRC" "$BUILD_CONTEXT_DIR/entrypoint.sh"
   chmod 0755 "$BUILD_CONTEXT_DIR/entrypoint.sh"
+  # Nix store copies are read-only, so make the previous copy removable first.
+  if [[ -e "$BUILD_CONTEXT_DIR/plugins" ]]; then
+    chmod -R u+w "$BUILD_CONTEXT_DIR/plugins"
+    rm -rf "$BUILD_CONTEXT_DIR/plugins"
+  fi
+  mkdir -p "$BUILD_CONTEXT_DIR/plugins"
+  cp -R "$WORKLOG_PLUGIN_SRC" "$BUILD_CONTEXT_DIR/plugins/worklog"
+  chmod -R u+w,a+rX "$BUILD_CONTEXT_DIR/plugins"
   BUILD_SELECTION_ARGS=(--build-arg "AGENT=$AGENT")
   for extra in "${KNOWN_EXTRAS[@]}"; do
     # anydoc -> WITH_ANYDOC, explain-diff -> WITH_EXPLAIN_DIFF.
@@ -1224,6 +1287,9 @@ if [[ "$AGENT" == "claude" ]]; then
   if [[ ",$EXTRAS," == *,anydoc,* ]]; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/anydoc/plugin)
   fi
+  if [[ "$WORKLOG_ENABLED" == "1" ]]; then
+    INTEGRATION_ARGS+=(--plugin-dir /opt/worklog/plugin)
+  fi
 fi
 
 # OpenCode merges inline configuration over its normal global and project
@@ -1274,6 +1340,13 @@ ENV_ARGS+=(-e "AGENT_CAPSULE_SKILLS_DIR=/home/dev/$AGENT_SKILLS_REL")
 HOST_TZ="$(host_time_zone)"
 if [[ -n "$HOST_TZ" ]]; then
   ENV_ARGS+=(-e "TZ=$HOST_TZ")
+fi
+
+if [[ "$WORKLOG_ENABLED" == "1" ]]; then
+  ENV_ARGS+=(-e "AGENT_CAPSULE_VAULT_DEST=$VAULT_DEST")
+  if [[ -n "$WORKLOG_PROCEDURE_SRC" ]]; then
+    ENV_ARGS+=(-e "AGENT_CAPSULE_WORKLOG_PROCEDURE=/etc/agent-capsule/log-work.md")
+  fi
 fi
 
 # Do not place the secret values directly in the podman command line.
@@ -1383,6 +1456,10 @@ if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then
   else
     add_mount "$RESOLVED_SHARED_RULES" "/home/dev/$AGENT_RULES_REL"
   fi
+fi
+
+if [[ -n "$WORKLOG_PROCEDURE_SRC" ]]; then
+  add_mount "$WORKLOG_PROCEDURE_SRC" /etc/agent-capsule/log-work.md ro
 fi
 
 # ----------------------------------------------------------------------------
@@ -1524,6 +1601,17 @@ if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
       echo ">> MCP     : mcpvault -> $VAULT_DEST (server 'obsidian', runtime config)"
     fi
   fi
+fi
+
+if [[ "$WORKLOG_ENABLED" == "1" ]]; then
+  worklog_line=">> Worklog : built-in procedure"
+  if [[ -n "$WORKLOG_PROCEDURE_SRC" ]]; then
+    worklog_line=">> Worklog : $WORKLOG_PROCEDURE_SRC -> /etc/agent-capsule/log-work.md"
+  fi
+  if [[ "$SHELL_MODE" == "1" ]]; then
+    worklog_line="$worklog_line (start claude with: --plugin-dir /opt/worklog/plugin)"
+  fi
+  echo "$worklog_line"
 fi
 
 [[ "$AUTH_LOGIN" == "1" ]] && echo ">> Mode    : auth login"

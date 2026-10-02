@@ -216,6 +216,35 @@ run_capsule --agent opencode --shell --session opencode-state \
   --with mcpvault --vault="$vault_dir" --no-vault "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'obsidian'
 
+# The agent runs as the host UID under --keep-id, so the image files must not inherit a private umask.
+new_case
+(umask 077; run_capsule --shell --session worklog-umask "$ROOT_DIR")
+plugin_mode="$(file_mode "$CAPSULE_HOME/build/context/plugins/worklog/hooks/worklog.mjs")"
+[[ "${plugin_mode: -1}" -ge 4 ]] || fail "plugin file is not world-readable: $plugin_mode"
+
+# The project is the vault itself, inside it, or a sibling whose name only starts like the vault's.
+new_case
+vault_dir="$CASE_DIR/notes"
+mkdir -p "$vault_dir/sub" "$CASE_DIR/notes2"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir"
+assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
+assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
+assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
+: > "$PODMAN_LOG"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir/sub"
+assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
+assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
+: > "$PODMAN_LOG"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$CASE_DIR/notes2"
+assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
+
+# A shell does not load the plugin, so the banner says how to.
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-shell "$ROOT_DIR"
+assert_contains "$OUTPUT" '(start claude with: --plugin-dir /opt/worklog/plugin)'
+
 new_case
 run_capsule --help
 assert_contains "$OUTPUT" 'Usage:'
@@ -628,6 +657,9 @@ cp "$ROOT_DIR/entrypoint.sh" "$entrypoint_copy"
 chmod u+w "$entrypoint_copy"
 dockerfile_copy="$CASE_DIR/Dockerfile"
 cp "$ROOT_DIR/Dockerfile" "$dockerfile_copy"
+mkdir -p "$CASE_DIR/plugins"
+cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
+chmod -R u+w "$CASE_DIR/plugins/worklog"
 AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 : > "$PODMAN_LOG"
@@ -637,6 +669,164 @@ printf '\n' >> "$entrypoint_copy"
 : > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-on "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_VAULT_DEST=/vault'
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_WORKLOG=1'
+assert_contains "$OUTPUT" '>> Worklog : built-in procedure'
+assert_not_contains "$PODMAN_LOG" '/etc/agent-capsule/log-work.md'
+[[ ! -e "$CAPSULE_HOME/log-work.md" ]] || fail "the default procedure file was created"
+
+printf 'steps\n' > "$CAPSULE_HOME/log-work.md"
+: > "$PODMAN_LOG"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-on "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/log-work.md:/etc/agent-capsule/log-work.md:ro"
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WORKLOG_PROCEDURE=/etc/agent-capsule/log-work.md'
+assert_contains "$OUTPUT" ">> Worklog : $CAPSULE_HOME/log-work.md -> /etc/agent-capsule/log-work.md"
+
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+printf 'mine\n' > "$CASE_DIR/mine.md"
+AGENT_CAPSULE_WORKLOG_PROCEDURE="$CASE_DIR/mine.md" \
+  run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-explicit "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "ARG=$CASE_DIR/mine.md:/etc/agent-capsule/log-work.md:ro"
+assert_contains "$OUTPUT" ">> Worklog : $CASE_DIR/mine.md -> /etc/agent-capsule/log-work.md"
+
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+set +e
+AGENT_CAPSULE_WORKLOG_PROCEDURE="$CASE_DIR/missing.md" \
+  run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-missing "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" "File not found: $CASE_DIR/missing.md"
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
+
+# A symlinked default is a user-managed file, not a missing one.
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir" "$CASE_DIR/notes"
+printf 'linked\n' > "$CASE_DIR/notes/log-work.md"
+ln -s "$CASE_DIR/notes/log-work.md" "$CAPSULE_HOME/log-work.md"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/log-work.md:/etc/agent-capsule/log-work.md:ro"
+assert_contains "$OUTPUT" ">> Worklog : $CAPSULE_HOME/log-work.md -> /etc/agent-capsule/log-work.md"
+
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+set +e
+run_capsule --with worklog --vault="$vault_dir" --session worklog-no-mcp "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" '--with worklog needs mcpvault.'
+assert_contains "$OUTPUT" 'Add mcpvault to --with or AGENT_CAPSULE_WITH.'
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
+
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+set +e
+AGENT_CAPSULE_WITH=mcpvault \
+  run_capsule --with worklog --vault="$vault_dir" --session worklog-flag-only "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" '--with worklog needs mcpvault.'
+assert_contains "$OUTPUT" 'Add mcpvault to --with or AGENT_CAPSULE_WITH.'
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
+
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+run_capsule --with mcpvault,worklog --no-vault --session worklog-no-vault "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> Worklog : disabled for this run (--no-vault)'
+assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
+assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
+
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+set +e
+run_capsule --agent codex --with mcpvault,worklog --vault="$vault_dir" --session worklog-codex "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" "Extra 'worklog' is not available with --agent codex"
+
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+AGENT_CAPSULE_WITH=mcpvault,worklog \
+  run_capsule --agent codex --vault="$vault_dir" --shell --session worklog-drop "$ROOT_DIR"
+assert_contains "$OUTPUT" ">> Extras  : dropping 'worklog' (unsupported by agent codex)"
+
+# The plugin ships in the image, so editing it has to invalidate the image.
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir" "$CASE_DIR/plugins"
+cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
+cp "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/entrypoint.sh"
+cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
+chmod -R u+w "$CASE_DIR/plugins/worklog"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
+  run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
+  run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+printf '\n' >> "$CASE_DIR/plugins/worklog/procedure.md"
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
+  run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
+  run_capsule --with none --shell --session worklog-unselected "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+printf '\n' >> "$CASE_DIR/plugins/worklog/procedure.md"
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
+  run_capsule --with none --shell --session worklog-unselected "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+
+# Nix store sources are read-only, and a copy of them must still be replaceable.
+new_case
+mkdir -p "$CASE_DIR/plugins"
+cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
+cp "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/entrypoint.sh"
+cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
+chmod -R a-w "$CASE_DIR/plugins/worklog"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
+  run_capsule --build --shell --session worklog-readonly "$ROOT_DIR"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
+  run_capsule --build --shell --session worklog-readonly "$ROOT_DIR"
+chmod -R u+w "$CASE_DIR/plugins/worklog"
+
+new_case
+cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
+cp "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/entrypoint.sh"
+set +e
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule --shell --session worklog-noplugin "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" 'Container plugin not found:'
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
+
+new_case
+run_capsule --help
+assert_contains "$OUTPUT" 'worklog'
+
 new_case
 run_capsule --build --shell --session forced-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
@@ -820,9 +1010,31 @@ PATH="$CASE_DIR:$PATH" run_capsule --agent list
   fail "--agent list is not one agent per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --with list
-[[ "$(cat "$OUTPUT")" == "$(printf 'anydoc\nexplain-diff\nkubernetes\nmcpvault\nsuperpowers\ntalos')" ]] ||
+[[ "$(cat "$OUTPUT")" == "$(printf 'anydoc\nexplain-diff\nkubernetes\nmcpvault\nsuperpowers\ntalos\nworklog')" ]] ||
   fail "--with list is not one integration per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# The completion script reads the extras from the launcher on PATH.
+new_case
+completion_bin="$CASE_DIR/completion-bin"
+mkdir -p "$completion_bin"
+printf '#!%s\nexec %s %s "$@"\n' "$BASH_BIN" "$BASH_BIN" "$SCRIPT" > "$completion_bin/agent-capsule"
+chmod +x "$completion_bin/agent-capsule"
+claude_extras="$(
+  PATH="$completion_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" "$BASH_BIN" -c \
+    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule_extras claude"
+)"
+codex_extras="$(
+  PATH="$completion_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" "$BASH_BIN" -c \
+    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule_extras codex"
+)"
+opencode_extras="$(
+  PATH="$completion_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" "$BASH_BIN" -c \
+    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule_extras opencode"
+)"
+grep -qx worklog <<<"$claude_extras" || fail "claude completion does not offer worklog"
+if grep -qx worklog <<<"$codex_extras"; then fail "codex completion offers worklog"; fi
+if grep -qx worklog <<<"$opencode_extras"; then fail "opencode completion offers worklog"; fi
 
 # Both must work with no podman on PATH at all: completion runs in shells that
 # have never launched a capsule.

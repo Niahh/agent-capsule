@@ -42,6 +42,8 @@
             install -Dm755 agent-capsule $out/bin/agent-capsule
             install -Dm644 Dockerfile $out/share/agent-capsule/Dockerfile
             install -Dm755 entrypoint.sh $out/share/agent-capsule/entrypoint.sh
+            mkdir -p $out/share/agent-capsule/plugins
+            cp -r plugins/worklog $out/share/agent-capsule/plugins/
             install -Dm644 completions/agent-capsule.bash \
               $out/share/bash-completion/completions/agent-capsule
             install -Dm644 completions/_agent-capsule \
@@ -59,6 +61,7 @@
                   with pkgs;
                   [
                     coreutils
+                    findutils
                     gawk
                     git
                   ]
