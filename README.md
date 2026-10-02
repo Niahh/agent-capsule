@@ -362,6 +362,8 @@ Sessions and runtime limits:
 - `AGENT_CAPSULE_PIDS_LIMIT=512`: container process limit.
 - `AGENT_CAPSULE_KEEPID=0`: set to `1` to use the host UID and GID inside.
 - `AGENT_CAPSULE_OFFLINE=0`: set to `1` to disable container networking.
+- `TZ=`: forwarded to the container; when unset, the zone comes from the
+  `/etc/localtime` link, so dates and commit times match the host.
 
 Shared state and mounts:
 

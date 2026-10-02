@@ -658,6 +658,25 @@ assert_not_contains "$PODMAN_LOG" 'superpowers-secret'
 assert_not_contains "$PODMAN_LOG" 'general-secret'
 assert_not_contains "$PODMAN_LOG" 'traffic-secret'
 
+# Containers default to UTC; the host zone keeps dates and commit times aligned.
+for tz_value in Asia/Kathmandu :Asia/Kathmandu; do
+  new_case
+  TZ="$tz_value" run_capsule --shell --session tz-env "$ROOT_DIR"
+  assert_arg_after "$PODMAN_LOG" -e 'TZ=Asia/Kathmandu'
+done
+
+# Empty, or naming a file with a leading colon: fall back to the /etc/localtime link.
+localtime_target="$(readlink /etc/localtime 2>/dev/null || true)"
+for tz_value in '' ':/etc/localtime'; do
+  new_case
+  TZ="$tz_value" run_capsule --shell --session tz-fallback "$ROOT_DIR"
+  if [[ "$localtime_target" == *zoneinfo/* ]]; then
+    assert_arg_after "$PODMAN_LOG" -e "TZ=${localtime_target#*zoneinfo/}"
+  else
+    assert_not_contains "$PODMAN_LOG" 'ARG=TZ='
+  fi
+done
+
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"

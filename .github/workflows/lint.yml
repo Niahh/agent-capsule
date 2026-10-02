@@ -139,6 +139,8 @@ jobs:
               exit 1
             fi
           done
+      - name: Legacy zone names resolve
+        run: docker run --rm -e TZ=US/Eastern agent-capsule:default date +%Z | grep -Eqx 'E[SD]T'
 
   nix:
     runs-on: ubuntu-latest

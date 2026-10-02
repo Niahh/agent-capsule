@@ -43,9 +43,10 @@ COPY --from=go-toolchain /usr/local/go /usr/local/go
 # gcc and libc6-dev complete the Go toolchain: node:*-slim ships no C compiler,
 # so without them cgo is disabled and `go test -race` (external linking) and
 # any cgo package fail.
+# tzdata-legacy keeps old zone names such as US/Eastern, which a forwarded TZ can carry.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git curl ca-certificates ripgrep less procps openssh-client bash \
-      gcc libc6-dev \
+      gcc libc6-dev tzdata-legacy \
     && rm -rf /var/lib/apt/lists/*
 
 # Install golangci-lint from the official prebuilt binary (the project advises
