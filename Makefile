@@ -1,9 +1,9 @@
-# Installs the agent-capsule script into ~/.local/bin and its Dockerfile into
-# ~/.local/share/agent-capsule.
+# Installs the agent-capsule script into ~/.local/bin, its Dockerfile into
+# ~/.local/share/agent-capsule, and its bash and zsh completions.
 #
 #   make install      # copy agent-capsule -> ~/.local/bin/agent-capsule (0755)
 #                     # copy Dockerfile and entrypoint.sh -> ~/.local/share/agent-capsule/
-#   make uninstall    # remove both
+#   make uninstall    # remove everything install added
 #
 # Override the destination if needed:
 #   make install PREFIX=/usr/local     # -> /usr/local/bin/agent-capsule
@@ -19,7 +19,7 @@ ZSHCOMPDIR = $(PREFIX)/share/zsh/site-functions
 help:
 	@echo "test         Run launcher behavior tests"
 	@echo "install      Install agent-capsule, its container files, and completions"
-	@echo "uninstall    Remove the installed script and container files"
+	@echo "uninstall    Remove the installed script, container files, and completions"
 
 test:
 	@bash tests/agent-capsule_test.sh
