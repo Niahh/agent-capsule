@@ -49,6 +49,7 @@ jobs:
             --build-arg "AGENT=${{ matrix.agent }}" \
             --build-arg "WITH_ANYDOC=$anydoc" \
             --build-arg WITH_EXPLAIN_DIFF=1 \
+            --build-arg WITH_GITHUB=1 \
             --build-arg WITH_KUBERNETES=1 \
             --build-arg WITH_MCPVAULT=1 \
             --build-arg WITH_SUPERPOWERS=1 \
@@ -77,6 +78,8 @@ jobs:
           docker run --rm agent-capsule:test kubectl version --client
           docker run --rm agent-capsule:test helm version
           docker run --rm agent-capsule:test talosctl version --client
+      - name: gh is installed
+        run: docker run --rm agent-capsule:test gh --version
       - name: The explain-diff skill is linked and then removed again
         run: |
           skills_home="capsule-skills-smoke-${GITHUB_RUN_ID}-${{ matrix.agent }}"

@@ -87,6 +87,25 @@ exit 0
 PODMAN
 chmod +x "$FAKE_BIN/podman"
 
+# The host gh, kept off FAKE_BIN: only the github cases put it on PATH, and a CI
+# runner's real gh must never answer for it.
+GH_FAKE_BIN="$TEST_ROOT/gh-bin"
+mkdir -p "$GH_FAKE_BIN"
+printf '#!%s\n' "$BASH_BIN" > "$GH_FAKE_BIN/gh"
+cat >> "$GH_FAKE_BIN/gh" <<'GH'
+printf '%s\n' "$*" >> "$GH_LOG"
+if [[ "${1:-} ${2:-}" == "auth token" && -n "${FAKE_GH_TOKEN:-}" ]]; then
+  printf '%s\n' "$FAKE_GH_TOKEN"
+  exit 0
+fi
+if [[ "$*" == "auth git-credential get" && -n "${FAKE_GH_TOKEN:-}" ]]; then
+  printf 'username=x-access-token\npassword=%s\n' "$FAKE_GH_TOKEN"
+  exit 0
+fi
+exit 1
+GH
+chmod +x "$GH_FAKE_BIN/gh"
+
 if command -v sha256sum >/dev/null 2>&1; then
   SHA256_COMMAND=(sha256sum)
 else
@@ -166,8 +185,11 @@ new_case() {
   PODMAN_LOG="$CASE_DIR/podman.log"
   PODMAN_IMAGE_STATE="$CASE_DIR/podman-images"
   OUTPUT="$CASE_DIR/output"
+  GH_LOG="$CASE_DIR/gh.log"
+  export GH_LOG
   mkdir -p "$CAPSULE_HOME" "$HOST_HOME"
   : > "$PODMAN_LOG"
+  : > "$GH_LOG"
   : > "$PODMAN_IMAGE_STATE"
   PODMAN_DANGLING=""
   ((pass_count += 1))
@@ -310,6 +332,7 @@ assert_contains "$OUTPUT" 'superpowers latest'
 assert_contains "$OUTPUT" 'kubectl latest'
 assert_contains "$OUTPUT" 'helm latest'
 assert_contains "$OUTPUT" 'talosctl latest'
+assert_contains "$OUTPUT" 'gh latest'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # An unset pin reaches the build as an empty arg, which the Dockerfile reads as
@@ -321,16 +344,18 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'SUPERPOWERS_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'KUBECTL_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'HELM_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'TALOSCTL_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'GH_VERSION='
 : > "$PODMAN_LOG"
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --shell --session pinned-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
 
-# Each cluster CLI pin must be part of the bundle hash, or pinning it after an
+# Each CLI pin must be part of the bundle hash, or pinning it after an
 # unpinned build would keep the old image.
 new_case
-for cluster_pin in KUBECTL_VERSION=v1.2.3 HELM_VERSION=v4.5.6 TALOSCTL_VERSION=v7.8.9; do
+for cluster_pin in KUBECTL_VERSION=v1.2.3 HELM_VERSION=v4.5.6 TALOSCTL_VERSION=v7.8.9 \
+  GH_VERSION=v2.3.4; do
   run_capsule --shell --session cluster-pins "$ROOT_DIR"
   : > "$PODMAN_LOG"
   (export "AGENT_CAPSULE_$cluster_pin" && run_capsule --shell --session cluster-pins "$ROOT_DIR")
@@ -537,6 +562,80 @@ done
 run_capsule --with talos --shell --session cluster-talos-only "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=0'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=1'
+
+# Without github the host gh is never asked, and the capsule gets no token, no
+# token mount and no git rewrite.
+new_case
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_offtoken \
+  run_capsule --shell --session gh-off "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITHUB=0'
+[[ ! -s "$GH_LOG" ]] || fail "host gh was called without --with github"
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
+assert_not_contains "$PODMAN_LOG" 'GIT_CONFIG_'
+assert_not_contains "$PODMAN_LOG" 'GH_TOKEN'
+
+# The token reaches the capsule in a file under the runtime dir, never on the
+# podman command line: podman keeps that in the container config on disk.
+new_case
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_secret123 \
+  run_capsule --with github --shell --session gh-on "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITHUB=1'
+assert_not_contains "$PODMAN_LOG" 'gho_secret123'
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token'
+gh_token_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/gh\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+[[ "$gh_token_dir" == "$TEST_ROOT/xdg/"* ]] || fail "token dir is outside the runtime dir: $gh_token_dir"
+[[ "$(<"$gh_token_dir/token")" == gho_secret123 ]] || fail "token file does not hold the host token"
+[[ "$(file_mode "$gh_token_dir")" == 700 ]] || fail "token dir is not private"
+[[ "$(file_mode "$gh_token_dir/token")" == 600 ]] || fail "token file is not private"
+
+# Inside the capsule, git reaches GitHub over HTTPS with gh's credentials, whatever
+# form the remote takes.
+mapfile -t git_env < <(sed -n 's/^ARG=\(GIT_CONFIG_.*\)$/\1/p' "$PODMAN_LOG")
+for remote in git@github.com:o/r ssh://git@github.com/o/r; do
+  rewritten="$(env "${git_env[@]}" HOME="$CASE_DIR" GIT_CONFIG_NOSYSTEM=1 \
+    git ls-remote --get-url "$remote")"
+  [[ "$rewritten" == https://github.com/o/r ]] || fail "$remote became $rewritten"
+done
+credential="$(printf 'protocol=https\nhost=github.com\npath=o/r\n\n' |
+  env "${git_env[@]}" PATH="$GH_FAKE_BIN:$PATH" HOME="$CASE_DIR" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_TERMINAL_PROMPT=0 FAKE_GH_TOKEN=gho_secret123 git credential fill)"
+[[ "$credential" == *password=gho_secret123* ]] || fail "git does not ask gh for GitHub credentials"
+
+# A host without a gh login still starts the capsule, and says how to log in.
+new_case
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN='' \
+  run_capsule --with github --shell --session gh-logged-out "$ROOT_DIR"
+assert_contains "$OUTPUT" 'gh auth login'
+assert_contains "$PODMAN_LOG" 'CALL=run'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
+
+# A host gh without a keyring keeps its token in plain text, which defeats the point.
+new_case
+mkdir -p "$CASE_DIR/gh-config"
+printf 'github.com:\n    oauth_token: gho_plain\n' > "$CASE_DIR/gh-config/hosts.yml"
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_plain GH_CONFIG_DIR="$CASE_DIR/gh-config" \
+  run_capsule --with github --shell --session gh-plain "$ROOT_DIR"
+assert_contains "$OUTPUT" 'plain text'
+assert_not_contains "$OUTPUT" 'gho_plain'
+
+# Token dirs of finished launches are removed. A live launch keeps its own.
+new_case
+runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+mkdir -p "$runtime_root/gh-999999999" "$runtime_root/gh-$$"
+touch "$runtime_root/gh-999999999/token" "$runtime_root/gh-$$/token"
+run_capsule --shell --session gh-sweep "$ROOT_DIR"
+[[ ! -e "$runtime_root/gh-999999999" ]] || fail "a finished launch's token dir survived"
+[[ -e "$runtime_root/gh-$$/token" ]] || fail "a live launch's token dir was removed"
+rm -rf "$runtime_root/gh-$$"
+
+# The entrypoint moves the token into GH_TOKEN and deletes the file before the
+# command starts.
+new_case
+printf 'gho_entry' > "$CASE_DIR/token"
+# shellcheck disable=SC2016
+AGENT_CAPSULE_GH_TOKEN_FILE="$CASE_DIR/token" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
+  "$BASH_BIN" -c 'printf "%s" "$GH_TOKEN"; [[ ! -e "$AGENT_CAPSULE_GH_TOKEN_FILE" ]]' > "$OUTPUT"
+[[ "$(<"$OUTPUT")" == gho_entry ]] || fail "entrypoint did not export GH_TOKEN"
 
 new_case
 run_capsule --agent claude --with superpowers,anydoc \
@@ -1043,7 +1142,8 @@ PATH="$CASE_DIR:$PATH" run_capsule --agent list
   fail "--agent list is not one agent per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --with list
-[[ "$(cat "$OUTPUT")" == "$(printf 'anydoc\nexplain-diff\nkubernetes\nmcpvault\nsuperpowers\ntalos\nworklog')" ]] ||
+expected_extras="$(printf '%s\n' anydoc explain-diff github kubernetes mcpvault superpowers talos worklog)"
+[[ "$(cat "$OUTPUT")" == "$expected_extras" ]] ||
   fail "--with list is not one integration per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
@@ -1240,11 +1340,12 @@ for version_variable in \
   assert_contains "$DOCKERFILE" "\${$version_variable:-latest}"
 done
 # An undeclared build arg is dropped with only a warning, so a pin would be ignored.
-for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION; do
+for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION GH_VERSION; do
   assert_contains "$DOCKERFILE" "ARG $version_variable"
 done
-# A bare `docker build .` must leave the cluster CLIs out, like the launcher does.
+# A bare `docker build .` must leave the optional CLIs out, like the launcher does.
 assert_contains "$DOCKERFILE" 'ARG WITH_KUBERNETES=0'
 assert_contains "$DOCKERFILE" 'ARG WITH_TALOS=0'
+assert_contains "$DOCKERFILE" 'ARG WITH_GITHUB=0'
 
 echo "PASS: $pass_count launcher scenarios"

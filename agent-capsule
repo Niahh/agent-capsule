@@ -30,10 +30,11 @@
 #   -h, --help             show this help
 #
 # Integrations:
-#   superpowers, explain-diff, mcpvault, anydoc, worklog, kubernetes, talos
+#   superpowers, explain-diff, mcpvault, anydoc, worklog, kubernetes, talos, github
 #   mcpvault requires --vault, and worklog requires mcpvault.
 #   anydoc and worklog are available only with claude.
 #   kubernetes installs kubectl and helm. talos installs talosctl.
+#   github installs gh and lends it the host's gh login.
 #
 # Documentation: https://github.com/Niahh/agent-capsule
 #
@@ -112,6 +113,7 @@ GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-}"
 KUBECTL_VERSION="${AGENT_CAPSULE_KUBECTL_VERSION:-}"
 HELM_VERSION="${AGENT_CAPSULE_HELM_VERSION:-}"
 TALOSCTL_VERSION="${AGENT_CAPSULE_TALOSCTL_VERSION:-}"
+GH_VERSION="${AGENT_CAPSULE_GH_VERSION:-}"
 
 # Unpinned tools track latest at build time, so an old image quietly stops doing
 # that. Age is the only signal for it: the bundle hash cannot see upstream move.
@@ -131,7 +133,7 @@ selected_version() {
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
-KNOWN_EXTRAS=(anydoc explain-diff kubernetes mcpvault superpowers talos worklog)
+KNOWN_EXTRAS=(anydoc explain-diff github kubernetes mcpvault superpowers talos worklog)
 
 BUILD_DIR="$STATE_DIR/build"
 AUTH_ROOT_DIR="$STATE_DIR/auth-home"
@@ -731,6 +733,7 @@ golangci-lint $(selected_version "$GOLANGCI_LINT_VERSION")
 kubectl $(selected_version "$KUBECTL_VERSION")
 helm $(selected_version "$HELM_VERSION")
 talosctl $(selected_version "$TALOSCTL_VERSION")
+gh $(selected_version "$GH_VERSION")
 VERSIONS
       exit 0
       ;;
@@ -837,7 +840,8 @@ for tagged_version in \
   "$GOLANGCI_LINT_VERSION" \
   "$KUBECTL_VERSION" \
   "$HELM_VERSION" \
-  "$TALOSCTL_VERSION"; do
+  "$TALOSCTL_VERSION" \
+  "$GH_VERSION"; do
   [[ -n "$tagged_version" ]] || continue
   if [[ ! "$tagged_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
     echo "Invalid pinned tagged version: $tagged_version" >&2
@@ -1299,7 +1303,8 @@ HASH="$(printf '%s\n' \
   "$NODE_TAG" "$GO_TAG" "$AGENT" "$EXTRAS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" "$KUBECTL_VERSION" "$HELM_VERSION" \
-  "$TALOSCTL_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" "$WORKLOG_HASH" | sha256_stream)"
+  "$TALOSCTL_VERSION" "$GH_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" "$WORKLOG_HASH" |
+  sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
 # Freshness is checked inside the lock only. An unlocked pre-check would save a
@@ -1394,6 +1399,7 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     --build-arg "KUBECTL_VERSION=$KUBECTL_VERSION" \
     --build-arg "HELM_VERSION=$HELM_VERSION" \
     --build-arg "TALOSCTL_VERSION=$TALOSCTL_VERSION" \
+    --build-arg "GH_VERSION=$GH_VERSION" \
     "${BUILD_SELECTION_ARGS[@]}" \
     --label "io.agent-capsule.bundle=$HASH" \
     --label "io.agent-capsule.refreshed-at=$REFRESHED_AT" \
@@ -1640,6 +1646,59 @@ if [[ "$SHARE_AUTH" == "1" && "$AUTH_LOGIN" != "1" ]]; then
 fi
 
 # ----------------------------------------------------------------------------
+# GitHub token handoff
+# ----------------------------------------------------------------------------
+# The token stays in the host keyring and crosses over in a file in the RAM-backed
+# runtime dir, which the entrypoint reads into GH_TOKEN and deletes. Never -e:
+# podman writes those values into the container config on disk.
+GH_TOKEN_DIR=""
+GH_CONTAINER_TOKEN_DIR=/run/agent-capsule/gh
+
+# Leftovers of launches that died before their entrypoint ran. exec hands the
+# launcher's PID to podman, so a live session still holds the PID in its name.
+for stale_gh_dir in "$LOCK_ROOT"/gh-*; do
+  [[ -d "$stale_gh_dir" ]] || continue
+  stale_gh_pid="${stale_gh_dir##*/gh-}"
+  [[ "$stale_gh_pid" =~ ^[0-9]+$ ]] || continue
+  kill -0 "$stale_gh_pid" 2>/dev/null || rm -rf "$stale_gh_dir"
+done
+
+if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
+  gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
+  gh_token=""
+  if ! command -v gh >/dev/null 2>&1; then
+    echo ">> GitHub  : gh is not installed on the host, so gh in the capsule is logged out" >&2
+  elif ! gh_token="$(gh auth token --hostname github.com 2>/dev/null)" || [[ -z "$gh_token" ]]; then
+    echo ">> GitHub  : no gh login on the host. Run there: gh auth login --scopes workflow" >&2
+  else
+    if grep -q 'oauth_token:' "$gh_hosts_file" 2>/dev/null; then
+      echo ">> GitHub  : warning: the host gh keeps its token in plain text in $gh_hosts_file" >&2
+    fi
+    GH_TOKEN_DIR="$LOCK_ROOT/gh-$$"
+    rm -rf "$GH_TOKEN_DIR"
+    mkdir -m 700 "$GH_TOKEN_DIR"
+    (umask 077 && printf '%s' "$gh_token" > "$GH_TOKEN_DIR/token")
+    add_mount "$GH_TOKEN_DIR" "$GH_CONTAINER_TOKEN_DIR"
+    ENV_ARGS+=(-e "AGENT_CAPSULE_GH_TOKEN_FILE=$GH_CONTAINER_TOKEN_DIR/token")
+  fi
+  unset gh_token
+
+  # The capsule has no SSH key, so GitHub remotes go over HTTPS with gh's
+  # credentials. Set per run, so the repo and the session home stay untouched.
+  ENV_ARGS+=(
+    -e GIT_CONFIG_COUNT=4
+    -e 'GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf'
+    -e 'GIT_CONFIG_VALUE_0=git@github.com:'
+    -e 'GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf'
+    -e 'GIT_CONFIG_VALUE_1=ssh://git@github.com/'
+    -e 'GIT_CONFIG_KEY_2=credential.https://github.com.helper'
+    -e 'GIT_CONFIG_VALUE_2='
+    -e 'GIT_CONFIG_KEY_3=credential.https://github.com.helper'
+    -e 'GIT_CONFIG_VALUE_3=!gh auth git-credential'
+  )
+fi
+
+# ----------------------------------------------------------------------------
 # User namespace
 # ----------------------------------------------------------------------------
 USER_ARGS=(--user "0:0")
@@ -1685,6 +1744,9 @@ echo ">> State   : $HOME_DIR"
 echo ">> Auth    : $AUTH_HOME_DIR"
 if [[ "$SHARED_CRED_MOUNTED" == "1" ]]; then
   echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_PATH (shared, read-write)"
+fi
+if [[ -n "$GH_TOKEN_DIR" ]]; then
+  echo ">> GitHub  : host gh login, kept in memory in the capsule; git uses HTTPS"
 fi
 # HERDR_AGENT can be pinned by the wrapper; when it diverges from --agent,
 # show both rather than misreport what actually runs.
