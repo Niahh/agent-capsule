@@ -48,8 +48,10 @@ jobs:
             --build-arg "AGENT=${{ matrix.agent }}" \
             --build-arg "WITH_ANYDOC=$anydoc" \
             --build-arg WITH_EXPLAIN_DIFF=1 \
+            --build-arg WITH_KUBERNETES=1 \
             --build-arg WITH_MCPVAULT=1 \
             --build-arg WITH_SUPERPOWERS=1 \
+            --build-arg WITH_TALOS=1 \
             .
       - name: Only the selected agent is installed
         run: |
@@ -67,6 +69,11 @@ jobs:
           docker run --rm agent-capsule:test bash -c 'test -d /opt/superpowers/source'
           docker run --rm agent-capsule:test bash -c 'test -f /opt/explain-diff-html/SKILL.md'
           docker run --rm agent-capsule:test mcpvault --help
+      - name: Cluster CLIs are installed
+        run: |
+          docker run --rm agent-capsule:test kubectl version --client
+          docker run --rm agent-capsule:test helm version
+          docker run --rm agent-capsule:test talosctl version --client
       - name: The explain-diff skill is linked and then removed again
         run: |
           skills_home="capsule-skills-smoke-${GITHUB_RUN_ID}-${{ matrix.agent }}"
@@ -113,6 +120,25 @@ jobs:
             agent-capsule:test bash -c \
             'test ! -e /home/dev/.codex/.superpowers-capsule-managed && \
              codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
+
+  # The matrix enables every integration, so only a default build can show that
+  # the cluster CLIs stay out unless selected.
+  image-default:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t agent-capsule:default .
+      - name: Unselected cluster CLIs are absent
+        run: |
+          # Otherwise a broken image would pass every absence check below.
+          docker run --rm agent-capsule:default true
+          for tool in kubectl helm talosctl; do
+            if docker run --rm agent-capsule:default bash -c "command -v $tool"; then
+              echo "$tool is present in the default image" >&2
+              exit 1
+            fi
+          done
 
   nix:
     runs-on: ubuntu-latest

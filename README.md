@@ -177,9 +177,13 @@ AGENT_CAPSULE_MCPVAULT_VERSION
 AGENT_CAPSULE_SKILLS_VERSION
 AGENT_CAPSULE_SUPERPOWERS_VERSION
 AGENT_CAPSULE_GOLANGCI_LINT_VERSION
+AGENT_CAPSULE_KUBECTL_VERSION
+AGENT_CAPSULE_HELM_VERSION
+AGENT_CAPSULE_TALOSCTL_VERSION
 ```
 
-Superpowers and golangci-lint use Git tags, including the leading `v`.
+Superpowers, golangci-lint, kubectl, Helm, and talosctl use Git tags, including the
+leading `v`.
 `agent-capsule --versions` prints `latest` for everything unpinned.
 The default base tags are the floating `node:trixie-slim` and `golang:trixie` tags.
 Set `AGENT_CAPSULE_NODE_TAG` or `AGENT_CAPSULE_GO_TAG` to override them.
@@ -195,6 +199,7 @@ agent-capsule --session fix-auth ~/code/myapp   # named session for parallel age
 agent-capsule --with superpowers .              # activate bundled development skills
 agent-capsule --with explain-diff .             # explain a change as interactive HTML
 agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
+agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
 agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
 agent-capsule --agent codex --auth-login        # once: log in to Codex instead
 agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on a project
@@ -293,6 +298,25 @@ Notes:
   `--mcp-config`, so a project's own `.mcp.json` still loads. OpenCode receives the
   server through invocation-scoped configuration, so user config files stay intact.
   Codex receives configuration overrides layered over its existing `config.toml`.
+
+## Kubernetes and Talos
+
+`--with kubernetes` installs `kubectl` and `helm`, and `--with talos` installs
+`talosctl`. Both work with every agent. Their configuration stays on the host until
+you mount it:
+
+```sh
+agent-capsule --with kubernetes,talos \
+  -m ~/.kube/config:/home/dev/.kube/config:ro \
+  -m ~/.talos/config:/home/dev/.talos/config:ro .
+```
+
+To keep them in every session, add them to `AGENT_CAPSULE_WITH`, see
+[Persistent defaults](#persistent-defaults).
+
+The cluster must be reachable from the container, so these commands fail under
+`--offline`. A kubeconfig that calls an exec credential plugin also needs that plugin
+inside the image.
 
 ## Persistent defaults
 
