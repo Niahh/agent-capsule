@@ -21,6 +21,10 @@
 #   --shared-memory-ro     mount Claude project memory read-only
 #   --no-shared-memory     disable Claude project memory
 #   --build                rebuild the image from scratch
+#   --prune-caches[=DAYS]  list caches of sessions idle 30+ days, or DAYS
+#   --prune-sessions[=DAYS]
+#                          list whole sessions idle 30+ days, or DAYS
+#   --yes                  remove what a prune flag lists
 #   --versions             print configured tool versions
 #   --version              print the launcher version
 #   -h, --help             show this help
@@ -352,6 +356,8 @@ ensure_session_agent_marker() {
     echo "Rerun with --agent $owner, or pick another --session." >&2
     exit 1
   fi
+  # Its mtime is the last launch, which --prune-caches and --prune-sessions read.
+  touch "$marker"
 }
 
 resolve_file_path() {
@@ -434,6 +440,115 @@ resolve_dockerfile() {
   exit 1
 }
 
+# Rebuildable caches in a session home. Transcripts, settings and go/bin stay.
+PRUNE_CACHE_PATHS=(.cache .npm go/pkg)
+
+path_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+}
+
+# The newest top-level entry: the launcher refreshes .agent on every start, and
+# claude rewrites .claude.json while it runs.
+home_last_used() { # home
+  local newest=0
+  local entry mtime
+
+  while IFS= read -r -d '' entry; do
+    mtime="$(path_mtime "$entry")"
+    [[ "$mtime" -le "$newest" ]] || newest="$mtime"
+  done < <(find "$1" -maxdepth 1 -print0)
+  printf '%s' "$newest"
+}
+
+# Go leaves its module cache read-only, which rm -rf cannot empty. find does not
+# follow symlinks, so no mode changes outside the tree.
+remove_tree() { # path
+  find "$1" -type d ! -perm -200 -exec chmod u+w {} + && rm -rf "$1"
+}
+
+human_size() { # KiB
+  awk -v kib="$1" 'BEGIN {
+    if (kib >= 1048576) printf "%.1fG", kib / 1048576
+    else if (kib >= 1024) printf "%.1fM", kib / 1024
+    else printf "%dK", kib
+  }'
+}
+
+prune_session_homes() {
+  local what="sessions"
+  local mode="dry run"
+  local count=0
+  local total=0
+  local failed=0
+  local running now home name idle_days size path ok
+  local -a targets
+
+  [[ "$PRUNE_TARGET" == "caches" ]] && what="caches of sessions"
+  [[ "$PRUNE_YES" == "1" ]] && mode="removing"
+
+  # A running session may be idle on disk, so without this list nothing is safe.
+  if ! running="$(podman ps --filter label=ai.session \
+    --format '{{index .Labels "ai.session"}}' 2>/dev/null)"; then
+    echo "Cannot list running capsules with podman; nothing was removed." >&2
+    exit 1
+  fi
+
+  echo ">> Prune   : $what idle $PRUNE_DAYS+ days ($mode)"
+  now="$(date +%s)"
+  for home in "$STATE_DIR/homes"/*; do
+    [[ -d "$home" && ! -L "$home" ]] || continue
+    name="${home##*/}"
+    idle_days=$(((now - $(home_last_used "$home")) / 86400))
+    [[ "$idle_days" -ge "$PRUNE_DAYS" ]] || continue
+    # Codex and OpenCode write only below the top level, so check the whole tree.
+    [[ -z "$(find "$home" -mmin "-$((PRUNE_DAYS * 1440))" -print -quit)" ]] || continue
+    if grep -qxF -- "$name" <<<"$running"; then
+      echo ">> Skip    : $name (running)"
+      continue
+    fi
+
+    targets=("$home")
+    if [[ "$PRUNE_TARGET" == "caches" ]]; then
+      targets=()
+      for path in "${PRUNE_CACHE_PATHS[@]}"; do
+        # A symlinked go/ would lead go/pkg out of the home.
+        [[ "$path" != */* || ! -L "$home/${path%/*}" ]] || continue
+        [[ -e "$home/$path" || -L "$home/$path" ]] && targets+=("$home/$path")
+      done
+      [[ "${#targets[@]}" -gt 0 ]] || continue
+    fi
+
+    # du fails on an unreadable entry, and its partial sum is still worth showing.
+    size="$(du -sk "${targets[@]}" | awk '{ sum += $1 } END { print sum + 0 }')" || true
+    printf '   %5sd %7s  %s\n' "$idle_days" "$(human_size "$size")" "$name"
+
+    ok=1
+    if [[ "$PRUNE_YES" == "1" ]]; then
+      for path in "${targets[@]}"; do
+        remove_tree "$path" || {
+          echo "Could not remove $path." >&2
+          ok=0
+        }
+      done
+    fi
+    if [[ "$ok" == "1" ]]; then
+      count=$((count + 1))
+      total=$((total + size))
+    else
+      failed=1
+    fi
+  done
+
+  if [[ "$PRUNE_YES" == "1" ]]; then
+    echo ">> Freed   : $(human_size "$total") from $count session(s)"
+  elif [[ "$count" -gt 0 ]]; then
+    echo ">> Total   : $(human_size "$total") in $count session(s). Rerun with --yes to remove."
+  else
+    echo ">> Total   : nothing to prune"
+  fi
+  [[ "$failed" == "0" ]] || exit 1
+}
+
 # ----------------------------------------------------------------------------
 # Parse args
 # ----------------------------------------------------------------------------
@@ -450,6 +565,9 @@ SESSION_EXPLICIT=0
 MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
 NO_VAULT=0
 MOUNT_SPECS=()
+PRUNE_TARGET=""
+PRUNE_DAYS=30
+PRUNE_YES=0
 
 # Seeded from the environment. The first CLI --with replaces that seed instead
 # of adding to it, otherwise an ambient default extra could never be dropped for
@@ -580,6 +698,26 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       NO_VAULT=0
       shift
       ;;
+    --prune-caches | --prune-caches=* | --prune-sessions | --prune-sessions=*)
+      [[ -z "$PRUNE_TARGET" ]] || {
+        echo "Use either --prune-caches or --prune-sessions, not both." >&2
+        exit 1
+      }
+      PRUNE_TARGET="${1%%=*}"
+      PRUNE_TARGET="${PRUNE_TARGET#--prune-}"
+      [[ "$1" != *=* ]] || PRUNE_DAYS="${1#*=}"
+      [[ "$PRUNE_DAYS" =~ ^[0-9]{1,5}$ ]] || {
+        echo "Invalid prune age: '$PRUNE_DAYS'. Use a whole number of days, up to 99999." >&2
+        exit 1
+      }
+      # Base 10, or a leading zero would read as octal.
+      PRUNE_DAYS=$((10#$PRUNE_DAYS))
+      shift
+      ;;
+    --yes)
+      PRUNE_YES=1
+      shift
+      ;;
     --version)
       echo "agent-capsule $VERSION"
       exit 0
@@ -617,6 +755,20 @@ VERSIONS
       ;;
   esac
 done
+
+if [[ -n "$PRUNE_TARGET" ]]; then
+  # Pruning covers every session, so a session or project here would be ignored.
+  if [[ "$SESSION_EXPLICIT" == "1" || "$ARGS_ONLY" == "1" || "$#" -gt 0 ]]; then
+    echo "--prune-$PRUNE_TARGET covers every session; drop --session and project arguments." >&2
+    exit 1
+  fi
+  prune_session_homes
+  exit 0
+fi
+if [[ "$PRUNE_YES" == "1" ]]; then
+  echo "--yes applies only to --prune-caches or --prune-sessions." >&2
+  exit 1
+fi
 
 load_agent_profile "$AGENT"
 AUTH_HOME_DIR="$AUTH_ROOT_DIR/$AGENT"

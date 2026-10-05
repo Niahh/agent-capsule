@@ -63,6 +63,9 @@ _arguments -S \
   '--shared-memory-ro[mount Claude project memory read-only]' \
   '--no-shared-memory[disable Claude project memory]' \
   '--build[rebuild the image from scratch]' \
+  '(--prune-sessions)--prune-caches=-[list caches of sessions idle 30+ days, or DAYS]::days:' \
+  '(--prune-caches)--prune-sessions=-[list whole sessions idle 30+ days, or DAYS]::days:' \
+  '--yes[remove what the prune flag lists]' \
   '(- *)--versions[print configured tool versions]' \
   '(- *)--version[print the launcher version]' \
   '(- *)'{-h,--help}'[show this help]' \

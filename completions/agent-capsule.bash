@@ -150,7 +150,7 @@ _agent_capsule() {
       flags="--agent --session --auth-login --shell --offline --keep-id --with"
       flags+=" --mount --vault --no-vault --shared-rules --shared-rules-rw"
       flags+=" --no-shared-rules --shared-memory-ro --no-shared-memory --build"
-      flags+=" --versions --version --help"
+      flags+=" --prune-caches --prune-sessions --yes --versions --version --help"
       mapfile -t COMPREPLY < <(compgen -W "$flags" -- "$cur")
       return 0
       ;;
