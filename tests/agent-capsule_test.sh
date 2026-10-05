@@ -222,6 +222,8 @@ assert_contains "$OUTPUT" 'Usage:'
 assert_contains "$OUTPUT" '--versions'
 assert_contains "$OUTPUT" '--shared-rules PATH'
 assert_contains "$OUTPUT" 'explain-diff'
+assert_contains "$OUTPUT" 'kubernetes'
+assert_contains "$OUTPUT" 'talos'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --version
 assert_contains "$OUTPUT" "agent-capsule $LAUNCHER_VERSION"
@@ -243,6 +245,9 @@ assert_contains "$OUTPUT" 'codex 6.5.4'
 # Everything without an override tracks the latest release at build time.
 assert_contains "$OUTPUT" 'opencode latest'
 assert_contains "$OUTPUT" 'superpowers latest'
+assert_contains "$OUTPUT" 'kubectl latest'
+assert_contains "$OUTPUT" 'helm latest'
+assert_contains "$OUTPUT" 'talosctl latest'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # An unset pin reaches the build as an empty arg, which the Dockerfile reads as
@@ -251,11 +256,25 @@ new_case
 run_capsule --shell --session unpinned-build "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'SUPERPOWERS_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'KUBECTL_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'HELM_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'TALOSCTL_VERSION='
 : > "$PODMAN_LOG"
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --shell --session pinned-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
+
+# Each cluster CLI pin must be part of the bundle hash, or pinning it after an
+# unpinned build would keep the old image.
+new_case
+for cluster_pin in KUBECTL_VERSION=v1.2.3 HELM_VERSION=v4.5.6 TALOSCTL_VERSION=v7.8.9; do
+  run_capsule --shell --session cluster-pins "$ROOT_DIR"
+  : > "$PODMAN_LOG"
+  (export "AGENT_CAPSULE_$cluster_pin" && run_capsule --shell --session cluster-pins "$ROOT_DIR")
+  assert_contains "$PODMAN_LOG" 'CALL=build'
+  assert_arg_after "$PODMAN_LOG" --build-arg "$cluster_pin"
+done
 
 # An image older than the age limit is refreshed without the layer cache, or an
 # unpinned install would reproduce exactly what is already there.
@@ -317,6 +336,16 @@ status=$?
 set -e
 assert_status_fails "$status"
 assert_contains "$OUTPUT" 'Invalid pinned package version: invalid'
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# Cluster CLI releases are tagged with a leading v, which the download URLs need.
+new_case
+set +e
+AGENT_CAPSULE_KUBECTL_VERSION=1.37.1 run_capsule --shell "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" 'Invalid pinned tagged version: 1.37.1'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # A session from the environment is an ambient default; only an
@@ -428,6 +457,24 @@ AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --agent codex --shell --session universal-version-change "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
+
+# The cluster CLIs are opt-in and work with every agent.
+new_case
+run_capsule --shell --session cluster-default "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=0'
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=0'
+for agent in claude codex opencode; do
+  : > "$PODMAN_LOG"
+  run_capsule --agent "$agent" --with talos,kubernetes --shell \
+    --session "cluster-$agent" "$ROOT_DIR"
+  assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=1'
+  assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=1'
+  assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.selection=$agent:kubernetes,talos"
+done
+: > "$PODMAN_LOG"
+run_capsule --with talos --shell --session cluster-talos-only "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=0'
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=1'
 
 new_case
 run_capsule --agent claude --with superpowers,anydoc \
@@ -756,7 +803,7 @@ PATH="$CASE_DIR:$PATH" run_capsule --agent list
   fail "--agent list is not one agent per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --with list
-[[ "$(cat "$OUTPUT")" == "$(printf 'anydoc\nexplain-diff\nmcpvault\nsuperpowers')" ]] ||
+[[ "$(cat "$OUTPUT")" == "$(printf 'anydoc\nexplain-diff\nkubernetes\nmcpvault\nsuperpowers\ntalos')" ]] ||
   fail "--with list is not one integration per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
@@ -834,5 +881,12 @@ for version_variable in \
   OPENCODE_VERSION; do
   assert_contains "$DOCKERFILE" "\${$version_variable:-latest}"
 done
+# An undeclared build arg is dropped with only a warning, so a pin would be ignored.
+for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION; do
+  assert_contains "$DOCKERFILE" "ARG $version_variable"
+done
+# A bare `docker build .` must leave the cluster CLIs out, like the launcher does.
+assert_contains "$DOCKERFILE" 'ARG WITH_KUBERNETES=0'
+assert_contains "$DOCKERFILE" 'ARG WITH_TALOS=0'
 
 echo "PASS: $pass_count launcher scenarios"
