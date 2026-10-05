@@ -42,6 +42,8 @@
             install -Dm755 agent-capsule $out/bin/agent-capsule
             install -Dm644 Dockerfile $out/share/agent-capsule/Dockerfile
             install -Dm755 entrypoint.sh $out/share/agent-capsule/entrypoint.sh
+            mkdir -p $out/share/agent-capsule/plugins
+            cp -r plugins/worklog $out/share/agent-capsule/plugins/
             install -Dm644 completions/agent-capsule.bash \
               $out/share/bash-completion/completions/agent-capsule
             install -Dm644 completions/_agent-capsule \
@@ -59,6 +61,7 @@
                   with pkgs;
                   [
                     coreutils
+                    findutils
                     gawk
                     git
                   ]
@@ -94,6 +97,7 @@
         shellcheck =
           pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
             shellcheck ${self}/agent-capsule ${self}/tests/agent-capsule_test.sh \
+              ${self}/tests/worklog_test.sh \
               ${self}/entrypoint.sh ${self}/completions/agent-capsule.bash
             touch $out
           '';
@@ -103,9 +107,10 @@
         '';
         launcher-tests =
           pkgs.runCommand "launcher-tests"
-            { nativeBuildInputs = with pkgs; [ bash coreutils git perl ]; }
+            { nativeBuildInputs = with pkgs; [ bash coreutils git nodejs perl ]; }
             ''
               bash ${self}/tests/agent-capsule_test.sh
+              bash ${self}/tests/worklog_test.sh
               touch $out
             '';
       });

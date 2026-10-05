@@ -43,9 +43,10 @@ COPY --from=go-toolchain /usr/local/go /usr/local/go
 # gcc and libc6-dev complete the Go toolchain: node:*-slim ships no C compiler,
 # so without them cgo is disabled and `go test -race` (external linking) and
 # any cgo package fail.
+# tzdata-legacy keeps old zone names such as US/Eastern, which a forwarded TZ can carry.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git curl ca-certificates ripgrep less procps openssh-client bash \
-      gcc libc6-dev \
+      gcc libc6-dev tzdata-legacy \
     && rm -rf /var/lib/apt/lists/*
 
 # Install golangci-lint from the official prebuilt binary (the project advises
@@ -69,6 +70,7 @@ ARG WITH_KUBERNETES=0
 ARG WITH_MCPVAULT=0
 ARG WITH_SUPERPOWERS=0
 ARG WITH_TALOS=0
+ARG WITH_WORKLOG=0
 
 # Integrations are installed only when selected, one layer each: a RUN's cache
 # key is its expanded command, so toggling one leaves the others cached.
@@ -166,6 +168,8 @@ RUN case "$AGENT" in \
     && npm cache clean --force
 
 COPY entrypoint.sh /usr/local/bin/agent-capsule-entrypoint.sh
+# COPY cannot depend on a build arg; the files stay inert unless --plugin-dir names them.
+COPY plugins/worklog /opt/worklog/plugin
 
 ENV HOME=/home/dev \
     GOPATH=/home/dev/go \
