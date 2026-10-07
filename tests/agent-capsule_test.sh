@@ -1317,6 +1317,21 @@ mkdir -p "$CASE_DIR/proj"
 (cd "$CASE_DIR" && CDPATH=".:/nonexistent" run_capsule --shell --session cdpath proj)
 assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
 
+# The image age limit is a decimal count of days, whatever leading zeros it has.
+for age_and_refresh in 08:yes 010:no 00:no; do
+  new_case
+  PODMAN_BUILD_EPOCH="$(($(date +%s) - 9 * 86400))" run_capsule --shell --session age-digits "$ROOT_DIR"
+  : > "$PODMAN_LOG"
+  AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS="${age_and_refresh%%:*}" \
+    run_capsule --shell --session age-digits "$ROOT_DIR"
+  if [[ "${age_and_refresh#*:}" == yes ]]; then
+    assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+  else
+    assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
+  fi
+  assert_not_contains "$OUTPUT" 'value too great'
+done
+
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"

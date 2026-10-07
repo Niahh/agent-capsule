@@ -886,10 +886,12 @@ for tagged_version in \
 done
 unset tagged_version
 
-if [[ ! "$MAX_IMAGE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+if [[ ! "$MAX_IMAGE_AGE_DAYS" =~ ^[0-9]{1,5}$ ]]; then
   echo "Invalid AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS: $MAX_IMAGE_AGE_DAYS (whole days, 0 disables)." >&2
   exit 1
 fi
+# Arithmetic would read a leading zero as octal.
+MAX_IMAGE_AGE_DAYS="$((10#$MAX_IMAGE_AGE_DAYS))"
 
 require_cmd podman
 require_cmd awk
