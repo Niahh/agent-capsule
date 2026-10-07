@@ -141,6 +141,16 @@ test_counts_new_untracked_files() {
   assert_blocks "untracked" "$(hook check "" false)" "new.go"
 }
 
+test_skips_paths_git_cannot_add() {
+  setup
+  mkdir "$REPO/nested"
+  git -C "$REPO/nested" init -q
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  printf 'new\n' > "$REPO/new.go"
+  assert_blocks "unaddable path" "$(hook check "" false)" "main.go" "new.go"
+}
+
 test_does_not_report_the_same_work_twice() {
   # A turn can start without a prompt (background task done), so check must rebaseline.
   setup

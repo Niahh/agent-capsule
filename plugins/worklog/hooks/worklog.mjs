@@ -44,7 +44,12 @@ function snapshot(top, objects) {
   try {
     const index = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
     if (existsSync(index)) copyFileSync(index, env.GIT_INDEX_FILE);
-    git(top, ['add', '-A'], env);
+    try {
+      git(top, ['add', '-A', '--ignore-errors'], env);
+    } catch (err) {
+      // Status 1 means some paths, like a nested repository with no commit, could not be added but the rest were.
+      if (err.status !== 1) throw err;
+    }
     return git(top, ['write-tree'], env);
   } finally {
     rmSync(dir, { recursive: true, force: true });
