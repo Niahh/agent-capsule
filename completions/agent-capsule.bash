@@ -15,8 +15,7 @@ _agent_capsule_sessions() {
   for home in "$homes"/*/; do
     home="${home%/}"
     home="${home##*/}"
-    # _auth is the reserved home --auth-login uses.
-    [[ "$home" == "_auth" || "$home" == "*" ]] || printf '%s\n' "$home"
+    [[ "$home" == "*" ]] || printf '%s\n' "$home"
   done
 }
 

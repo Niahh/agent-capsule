@@ -18,9 +18,7 @@ _agent_capsule_sessions() {
   local -a sessions
 
   [[ -d $homes ]] || return 1
-  # _auth is the reserved home --auth-login uses.
   sessions=(${homes}/*(/N:t))
-  sessions=(${sessions:#_auth})
   (( $#sessions )) || return 1
   _describe -t sessions 'session' sessions
 }

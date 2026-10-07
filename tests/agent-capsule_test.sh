@@ -1861,4 +1861,9 @@ new_case
 [[ "$(AGENT_CAPSULE_AGENT=codex complete_line 'agent-capsule --agent claude --with wo')" == worklog ]] ||
   fail "--agent on the line does not override AGENT_CAPSULE_AGENT in --with completion"
 
+# --auth-login keeps its home under auth-home/, so homes/_auth is an ordinary session.
+new_case
+mkdir -p "$CAPSULE_HOME/homes/_auth"
+[[ "$(complete_line 'agent-capsule --session _a')" == _auth ]] || fail "--session completion hides the _auth session"
+
 echo "PASS: $pass_count launcher scenarios"
