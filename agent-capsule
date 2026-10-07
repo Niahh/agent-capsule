@@ -398,8 +398,8 @@ resolve_file_path() {
   fi
 
   if [[ ! -e "$path" ]]; then
-    # An explicitly requested file that is missing is almost always a typo;
-    # only auto-create the built-in default.
+    # A configured file that is missing is almost always a typo; only the built-in
+    # default is created.
     if [[ "$must_exist" == "1" ]]; then
       echo "File not found: $path" >&2
       exit 1
@@ -1317,7 +1317,9 @@ copy_agent_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR"
 # Prepare the rules mount's target parent inside the session home.
 if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then
   mkdir -p "$HOME_DIR/$(dirname "$AGENT_RULES_REL")"
-  RESOLVED_SHARED_RULES="$(resolve_file_path "$SHARED_RULES" "$SHARED_RULES_EXPLICIT")"
+  rules_must_exist="$SHARED_RULES_EXPLICIT"
+  [[ "$SHARED_RULES" == "$STATE_DIR/CLAUDE.md" ]] || rules_must_exist=1
+  RESOLVED_SHARED_RULES="$(resolve_file_path "$SHARED_RULES" "$rules_must_exist")"
 fi
 
 # Prepare the shared memory dir and its in-container parent. Creating the parent

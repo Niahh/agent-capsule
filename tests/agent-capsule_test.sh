@@ -1332,6 +1332,15 @@ for age_and_refresh in 08:yes 010:no 00:no; do
   assert_not_contains "$OUTPUT" 'value too great'
 done
 
+# A configured rules file that does not exist is a typo, not a file to create.
+new_case
+status=0
+AGENT_CAPSULE_SHARED_RULES="$CASE_DIR/typo/CLAUDE.md" \
+  run_capsule --shell --session rules-typo "$ROOT_DIR" || status=$?
+assert_status_fails "$status"
+assert_contains "$OUTPUT" "$CASE_DIR/typo/CLAUDE.md"
+[[ ! -e "$CASE_DIR/typo" ]] || fail "the mistyped rules path was created"
+
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"
