@@ -141,6 +141,16 @@ test_counts_new_untracked_files() {
   assert_blocks "untracked" "$(hook check "" false)" "new.go"
 }
 
+test_lists_a_change_of_thousands_of_files() {
+  # Their listing outgrows the 1 MiB that node buffers by default.
+  setup
+  local long
+  long="$(printf '%0230d' 0)"
+  hook snapshot "do it" false > /dev/null
+  (cd "$REPO" && seq 5000 | sed "s/^/$long-/" | xargs touch)
+  assert_blocks "large change" "$(hook check "" false)" "- and 4980 more"
+}
+
 test_skips_paths_git_cannot_add() {
   setup
   mkdir "$REPO/nested"

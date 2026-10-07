@@ -32,6 +32,7 @@ function git(dir, args, env = {}) {
   return execFileSync('git', ['-C', dir, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
+    maxBuffer: Infinity,
     stdio: ['ignore', 'pipe', 'ignore'],
   }).trim();
 }
