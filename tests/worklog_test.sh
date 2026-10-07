@@ -134,6 +134,32 @@ test_counts_work_committed_during_the_turn() {
   assert_blocks "committed" "$(hook check "" false)" "main.go"
 }
 
+test_flags_changes_brought_in_by_git() {
+  setup
+  gitc checkout -q -b upstream
+  printf 'upstream\n' > "$REPO/upstream.go"
+  gitc add upstream.go
+  gitc commit -q -m upstream
+  gitc checkout -q -
+  hook snapshot "pull it" false > /dev/null
+  gitc merge -q upstream
+  assert_blocks "head moved" "$(hook check "" false)" "upstream.go" "HEAD moved during this turn"
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  local reason
+  reason="$(reason_of "$(hook check "" false)")"
+  if [[ "$reason" != *"HEAD moved"* ]]; then pass; else fail "HEAD reported as moved"; fi
+}
+
+test_works_before_the_first_commit() {
+  setup
+  rm -rf "$REPO/.git"
+  git -C "$REPO" init -q
+  hook snapshot "do it" false > /dev/null
+  printf 'new\n' > "$REPO/new.go"
+  assert_blocks "no commit" "$(hook check "" false)" "new.go"
+}
+
 test_counts_new_untracked_files() {
   setup
   hook snapshot "do it" false > /dev/null

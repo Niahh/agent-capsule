@@ -60,7 +60,15 @@ function snapshot(top, objects) {
   }
 }
 
-function reason(top, numstat) {
+function head(top) {
+  try {
+    return git(top, ['rev-parse', '--verify', '-q', 'HEAD']);
+  } catch {
+    return ''; // No commit yet.
+  }
+}
+
+function reason(top, numstat, headMoved) {
   const rows = numstat.split('\n').map((row) => row.split('\t'));
   const listed = rows.slice(0, maxListed).map(([added, deleted, path]) =>
     added === '-' ? `- ${path} (binary)` : `- ${path} (+${added} -${deleted})`);
@@ -70,6 +78,7 @@ function reason(top, numstat) {
     `Stop hook: automatic work log. Today is ${today}.`,
     `Files changed in ${top} during this turn, lockfiles and generated files left out:`,
     ...listed,
+    ...(headMoved ? ['HEAD moved during this turn: leave out what a pull, merge or checkout brought in.'] : []),
     '',
     'First apply this test: does this work introduce a durable change to behavior, architecture, configuration or',
     'project knowledge that would be worth finding later? Formatting, line wrapping, typos, version bumps and',
@@ -128,7 +137,8 @@ const newStore = () => {
 if (mode === 'snapshot') {
   // A fresh store keeps the saved baseline readable if this snapshot fails.
   const store = newStore();
-  save({ top, store, tree: snapshot(top, objects(store)), skip: String(input.prompt ?? '').includes('#no-doc') });
+  const skip = String(input.prompt ?? '').includes('#no-doc');
+  save({ top, store, head: head(top), tree: snapshot(top, objects(store)), skip });
   // A prompt replaces the baseline, so the objects of earlier snapshots are garbage.
   for (const name of readdirSync(sessionObjects)) {
     if (join(sessionObjects, name) !== store) rmSync(join(sessionObjects, name), { recursive: true, force: true });
@@ -149,11 +159,14 @@ if (mode === 'snapshot') {
   // The diff reads both trees from the baseline's store.
   const store = base?.top === top ? base.store : newStore();
   const tree = snapshot(top, objects(store));
+  const commit = head(top);
   // A turn can start without a prompt, when a background task ends: rebaseline so it does not see this work again.
-  save({ top, store, tree, skip: false });
+  save({ top, store, head: commit, tree, skip: false });
   if (!input.stop_hook_active && base?.top === top && !base.skip) {
     const diff = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...noise];
     const numstat = git(top, diff, objects(store));
-    if (numstat) process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat) }));
+    if (numstat) {
+      process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat, base.head !== commit) }));
+    }
   }
 }
