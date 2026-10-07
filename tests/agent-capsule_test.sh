@@ -1381,6 +1381,18 @@ OLDPWD=/etc run_capsule --shell - || status=$?
 assert_status_fails "$status"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
+# Handoff files are only in memory under XDG_RUNTIME_DIR; the status must not claim it otherwise.
+new_case
+printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n' > "$CASE_DIR/corp.pem"
+mkdir -p "$CASE_DIR/tmp"
+HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
+  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" TMPDIR="$CASE_DIR/tmp" AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" \
+  "$BASH_BIN" "$SCRIPT" --ca --shell --session on-disk "$ROOT_DIR" > "$OUTPUT" 2>&1
+assert_not_contains "$OUTPUT" 'kept in memory'
+assert_contains "$OUTPUT" "$CASE_DIR/tmp/agent-capsule-$UID"
+rm -rf "$CASE_DIR/tmp"
+
 # A project path too long to name a memory folder skips shared memory instead of failing.
 new_case
 long_project="$CASE_DIR/$(printf 'p%.0s' {1..130})/$(printf 'q%.0s' {1..130})"

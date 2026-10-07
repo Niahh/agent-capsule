@@ -1396,6 +1396,9 @@ BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 # podman image inspect on runs that do not build, at the cost of running the
 # same query twice on the runs that do.
 LOCK_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-capsule-$UID"
+# Only XDG_RUNTIME_DIR is known to be in memory, so the status says where the handoff files are.
+HANDOFF_WHERE="kept in memory"
+[[ -n "${XDG_RUNTIME_DIR:-}" ]] || HANDOFF_WHERE="kept in $LOCK_ROOT, which may be on disk"
 mkdir -p "$LOCK_ROOT"
 chmod 700 "$LOCK_ROOT"
 acquire_build_lock "$LOCK_ROOT/image.lock"
@@ -1783,9 +1786,9 @@ forge_over_https() { # host helper
 # ----------------------------------------------------------------------------
 # GitHub token handoff
 # ----------------------------------------------------------------------------
-# The token stays in the host keyring and crosses over in a file in the RAM-backed
-# runtime dir, which the entrypoint reads into GH_TOKEN and deletes. Never -e:
-# podman writes those values into the container config on disk.
+# The token crosses over in a file in the runtime dir, which the entrypoint reads into
+# GH_TOKEN and deletes. Never -e: podman writes those values into the container config
+# on disk.
 GH_TOKEN_DIR=""
 
 if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
@@ -1916,16 +1919,16 @@ if [[ "$SHARED_CRED_MOUNTED" == "1" ]]; then
   echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_PATH (shared, read-write)"
 fi
 if [[ -n "$GH_TOKEN_DIR" ]]; then
-  echo ">> GitHub  : host gh login, kept in memory in the capsule; git uses HTTPS"
+  echo ">> GitHub  : host gh login ($HANDOFF_WHERE); git uses HTTPS"
 fi
 if [[ -n "$GLAB_DIR" ]]; then
-  echo ">> GitLab  : host glab login for $GITLAB_INSTANCE, kept in memory in the capsule; git uses HTTPS"
+  echo ">> GitLab  : host glab login for $GITLAB_INSTANCE ($HANDOFF_WHERE); git uses HTTPS"
 fi
 if [[ -n "$CA_DIR" ]]; then
   ca_count="$(grep -c -- '-----BEGIN CERTIFICATE-----' "$CA_DIR/extra.pem")"
   ca_noun=certificates
   [[ "$ca_count" == 1 ]] && ca_noun=certificate
-  echo ">> CA      : $CA_CERTS ($ca_count $ca_noun, kept in memory)"
+  echo ">> CA      : $CA_CERTS ($ca_count $ca_noun, $HANDOFF_WHERE)"
 fi
 # HERDR_AGENT can be pinned by the wrapper; when it diverges from --agent,
 # show both rather than misreport what actually runs.
