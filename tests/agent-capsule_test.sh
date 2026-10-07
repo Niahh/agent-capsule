@@ -1348,6 +1348,15 @@ OLDPWD=/etc run_capsule --shell - || status=$?
 assert_status_fails "$status"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
+# A project path too long to name a memory folder skips shared memory instead of failing.
+new_case
+long_project="$CASE_DIR/$(printf 'p%.0s' {1..130})/$(printf 'q%.0s' {1..130})"
+mkdir -p "$long_project"
+run_capsule --shell --session long-path "$long_project"
+assert_contains "$PODMAN_LOG" 'CALL=run'
+assert_not_contains "$PODMAN_LOG" '/home/dev/.claude/projects/'
+assert_contains "$OUTPUT" 'project memory'
+
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"

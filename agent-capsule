@@ -1188,6 +1188,11 @@ if [[ "$AGENT" == "claude" ]]; then
   project_memory_hash_full="$(printf '%s' "$PROJECT_MEMORY_KEY" | sha256_stream)"
   PROJECT_MEMORY_HASH="${project_memory_hash_full:0:12}"
   AGENT_MEMORY_SLUG="$(printf '%s' "$CONTAINER_PROJECT_DIR" | tr -c 'a-zA-Z0-9' '-')"
+  # The slug is one folder name, and a name over 255 bytes cannot be created.
+  if [[ "$SHARED_MEMORY_ENABLED" == "1" && "${#AGENT_MEMORY_SLUG}" -gt 255 ]]; then
+    echo ">> ProjMem : project path too long for a memory folder name; project memory disabled" >&2
+    SHARED_MEMORY_ENABLED=0
+  fi
   AGENT_MEMORY_REL=".claude/projects/$AGENT_MEMORY_SLUG/memory"
   CONTAINER_MEMORY_PATH="/home/dev/$AGENT_MEMORY_REL"
 else
