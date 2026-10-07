@@ -71,7 +71,6 @@ RUN if [ "$WITH_EXPLAIN_DIFF" = 1 ]; then \
     fi
 
 # Release binaries, checked against the SHA-256 sums published beside them.
-# helm's install script is not used because it needs openssl.
 ARG WITH_KUBERNETES=0
 ARG KUBECTL_VERSION=""
 ARG HELM_VERSION=""
