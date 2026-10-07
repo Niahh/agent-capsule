@@ -1016,13 +1016,51 @@ assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
 assert_not_contains "$PODMAN_LOG" '/opt/superpowers/source'
 assert_contains "$OUTPUT" '>> Extras  : none'
 
+# API keys cross over like the gh token, as files under the runtime dir: podman would
+# store `-e NAME` values in the container config on disk.
 new_case
 ANTHROPIC_API_KEY=anthropic-secret OPENAI_API_KEY=openai-secret \
   run_capsule --agent opencode --session opencode-env "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'ARG=ANTHROPIC_API_KEY'
-assert_contains "$PODMAN_LOG" 'ARG=OPENAI_API_KEY'
+assert_not_contains "$PODMAN_LOG" 'ARG=ANTHROPIC_API_KEY'
+assert_not_contains "$PODMAN_LOG" 'ARG=OPENAI_API_KEY'
 assert_not_contains "$PODMAN_LOG" 'anthropic-secret'
 assert_not_contains "$PODMAN_LOG" 'openai-secret'
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys'
+keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+[[ "$keys_dir" == "$TEST_ROOT/xdg/"* ]] || fail "keys dir is outside the runtime dir: $keys_dir"
+[[ "$(<"$keys_dir/ANTHROPIC_API_KEY")" == anthropic-secret ]] || fail "the Anthropic key was not handed over"
+[[ "$(<"$keys_dir/OPENAI_API_KEY")" == openai-secret ]] || fail "the OpenAI key was not handed over"
+[[ "$(file_mode "$keys_dir")" == 700 ]] || fail "keys dir is not private"
+[[ "$(file_mode "$keys_dir/OPENAI_API_KEY")" == 600 ]] || fail "key file is not private"
+# Each agent gets only its own provider's key, and no key means no handoff at all.
+: > "$PODMAN_LOG"
+ANTHROPIC_API_KEY=anthropic-secret OPENAI_API_KEY=openai-secret \
+  run_capsule --agent claude --shell --session claude-env "$ROOT_DIR"
+keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+[[ -f "$keys_dir/ANTHROPIC_API_KEY" && ! -e "$keys_dir/OPENAI_API_KEY" ]] || fail "claude got the wrong keys"
+: > "$PODMAN_LOG"
+run_capsule --agent claude --shell --session claude-env "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
+
+# The entrypoint moves each key into the environment and deletes its file first thing.
+new_case
+mkdir -p "$CASE_DIR/keys"
+printf 'sk-entry' > "$CASE_DIR/keys/ANTHROPIC_API_KEY"
+# shellcheck disable=SC2016
+AGENT_CAPSULE_KEYS_DIR="$CASE_DIR/keys" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
+  "$BASH_BIN" -c 'printf "%s" "$ANTHROPIC_API_KEY"; [[ ! -e "$AGENT_CAPSULE_KEYS_DIR/ANTHROPIC_API_KEY" ]]' \
+  > "$OUTPUT"
+[[ "$(<"$OUTPUT")" == sk-entry ]] || fail "entrypoint did not export ANTHROPIC_API_KEY"
+
+# Key dirs of launches that died before their entrypoint ran are removed, never a live one's.
+new_case
+runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+mkdir -p "$runtime_root/keys-999999999" "$runtime_root/keys-$$"
+touch "$runtime_root/keys-999999999/ANTHROPIC_API_KEY" "$runtime_root/keys-$$/ANTHROPIC_API_KEY"
+run_capsule --shell --session keys-sweep "$ROOT_DIR"
+[[ ! -e "$runtime_root/keys-999999999" ]] || fail "a finished launch's keys dir survived"
+[[ -e "$runtime_root/keys-$$/ANTHROPIC_API_KEY" ]] || fail "a live launch's keys dir was removed"
+rm -rf "$runtime_root/keys-$$"
 
 new_case
 status=0

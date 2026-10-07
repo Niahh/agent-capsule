@@ -13,6 +13,14 @@ if [[ -n "${AGENT_CAPSULE_GH_TOKEN_FILE:-}" && -f "$AGENT_CAPSULE_GH_TOKEN_FILE"
   export GH_TOKEN
   rm -f "$AGENT_CAPSULE_GH_TOKEN_FILE"
 fi
+if [[ -n "${AGENT_CAPSULE_KEYS_DIR:-}" ]]; then
+  for key_file in "$AGENT_CAPSULE_KEYS_DIR"/*; do
+    [[ -f "$key_file" ]] || continue
+    key_value="$(<"$key_file")"
+    export "${key_file##*/}=$key_value"
+    rm -f "$key_file"
+  done
+fi
 
 # Adds the private CA to what the capsule already trusts. git and Node read
 # neither SSL_CERT_FILE nor each other's variable, so each gets its own.
