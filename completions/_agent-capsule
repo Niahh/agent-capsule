@@ -27,9 +27,9 @@ _agent_capsule_sessions() {
 
 _agent_capsule_extras() {
   local -a extras
-  local agent index
+  local agent=${AGENT_CAPSULE_AGENT:-} index
 
-  # --with filters on the agent already named on the line.
+  # --with filters on the agent the launcher will run: --agent on the line, else AGENT_CAPSULE_AGENT.
   for (( index = 1; index < CURRENT; index++ )); do
     case $words[index] in
       --agent) agent=$words[index+1] ;;

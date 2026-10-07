@@ -88,8 +88,8 @@ _agent_capsule() {
     [[ "${words[index]}" == "--" ]] && return 0
   done
 
-  # --with filters on the agent already named on the line.
-  agent=""
+  # --with filters on the agent the launcher will run: --agent on the line, else AGENT_CAPSULE_AGENT.
+  agent="${AGENT_CAPSULE_AGENT:-}"
   for ((index = 1; index < cword; index++)); do
     word="${words[index]}"
     case "$word" in

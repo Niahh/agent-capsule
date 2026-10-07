@@ -1854,4 +1854,11 @@ chmod +x "$completion_line_bin/agent-capsule"
 [[ "$(complete_line "agent-capsule --mount=$CASE_DIR/mountf")" == "$CASE_DIR/mountfile" ]] ||
   fail "--mount= completion repeats the flag"
 
+# With no --agent on the line the launcher runs AGENT_CAPSULE_AGENT, so --with filters on it.
+new_case
+[[ -z "$(AGENT_CAPSULE_AGENT=codex complete_line 'agent-capsule --with wo')" ]] ||
+  fail "--with completion offers worklog under AGENT_CAPSULE_AGENT=codex"
+[[ "$(AGENT_CAPSULE_AGENT=codex complete_line 'agent-capsule --agent claude --with wo')" == worklog ]] ||
+  fail "--agent on the line does not override AGENT_CAPSULE_AGENT in --with completion"
+
 echo "PASS: $pass_count launcher scenarios"
