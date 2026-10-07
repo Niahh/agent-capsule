@@ -51,6 +51,7 @@ jobs:
             --build-arg "WITH_ANYDOC=$anydoc" \
             --build-arg WITH_EXPLAIN_DIFF=1 \
             --build-arg WITH_GITHUB=1 \
+            --build-arg WITH_GITLAB=1 \
             --build-arg WITH_KUBERNETES=1 \
             --build-arg WITH_MCPVAULT=1 \
             --build-arg WITH_SUPERPOWERS=1 \
@@ -81,6 +82,8 @@ jobs:
           docker run --rm agent-capsule:test talosctl version --client
       - name: gh is installed
         run: docker run --rm agent-capsule:test gh --version
+      - name: glab is installed
+        run: docker run --rm agent-capsule:test glab version
       # Mounted the way the launcher does it, and as a non-root user like --keep-id.
       - name: curl, git, and Node trust a mounted private CA
         run: |
@@ -168,7 +171,7 @@ jobs:
         run: |
           # Otherwise a broken image would pass every absence check below.
           docker run --rm agent-capsule:default true
-          for tool in kubectl helm talosctl gh; do
+          for tool in kubectl helm talosctl gh glab; do
             if docker run --rm agent-capsule:default bash -c "command -v $tool"; then
               echo "$tool is present in the default image" >&2
               exit 1

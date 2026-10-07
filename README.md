@@ -181,10 +181,11 @@ AGENT_CAPSULE_KUBECTL_VERSION
 AGENT_CAPSULE_HELM_VERSION
 AGENT_CAPSULE_TALOSCTL_VERSION
 AGENT_CAPSULE_GH_VERSION
+AGENT_CAPSULE_GLAB_VERSION
 ```
 
-Superpowers, golangci-lint, kubectl, Helm, talosctl, and gh use Git tags, including the
-leading `v`.
+Superpowers, golangci-lint, kubectl, Helm, talosctl, gh, and glab use Git tags, including
+the leading `v`.
 `agent-capsule --versions` prints `latest` for everything unpinned.
 The default base tags are the floating `node:trixie-slim` and `golang:trixie` tags.
 Set `AGENT_CAPSULE_NODE_TAG` or `AGENT_CAPSULE_GO_TAG` to override them.
@@ -203,6 +204,7 @@ agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
 agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # log significant work
 agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
 agent-capsule --with github .                   # gh with the host gh login, git over HTTPS
+agent-capsule --with gitlab .                   # glab with the host glab login, git over HTTPS
 agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
 agent-capsule --agent codex --auth-login        # once: log in to Codex instead
 agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on a project
@@ -384,6 +386,44 @@ The agent can read `GH_TOKEN`, and the token can reach every repository your acc
 can. Protect the branches that matter. The launcher warns when the host `gh` stores
 its token in plain text, which it does when no keyring is available.
 
+## GitLab
+
+`--with gitlab` installs `glab` and lends it the host's `glab` login for one instance:
+`gitlab.com`, or the one `AGENT_CAPSULE_GITLAB_HOST` names. Log in once on the host
+with a personal access token that has the `api` and `write_repository` scopes:
+
+```sh
+glab auth login --hostname gitlab.example.com      # on the host, paste the token
+export AGENT_CAPSULE_GITLAB_HOST=gitlab.example.com
+agent-capsule --with gitlab .
+```
+
+- The launcher reads the token with `glab config get token`, which also reads the
+  system keyring. It writes it into a `glab` config in `$XDG_RUNTIME_DIR`, which is in
+  memory, mounted at `/run/agent-capsule/glab` with `GLAB_CONFIG_DIR` pointing there.
+  The first launch after the session ends deletes it. Without `$XDG_RUNTIME_DIR`, as
+  on macOS, the config is in `$TMPDIR` instead, which is on disk.
+- The config binds the token to the instance. It is not passed as `GITLAB_TOKEN`,
+  because `glab` sends that variable to any host a command names, such as
+  `--hostname gitlab.com` or `-R https://gitlab.com/group/project`. For the same
+  reason, a `GITLAB_TOKEN` exported on the host is never handed over: only the stored
+  login for the instance is.
+- An OAuth login (`--web` or `--device`) is not passed on. Its token expires within
+  two hours, and refreshing it in the capsule would log the host out.
+- `GITLAB_HOST` points `glab` at the instance outside a repository. Inside one whose
+  remotes are on another host, `glab` refuses to run.
+- Remotes on the instance go over HTTPS with `glab` as the credential helper, set per
+  run like the GitHub ones.
+- A private CA for self-hosted resources is trusted with `--ca`: see [Private CA](#private-ca).
+- Without `gitlab`, the session gets no token, no `glab` and no git rewrite.
+- When the host login is handed over, `glab` settings changed inside the capsule last
+  only for the session.
+
+The agent can read the token in `/run/agent-capsule/glab/config.yml`, and the token can
+reach every project your account can. A project or group access token limits that.
+The launcher warns when the host `glab` keeps a token in plain text, which it does
+when no keyring is available.
+
 ## Private CA
 
 To reach self-hosted resources whose certificates come from a private CA, name the CA
@@ -476,6 +516,7 @@ Shared state and mounts:
   SELinux support.
 - `AGENT_CAPSULE_CA_CERTS=`: PEM file of private CAs that `--ca` trusts inside the
   capsule. See [Private CA](#private-ca).
+- `AGENT_CAPSULE_GITLAB_HOST=gitlab.com`: the GitLab instance `--with gitlab` reaches.
 
 ## State layout
 

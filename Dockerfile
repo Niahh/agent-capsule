@@ -11,6 +11,7 @@ ARG KUBECTL_VERSION=""
 ARG HELM_VERSION=""
 ARG TALOSCTL_VERSION=""
 ARG GH_VERSION=""
+ARG GLAB_VERSION=""
 ARG SUPERPOWERS_VERSION=""
 ARG CLAUDE_CODE_VERSION=""
 ARG CODEX_VERSION=""
@@ -29,6 +30,7 @@ ARG KUBECTL_VERSION
 ARG HELM_VERSION
 ARG TALOSCTL_VERSION
 ARG GH_VERSION
+ARG GLAB_VERSION
 ARG SUPERPOWERS_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG CODEX_VERSION
@@ -69,6 +71,7 @@ ARG AGENT=claude
 ARG WITH_ANYDOC=0
 ARG WITH_EXPLAIN_DIFF=0
 ARG WITH_GITHUB=0
+ARG WITH_GITLAB=0
 ARG WITH_KUBERNETES=0
 ARG WITH_MCPVAULT=0
 ARG WITH_SUPERPOWERS=0
@@ -178,6 +181,26 @@ RUN if [ "$WITH_GITHUB" = 1 ]; then \
       && tar -xzf /tmp/gh.tar.gz -C /usr/local/bin --strip-components=2 --no-same-owner \
         "$gh_name/bin/gh" \
       && rm /tmp/gh.tar.gz; \
+    fi
+
+# Checked against the release's own sums, like gh.
+RUN if [ "$WITH_GITLAB" = 1 ]; then \
+      glab_release=https://gitlab.com/gitlab-org/cli/-/releases \
+      && glab_version="${GLAB_VERSION:-latest}" \
+      && if [ "$glab_version" = latest ]; then \
+        glab_version="$(curl -sSfL -o /dev/null -w '%{url_effective}' "$glab_release/permalink/latest")" \
+        && glab_version="${glab_version##*/}"; \
+      fi \
+      && glab_name="glab_${glab_version#v}_linux_$(dpkg --print-architecture)" \
+      && glab_url="$glab_release/$glab_version/downloads" \
+      && curl -sSfL "$glab_url/$glab_name.tar.gz" -o /tmp/glab.tar.gz \
+      && printf '%s  /tmp/glab.tar.gz\n' \
+        "$(curl -sSfL "$glab_url/checksums.txt" \
+          | awk -v file="$glab_name.tar.gz" '$2 == file {print $1}')" \
+        | sha256sum -c - \
+      && tar -xzf /tmp/glab.tar.gz -C /usr/local/bin --strip-components=1 --no-same-owner \
+        bin/glab \
+      && rm /tmp/glab.tar.gz; \
     fi
 
 # One CLI, not three: a run uses exactly one agent and each package is large.
