@@ -110,7 +110,7 @@ usage() {
 # ----------------------------------------------------------------------------
 # Defaults (the environment is the only configuration channel)
 # ----------------------------------------------------------------------------
-# Everything persistent lives under this root: homes/, auth-home/, build/.
+# Everything persistent lives under this root.
 STATE_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
@@ -162,12 +162,8 @@ SHARED_RULES_READONLY="${AGENT_CAPSULE_SHARED_RULES_READONLY:-1}"
 # Worklog procedure override. The default is $STATE_DIR/log-work.md, used when it exists and never created.
 WORKLOG_PROCEDURE="${AGENT_CAPSULE_WORKLOG_PROCEDURE:-}"
 
-# Shared per-project memory (claude only; the container path comes from the
-# agent profile). Keyed by project (not session) so parallel agents on the
-# same repo pool what they learn, while transcripts and settings stay
-# per-session isolated. Default: enabled, read-write (agents must write to
-# share learnings). Set read-only for a curated one-way broadcast; disable to
-# restore full isolation.
+# Claude project memory is keyed by project, not session, so parallel agents on one
+# repo pool what they learn. Read-write by default: agents must write to share it.
 SHARED_MEMORY_ENABLED="${AGENT_CAPSULE_SHARED_MEMORY_ENABLED:-1}"
 SHARED_MEMORY_READONLY="${AGENT_CAPSULE_SHARED_MEMORY_READONLY:-0}"
 
@@ -195,8 +191,9 @@ CONTAINER_MCP_CONFIG="/home/dev/$MCP_CONFIG_BASENAME"
 # ----------------------------------------------------------------------------
 # Agent profiles
 # ----------------------------------------------------------------------------
-# The one place that knows agent-specific runtime behavior. Adding an agent also
-# requires one KNOWN_AGENTS entry and one arm in the Dockerfile's AGENT case.
+# Per-agent paths and commands. Adding an agent also needs a KNOWN_AGENTS entry, an
+# arm in the Dockerfile's AGENT case, and a look at the $AGENT checks here and in
+# entrypoint.sh.
 KNOWN_AGENTS=(claude codex opencode)
 
 load_agent_profile() {
@@ -1054,7 +1051,7 @@ if [[ "$SELECT_NONE" == "1" ]]; then
   done
 fi
 
-# Authentication uses a dedicated home without project integrations or mounts.
+# Authentication uses a dedicated home, without integrations, the vault or project memory.
 if [[ "$AUTH_LOGIN" == "1" ]]; then
   REQUESTED_EXTRAS=()
   SHARED_MEMORY_ENABLED=0
@@ -1344,10 +1341,8 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
 fi
 
 # Rewritten on every run: the vault destination can change between invocations.
-if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
-  case "$AGENT_MCP_MODE" in
-    flag)
-      cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
+if [[ "$MCPVAULT_ENABLED" == "1" && "$AGENT_MCP_MODE" == "flag" ]]; then
+  cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
 {
   "mcpServers": {
     "obsidian": {
@@ -1357,9 +1352,6 @@ if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
   }
 }
 MCPCONFIG
-      ;;
-    env | override) ;;
-  esac
 fi
 
 DOCKERFILE_SRC="$(resolve_dockerfile)"
@@ -1396,9 +1388,8 @@ HASH="$(printf '%s\n' \
   "$WORKLOG_HASH" | sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
-# Freshness is checked inside the lock only. An unlocked pre-check would save a
-# podman image inspect on runs that do not build, at the cost of running the
-# same query twice on the runs that do.
+# Freshness is checked inside the lock only. An unlocked pre-check would let runs
+# that do not build skip the lock, at the cost of a second inspect on runs that do.
 LOCK_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-capsule-$UID"
 # Only XDG_RUNTIME_DIR is known to be in memory, so the status says where the handoff files are.
 HANDOFF_WHERE="kept in memory"
@@ -1458,7 +1449,6 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
   chmod -R u+w,a+rX "$BUILD_CONTEXT_DIR/plugins"
   BUILD_SELECTION_ARGS=(--build-arg "AGENT=$AGENT")
   for extra in "${KNOWN_EXTRAS[@]}"; do
-    # anydoc -> WITH_ANYDOC, explain-diff -> WITH_EXPLAIN_DIFF.
     build_arg="WITH_$(printf '%s' "$extra" | tr 'a-z-' 'A-Z_')"
     if [[ ",$EXTRAS," == *",$extra,"* ]]; then
       BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=1")
@@ -1615,7 +1605,6 @@ ENV_ARGS+=(-e "HERDR_AGENT=$HERDR_AGENT")
 # ----------------------------------------------------------------------------
 # Extra mounts: SRC[:DEST][:ro] -> -v SRC:DEST[:opts]
 # ----------------------------------------------------------------------------
-# The session home is the first mount; user mounts follow, then the rest.
 add_mount "$HOME_DIR" /home/dev
 
 for spec in "${MOUNT_SPECS[@]}"; do
@@ -1723,12 +1712,8 @@ fi
 # ----------------------------------------------------------------------------
 # Shared credentials live mount
 # ----------------------------------------------------------------------------
-# Bind-mount the ONE shared OAuth token (rw) into this session so a single
-# `--auth-login` serves every session and in-container token refreshes write
-# straight back to the shared file. Everything else in /home/dev stays isolated.
-# Concurrency note: two sessions refreshing at the exact same instant race on
-# this file (last-writer-wins). If the refresh rotates the refresh token, one
-# session may need to refresh again. Acceptable for the herdr workflow; no lock.
+# Read-write, so one --auth-login serves every session and refreshes land in the shared
+# file. Two sessions refreshing at the same instant race; the last write wins.
 SHARED_CRED_MOUNTED=0
 AUTH_CRED_FILE="$AUTH_HOME_DIR/$AGENT_CRED_REL"
 CONTAINER_CRED_PATH="/home/dev/$AGENT_CRED_REL"
@@ -1795,7 +1780,7 @@ forge_over_https() { # host helper
 # on disk.
 GH_TOKEN_DIR=""
 
-if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
+if [[ ",$EXTRAS," == *,github,* ]]; then
   gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
   gh_token=""
   if ! command -v gh >/dev/null 2>&1; then
@@ -1825,7 +1810,7 @@ fi
 # capsule would rotate the host's refresh token and log the host out.
 GLAB_DIR=""
 
-if [[ ",$EXTRAS," == *,gitlab,* && "$AUTH_LOGIN" != "1" ]]; then
+if [[ ",$EXTRAS," == *,gitlab,* ]]; then
   glab_config_file="${GLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/glab-cli}/config.yml"
   glab_login="glab auth login --hostname $GITLAB_INSTANCE"
   glab_token=""
