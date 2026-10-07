@@ -1493,6 +1493,9 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
   prune_superseded_images
 fi
+# Run this image, not the tag: once the lock is released, a launch with another
+# selection can move the tag before podman run starts.
+IMAGE_ID="$(podman image inspect --format '{{.Id}}' "$IMAGE_REF")"
 release_build_lock
 
 # ----------------------------------------------------------------------------
@@ -2015,4 +2018,4 @@ exec podman run "${TTY_ARGS[@]}" --rm --init \
   "${ENV_ARGS[@]}" \
   "${MOUNT_ARGS[@]}" \
   -w "$CONTAINER_PROJECT_DIR" \
-  "$IMAGE_REF" "${RUN_CMD[@]}"
+  "$IMAGE_ID" "${RUN_CMD[@]}"

@@ -57,6 +57,12 @@ done
 
 if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
   for arg in "$@"; do image_ref="$arg"; done
+  # An ID derived from the bundle, so a test can tell which build a run starts.
+  if [[ " $* " == *" {{.Id}} "* ]]; then
+    awk -F '\t' -v image="$image_ref" '$1 == image { id = "id-" $2 } END { if (id != "") print id }' \
+      "$PODMAN_IMAGE_STATE"
+    exit 0
+  fi
   awk -F '\t' -v image="$image_ref" '
     $1 == image { hash = $2; refreshed = $3 }
     END { if (hash != "") print hash " " refreshed }
@@ -519,7 +525,8 @@ for profile in \
   run_capsule --agent "$agent" --session "profile-$agent" "$ROOT_DIR" -- --version
   assert_contains "$PODMAN_LOG" "ARG=ai.agent=$agent"
   assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/CLAUDE.md:/home/dev/$rules_path:ro"
-  assert_arg_after "$PODMAN_LOG" agent-capsule-dev:latest "$command"
+  image_id="id-$(awk -F '\t' 'END { print $2 }' "$PODMAN_IMAGE_STATE")"
+  assert_arg_after "$PODMAN_LOG" "$image_id" "$command"
   assert_arg_after "$PODMAN_LOG" "$command" '--version'
 done
 
@@ -1316,6 +1323,13 @@ new_case
 mkdir -p "$CASE_DIR/proj"
 (cd "$CASE_DIR" && CDPATH=".:/nonexistent" run_capsule --shell --session cdpath proj)
 assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
+
+# The run starts the image this launch checked under the build lock, not the tag:
+# another launch with a different selection can move the tag right after the lock.
+new_case
+run_capsule --session image-id "$ROOT_DIR" -- --version
+image_id="id-$(awk -F '\t' 'END { print $2 }' "$PODMAN_IMAGE_STATE")"
+assert_arg_after "$PODMAN_LOG" "$image_id" claude
 
 # The image age limit is a decimal count of days, whatever leading zeros it has.
 for age_and_refresh in 08:yes 010:no 00:no; do
