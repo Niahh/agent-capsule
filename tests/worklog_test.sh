@@ -188,15 +188,30 @@ test_keeps_snapshots_out_of_the_repository() {
 
 test_drops_old_snapshot_objects_on_each_prompt() {
   setup
-  local blob
+  local blob object
   blob="$(printf 'gone\n' | git hash-object --stdin)"
+  object="*/${blob:0:2}/${blob:2}"
   hook snapshot "do it" false > /dev/null
   printf 'gone\n' > "$REPO/gone.go"
   hook check "" false > /dev/null
-  [[ -e "$T_HOME/.cache/worklog/$SID/${blob:0:2}/${blob:2}" ]] || fail "test expects the private object store"
+  [[ -n "$(find "$T_HOME/.cache/worklog" -path "$object")" ]] || fail "test expects the private object store"
   rm "$REPO/gone.go"
   hook snapshot "next" false > /dev/null
-  if [[ ! -e "$T_HOME/.cache/worklog/$SID/${blob:0:2}/${blob:2}" ]]; then pass; else fail "old snapshot kept"; fi
+  if [[ -z "$(find "$T_HOME/.cache/worklog" -path "$object")" ]]; then pass; else fail "old snapshot kept"; fi
+}
+
+test_keeps_the_baseline_when_a_snapshot_fails() {
+  setup
+  # Uncommitted work puts the baseline's objects in the private store.
+  printf 'pending\n' > "$REPO/pending.go"
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  cp "$REPO/.git/index" "$WORK/case/index"
+  printf 'corrupt' > "$REPO/.git/index"
+  printf '{"session_id":"%s","cwd":"%s","prompt":"next"}' "$SID" "$REPO" |
+    env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_VAULT_DEST="$T_VAULT" node "$HOOK" snapshot > /dev/null 2>&1
+  cp "$WORK/case/index" "$REPO/.git/index"
+  assert_blocks "failed snapshot" "$(hook check "" false)" "main.go"
 }
 
 test_silent_outside_a_git_repo() {

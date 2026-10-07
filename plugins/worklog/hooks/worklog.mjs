@@ -3,7 +3,7 @@
 // "snapshot" runs on UserPromptSubmit, "check" on Stop, "procedure" prints the procedure for /log-work.
 import { execFileSync } from 'node:child_process';
 import {
-  copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -109,30 +109,37 @@ const save = (state) => {
 };
 // Snapshots write to a private object store that reads the repository's as an alternate, so the repository never
 // collects copies of the worktree.
-const objects = {
-  GIT_OBJECT_DIRECTORY: join(objectsRoot, sessionId),
-  GIT_ALTERNATE_OBJECT_DIRECTORIES: git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']),
+const alternate = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
+const objects = (store) => ({ GIT_OBJECT_DIRECTORY: store, GIT_ALTERNATE_OBJECT_DIRECTORIES: alternate });
+const sessionObjects = join(objectsRoot, sessionId);
+const newStore = () => {
+  mkdirSync(sessionObjects, { recursive: true });
+  return mkdtempSync(join(sessionObjects, 'objects-'));
 };
 
 if (mode === 'snapshot') {
+  // A fresh store keeps the saved baseline readable if this snapshot fails.
+  const store = newStore();
+  save({ top, store, tree: snapshot(top, objects(store)), skip: String(input.prompt ?? '').includes('#no-doc') });
   // A prompt replaces the baseline, so the objects of earlier snapshots are garbage.
-  rmSync(objects.GIT_OBJECT_DIRECTORY, { recursive: true, force: true });
-  mkdirSync(objects.GIT_OBJECT_DIRECTORY, { recursive: true });
-  save({ top, tree: snapshot(top, objects), skip: String(input.prompt ?? '').includes('#no-doc') });
+  for (const name of readdirSync(sessionObjects)) {
+    if (join(sessionObjects, name) !== store) rmSync(join(sessionObjects, name), { recursive: true, force: true });
+  }
 } else {
-  mkdirSync(objects.GIT_OBJECT_DIRECTORY, { recursive: true });
   let base = null;
   try {
     base = JSON.parse(readFileSync(stateFile, 'utf8'));
   } catch {
     // No prompt seen yet in this session: this check only sets the baseline.
   }
-  const tree = snapshot(top, objects);
+  // The diff reads both trees from the baseline's store.
+  const store = base?.top === top ? base.store : newStore();
+  const tree = snapshot(top, objects(store));
   // A turn can start without a prompt, when a background task ends: rebaseline so it does not see this work again.
-  save({ top, tree, skip: false });
+  save({ top, store, tree, skip: false });
   if (!input.stop_hook_active && base?.top === top && !base.skip) {
     const diff = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...noise];
-    const numstat = git(top, diff, objects);
+    const numstat = git(top, diff, objects(store));
     if (numstat) process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat) }));
   }
 }
