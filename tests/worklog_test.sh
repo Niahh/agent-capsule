@@ -210,6 +210,23 @@ test_drops_old_snapshot_objects_on_each_prompt() {
   if [[ -z "$(find "$T_HOME/.cache/worklog" -path "$object")" ]]; then pass; else fail "old snapshot kept"; fi
 }
 
+test_prunes_sessions_idle_for_a_week() {
+  setup
+  local sid cache="$T_HOME/.cache/worklog" state="$T_HOME/.claude/worklog"
+  mkdir -p "$state"
+  for sid in idle recent half; do
+    mkdir -p "$cache/$sid"
+    echo '{}' > "$state/$sid"
+  done
+  # A session is idle only when both its state and its store are.
+  touch -t 202001010000 "$cache/idle" "$state/idle" "$state/half"
+  hook snapshot "do it" false > /dev/null
+  if [[ ! -e "$cache/idle" && ! -e "$state/idle" ]]; then pass; else fail "idle session kept"; fi
+  for sid in recent half "$SID"; do
+    if [[ -e "$cache/$sid" && -e "$state/$sid" ]]; then pass; else fail "session $sid pruned"; fi
+  done
+}
+
 test_keeps_the_baseline_when_a_snapshot_fails() {
   setup
   # Uncommitted work puts the baseline's objects in the private store.
