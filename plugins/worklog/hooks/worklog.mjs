@@ -156,13 +156,15 @@ if (mode === 'snapshot') {
   } catch {
     // No prompt seen yet in this session: this check only sets the baseline.
   }
-  // The diff reads both trees from the baseline's store.
-  const store = base?.top === top ? base.store : newStore();
+  // The diff reads both trees from the baseline's store. A baseline from before stores were
+  // per snapshot, or whose store was pruned, cannot be read and only gets replaced.
+  const usable = base?.top === top && Boolean(base.store) && existsSync(base.store);
+  const store = usable ? base.store : newStore();
   const tree = snapshot(top, objects(store));
   const commit = head(top);
   // A turn can start without a prompt, when a background task ends: rebaseline so it does not see this work again.
   save({ top, store, head: commit, tree, skip: false });
-  if (!input.stop_hook_active && base?.top === top && !base.skip) {
+  if (!input.stop_hook_active && usable && !base.skip) {
     const diff = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...noise];
     const numstat = git(top, diff, objects(store));
     if (numstat) {

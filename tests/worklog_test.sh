@@ -294,6 +294,27 @@ test_keeps_the_baseline_when_a_snapshot_fails() {
   assert_blocks "failed snapshot" "$(hook check "" false)" "main.go"
 }
 
+test_ignores_a_baseline_without_its_store() {
+  local variant objects_before
+  # A state file from before stores were per snapshot, or one whose store was pruned.
+  for variant in old-format pruned; do
+    setup
+    hook snapshot "do it" false > /dev/null
+    if [[ "$variant" == old-format ]]; then
+      node -e 'const fs = require("fs"); const s = JSON.parse(fs.readFileSync(process.argv[1]));
+        delete s.store; fs.writeFileSync(process.argv[1], JSON.stringify(s));' "$T_HOME/.claude/worklog/$SID"
+    else
+      rm -rf "$T_HOME/.cache/worklog/$SID"
+    fi
+    printf 'b\n' >> "$REPO/main.go"
+    objects_before="$(find "$REPO/.git/objects" -type f | wc -l)"
+    assert_empty "$variant baseline" "$(hook check "" false)"
+    if [[ "$(find "$REPO/.git/objects" -type f | wc -l)" == "$objects_before" ]]; then pass; else
+      fail "$variant baseline: the check wrote objects into the repository"
+    fi
+  done
+}
+
 test_handles_unusual_repository_paths() {
   local dir
   for dir in "repo " "re:po"; do
