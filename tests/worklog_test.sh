@@ -75,7 +75,8 @@ test_blocks_after_a_turn_that_edits() {
   setup
   hook snapshot "do it" false > /dev/null
   printf 'b\n' >> "$REPO/main.go"
-  assert_blocks "edit" "$(hook check "" false)" "main.go" "$(date +%A)" "$(date +%G-W%V)" \
+  # hook() clears the environment, so both sides pin the time zone.
+  assert_blocks "edit" "$(hook check "" false TZ=UTC)" "main.go" "$(TZ=UTC date +%A)" "$(TZ=UTC date +%G-W%V)" \
     "durable change to behavior"
 }
 
