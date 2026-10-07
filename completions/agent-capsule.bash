@@ -119,31 +119,30 @@ _agent_capsule() {
       ;;
   esac
 
+  # = is in COMP_WORDBREAKS, so readline replaces only the text after it: offer bare values.
   case "$cur" in
     --agent=*)
       mapfile -t COMPREPLY < <(
-        compgen -P --agent= -W "$(agent-capsule --agent list 2>/dev/null) list" \
-          -- "${cur#--agent=}"
+        compgen -W "$(agent-capsule --agent list 2>/dev/null) list" -- "${cur#--agent=}"
       )
       return 0
       ;;
     --session=*)
       mapfile -t COMPREPLY < <(
-        compgen -P --session= -W "$(_agent_capsule_sessions)" -- "${cur#--session=}"
+        compgen -W "$(_agent_capsule_sessions)" -- "${cur#--session=}"
       )
       return 0
       ;;
     --with=*)
       _agent_capsule_comma_list "${cur#--with=}" "$(_agent_capsule_extras "$agent")"
-      COMPREPLY=("${COMPREPLY[@]/#/--with=}")
       return 0
       ;;
     --vault=*)
-      mapfile -t COMPREPLY < <(compgen -P --vault= -d -- "${cur#--vault=}")
+      mapfile -t COMPREPLY < <(compgen -d -- "${cur#--vault=}")
       return 0
       ;;
     --shared-rules=* | --mount=*)
-      mapfile -t COMPREPLY < <(compgen -P "${cur%%=*}=" -f -- "${cur#*=}")
+      mapfile -t COMPREPLY < <(compgen -f -- "${cur#*=}")
       return 0
       ;;
     -*)
