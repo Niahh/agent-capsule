@@ -930,6 +930,47 @@ run_capsule --shell --session glab-sweep "$ROOT_DIR"
 [[ -e "$runtime_root/glab-$$/config.yml" ]] || fail "a live session's glab dir was removed"
 rm -rf "$runtime_root/glab-$$"
 
+# Every capsule runs without capabilities or privilege escalation, within limits,
+# and --offline takes the network away.
+new_case
+run_capsule --shell --session hardening "$ROOT_DIR"
+for flag in --security-opt=no-new-privileges --cap-drop=ALL --pids-limit=512 --memory=8g --cpus=4; do
+  assert_contains "$PODMAN_LOG" "ARG=$flag"
+done
+assert_not_contains "$PODMAN_LOG" 'ARG=--network=none'
+: > "$PODMAN_LOG"
+run_capsule --offline --shell --session hardening "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'ARG=--network=none'
+
+# One login serves every session: a new session copies the agent's state from the
+# auth home, but the token only through a read-write mount of the shared file.
+new_case
+auth_home="$CAPSULE_HOME/auth-home/claude"
+mkdir -p "$auth_home/.claude"
+printf '{}\n' > "$auth_home/.claude.json"
+printf 'oauth-token\n' > "$auth_home/.claude/.credentials.json"
+run_capsule --shell --session shared-auth "$ROOT_DIR"
+[[ -f "$CAPSULE_HOME/homes/shared-auth/.claude.json" ]] || fail "the agent state was not copied"
+[[ ! -e "$CAPSULE_HOME/homes/shared-auth/.claude/.credentials.json" ]] || fail "the token was copied"
+assert_contains "$PODMAN_LOG" \
+  "ARG=$auth_home/.claude/.credentials.json:/home/dev/.claude/.credentials.json"
+: > "$PODMAN_LOG"
+AGENT_CAPSULE_SHARE_AUTH=0 run_capsule --shell --session unshared-auth "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" '.credentials.json'
+[[ ! -e "$CAPSULE_HOME/homes/unshared-auth/.claude.json" ]] || fail "unshared auth was copied"
+
+# mcpvault reaches each agent its own way: a config file for claude, -c for codex.
+new_case
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+run_capsule --with mcpvault --vault="$vault_dir" --session mcp-claude "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --mcp-config /home/dev/.mcp-servers.json
+assert_contains "$CAPSULE_HOME/homes/mcp-claude/.mcp-servers.json" '"args": ["/vault"]'
+: > "$PODMAN_LOG"
+run_capsule --agent codex --with mcpvault --vault="$vault_dir" --session mcp-codex "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.command="mcpvault"'
+assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.args=["/vault"]'
+
 new_case
 run_capsule --agent claude --with superpowers,anydoc \
   --session claude-integrations "$ROOT_DIR"
@@ -1122,6 +1163,14 @@ ln -s "$CASE_DIR/notes/log-work.md" "$CAPSULE_HOME/log-work.md"
 run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/log-work.md:/etc/agent-capsule/log-work.md:ro"
 assert_contains "$OUTPUT" ">> Worklog : $CAPSULE_HOME/log-work.md -> /etc/agent-capsule/log-work.md"
+# A broken one fails loudly instead of falling back to the built-in procedure.
+rm "$CASE_DIR/notes/log-work.md"
+: > "$PODMAN_LOG"
+status=0
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR" || status=$?
+assert_status_fails "$status"
+assert_contains "$OUTPUT" "File not found: $CAPSULE_HOME/log-work.md"
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
 vault_dir="$CASE_DIR/vault"
@@ -1458,6 +1507,9 @@ assert_contains "$PODMAN_LOG" 'CALL=images'
 assert_arg_after "$PODMAN_LOG" rmi aaaa1111
 assert_arg_after "$PODMAN_LOG" rmi bbbb2222
 assert_contains "$OUTPUT" '>> Pruned  : 2 superseded image(s)'
+# The filters are all that keep rmi off images this tool did not build or still tags.
+assert_arg_after "$PODMAN_LOG" --filter 'label=io.agent-capsule.bundle'
+assert_arg_after "$PODMAN_LOG" --filter 'dangling=true'
 [[ ! -s "$PODMAN_DANGLING" ]] || fail "superseded images were not removed"
 
 # A launch that does not build leaves them alone.
