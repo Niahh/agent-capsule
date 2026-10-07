@@ -1341,6 +1341,13 @@ assert_status_fails "$status"
 assert_contains "$OUTPUT" "$CASE_DIR/typo/CLAUDE.md"
 [[ ! -e "$CASE_DIR/typo" ]] || fail "the mistyped rules path was created"
 
+# A lone dash is not a project: cd would read it as $OLDPWD.
+new_case
+status=0
+OLDPWD=/etc run_capsule --shell - || status=$?
+assert_status_fails "$status"
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"

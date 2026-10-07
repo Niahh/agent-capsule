@@ -598,7 +598,7 @@ EXTRAS_REQUESTED=()
 [[ -n "${AGENT_CAPSULE_WITH:-}" ]] && EXTRAS_REQUESTED=("$AGENT_CAPSULE_WITH")
 WITH_EXPLICIT=0
 
-while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
+while [[ "${1:-}" == -* ]]; do
   # Split the =VALUE form once, so each value-taking flag is implemented once.
   # --vault is deliberately absent: its bare form takes no separate value.
   case "$1" in
