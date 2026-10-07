@@ -547,7 +547,9 @@ assert_not_contains "$PODMAN_LOG" "$CAPSULE_HOME/auth-home/opencode:/home/dev"
 # One tag, rebuilt whenever the selection changes: the image carries only the
 # agent and integrations this run asked for.
 new_case
-run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
+# A day old, so a rebuild that reset the refresh time would show.
+PODMAN_BUILD_EPOCH="$(($(date +%s) - 86400))" \
+  run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'AGENT=claude'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
@@ -629,6 +631,7 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_secret123 \
   run_capsule --with github --shell --session gh-on "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITHUB=1'
 assert_not_contains "$PODMAN_LOG" 'gho_secret123'
+assert_not_contains "$OUTPUT" 'plain text'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token'
 gh_token_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/gh\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
 [[ "$gh_token_dir" == "$TEST_ROOT/xdg/"* ]] || fail "token dir is outside the runtime dir: $gh_token_dir"
@@ -958,7 +961,7 @@ assert_arg_after "$PODMAN_LOG" login provider
 
 new_case
 AGENT_CAPSULE_WITH=superpowers run_capsule --agent opencode --auth-login
-assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WITH='
+assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
 assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
 assert_not_contains "$PODMAN_LOG" '/opt/superpowers/source'
 assert_contains "$OUTPUT" '>> Extras  : none'
@@ -1204,9 +1207,10 @@ cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
 chmod -R a-w "$CASE_DIR/plugins/worklog"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --build --shell --session worklog-readonly "$ROOT_DIR"
+chmod -R a-w "$CAPSULE_HOME/build/context/plugins/worklog"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --build --shell --session worklog-readonly "$ROOT_DIR"
-chmod -R u+w "$CASE_DIR/plugins/worklog"
+[[ -w "$CAPSULE_HOME/build/context/plugins/worklog/procedure.md" ]] || fail "the context copy is read-only"
 
 new_case
 cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
@@ -1619,7 +1623,11 @@ for version_variable in \
 done
 # An undeclared build arg is dropped with only a warning, so a pin would be ignored.
 for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION GH_VERSION GLAB_VERSION; do
-  assert_contains "$DOCKERFILE" "ARG $version_variable"
+  awk -v arg="ARG $version_variable" '
+    /^FROM / { stage = 1; found = 0 }
+    stage && ($0 == arg || index($0, arg "=") == 1) { found = 1 }
+    END { exit !found }
+  ' "$DOCKERFILE" || fail "$version_variable is not declared after FROM"
 done
 # A bare `docker build .` must leave the optional CLIs out, like the launcher does.
 assert_contains "$DOCKERFILE" 'ARG WITH_KUBERNETES=0'
