@@ -27,7 +27,6 @@ setup() {
   proc="$WORK/case/procedure.md"
   SID="s1"
   mkdir -p "$T_HOME" "$T_VAULT" "$REPO"
-  echo note > "$T_VAULT/note.md"
   git -C "$REPO" init -q
   printf 'a\n' > "$REPO/main.go"
   gitc add main.go
