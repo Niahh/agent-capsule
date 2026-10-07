@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)"
 CHECK_COMPLETION="$ROOT_DIR/scripts/check-shell-completion"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
@@ -31,7 +31,11 @@ run_install() {
     "$case_root/prefix/share/bash-completion/completions/agent-capsule"
   cp "$ROOT_DIR/completions/_agent-capsule" \
     "$case_root/prefix/share/zsh/site-functions/_agent-capsule"
-  HOME="$case_root/home" SHELL="$shell_path" "$CHECK_COMPLETION" \
+  # bash-completion's loader would find a completion installed on the host.
+  mkdir -p "$case_root/empty"
+  HOME="$case_root/home" SHELL="$shell_path" XDG_DATA_HOME="$case_root/empty" \
+    XDG_DATA_DIRS="$case_root/empty" BASH_COMPLETION_USER_DIR="$case_root/empty" \
+    "$CHECK_COMPLETION" \
     "$case_root/prefix/share/bash-completion/completions" \
     "$case_root/prefix/share/zsh/site-functions" > "$case_root/output" 2>&1
   printf '%s\n' "$case_root/output"
