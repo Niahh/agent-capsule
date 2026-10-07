@@ -221,6 +221,9 @@ ENV HOME=/home/dev \
     GOPATH=/home/dev/go \
     PATH=/usr/local/go/bin:/home/dev/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Otherwise glab reports every command to the GitLab instance. Harmless without glab.
+ENV GLAB_SEND_TELEMETRY=false
+
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/agent-capsule-entrypoint.sh"]
 # Manual-run fallback only: agent-capsule always passes the command explicitly,

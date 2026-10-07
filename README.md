@@ -418,6 +418,8 @@ agent-capsule --with gitlab .
 - Without `gitlab`, the session gets no token, no `glab` and no git rewrite.
 - When the host login is handed over, `glab` settings changed inside the capsule last
   only for the session.
+- The image sets `GLAB_SEND_TELEMETRY=false`, so `glab` does not report each command
+  to the instance.
 
 The agent can read the token in `/run/agent-capsule/glab/config.yml`, and the token can
 reach every project your account can. A project or group access token limits that.

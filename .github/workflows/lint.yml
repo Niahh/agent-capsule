@@ -82,8 +82,10 @@ jobs:
           docker run --rm agent-capsule:test talosctl version --client
       - name: gh is installed
         run: docker run --rm agent-capsule:test gh --version
-      - name: glab is installed
-        run: docker run --rm agent-capsule:test glab version
+      - name: glab is installed, with usage telemetry off
+        run: |
+          docker run --rm agent-capsule:test glab version
+          docker run --rm agent-capsule:test glab config get telemetry | grep -qx false
       # Mounted the way the launcher does it, and as a non-root user like --keep-id.
       - name: curl, git, and Node trust a mounted private CA
         run: |
