@@ -43,6 +43,15 @@
 #
 set -euo pipefail
 
+# Empty arrays under set -u need bash 4.4; macOS still ships 3.2 as /bin/bash.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  echo "agent-capsule needs bash 4.4 or later; this is $BASH_VERSION." >&2
+  exit 1
+fi
+
+# With it exported, cd prints where it went, so every $(cd ... && pwd) would return two lines.
+unset CDPATH
+
 # The image build is the only critical section, and there is one image, so one
 # lock. Assigned only after the atomic file creation wins, or the EXIT trap
 # would delete a lock this process does not own.
@@ -56,17 +65,19 @@ acquire_build_lock() {
   local stale_path=""
 
   while ! (set -o noclobber; printf '%s\n' "$$" > "$lock_path") 2>/dev/null; do
-    # Versions before 0.3 used a directory lock with no owner metadata. It may
-    # belong to a live older launcher, so only the user can decide it is stale.
+    # No version creates a directory here, and one would never go away: say so
+    # instead of waiting on it forever.
     if [[ -d "$lock_path" ]]; then
-      echo "Legacy directory lock found: $lock_path" >&2
-      echo "Wait for older builds to finish, then remove the legacy directory lock." >&2
+      echo "Not a lock file: $lock_path. Remove it, then run again." >&2
       return 1
     elif [[ -f "$lock_path" ]]; then
       lock_owner="$(<"$lock_path")"
       if [[ "$lock_owner" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_owner" 2>/dev/null; then
         stale_path="$lock_path.stale.$$"
         if mv "$lock_path" "$stale_path" 2>/dev/null; then
+          # Another waiter may have replaced the dead lock since it was read. Give a
+          # live one back; ln fails rather than overwrite a lock taken meanwhile.
+          [[ "$(<"$stale_path")" == "$lock_owner" ]] || ln "$stale_path" "$lock_path" 2>/dev/null || true
           rm -f "$stale_path"
           continue
         fi
@@ -99,7 +110,7 @@ usage() {
 # ----------------------------------------------------------------------------
 # Defaults (the environment is the only configuration channel)
 # ----------------------------------------------------------------------------
-# Everything persistent lives under this root: homes/, auth-home/, build/.
+# Everything persistent lives under this root.
 STATE_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
@@ -151,12 +162,8 @@ SHARED_RULES_READONLY="${AGENT_CAPSULE_SHARED_RULES_READONLY:-1}"
 # Worklog procedure override. The default is $STATE_DIR/log-work.md, used when it exists and never created.
 WORKLOG_PROCEDURE="${AGENT_CAPSULE_WORKLOG_PROCEDURE:-}"
 
-# Shared per-project memory (claude only; the container path comes from the
-# agent profile). Keyed by project (not session) so parallel agents on the
-# same repo pool what they learn, while transcripts and settings stay
-# per-session isolated. Default: enabled, read-write (agents must write to
-# share learnings). Set read-only for a curated one-way broadcast; disable to
-# restore full isolation.
+# Claude project memory is keyed by project, not session, so parallel agents on one
+# repo pool what they learn. Read-write by default: agents must write to share it.
 SHARED_MEMORY_ENABLED="${AGENT_CAPSULE_SHARED_MEMORY_ENABLED:-1}"
 SHARED_MEMORY_READONLY="${AGENT_CAPSULE_SHARED_MEMORY_READONLY:-0}"
 
@@ -184,8 +191,9 @@ CONTAINER_MCP_CONFIG="/home/dev/$MCP_CONFIG_BASENAME"
 # ----------------------------------------------------------------------------
 # Agent profiles
 # ----------------------------------------------------------------------------
-# The one place that knows agent-specific runtime behavior. Adding an agent also
-# requires one KNOWN_AGENTS entry and one arm in the Dockerfile's AGENT case.
+# Per-agent paths and commands. Adding an agent also needs a KNOWN_AGENTS entry, an
+# arm in the Dockerfile's AGENT case, and a look at the $AGENT checks here and in
+# entrypoint.sh.
 KNOWN_AGENTS=(claude codex opencode)
 
 load_agent_profile() {
@@ -389,8 +397,8 @@ resolve_file_path() {
   fi
 
   if [[ ! -e "$path" ]]; then
-    # An explicitly requested file that is missing is almost always a typo;
-    # only auto-create the built-in default.
+    # A configured file that is missing is almost always a typo; only the built-in
+    # default is created.
     if [[ "$must_exist" == "1" ]]; then
       echo "File not found: $path" >&2
       exit 1
@@ -459,8 +467,9 @@ path_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
 }
 
-# The newest top-level entry: the launcher refreshes .agent on every start, and
-# claude rewrites .claude.json while it runs.
+# The newest top-level file: the launcher refreshes .agent on every start, and
+# claude rewrites .claude.json while it runs. Directory times move when pruning
+# empties them, so they do not count as use.
 home_last_used() { # home
   local newest=0
   local entry mtime
@@ -468,7 +477,7 @@ home_last_used() { # home
   while IFS= read -r -d '' entry; do
     mtime="$(path_mtime "$entry")"
     [[ "$mtime" -le "$newest" ]] || newest="$mtime"
-  done < <(find "$1" -maxdepth 1 -print0)
+  done < <(find "$1" -mindepth 1 -maxdepth 1 ! -type d -print0)
   printf '%s' "$newest"
 }
 
@@ -513,7 +522,7 @@ prune_session_homes() {
     idle_days=$(((now - $(home_last_used "$home")) / 86400))
     [[ "$idle_days" -ge "$PRUNE_DAYS" ]] || continue
     # Codex and OpenCode write only below the top level, so check the whole tree.
-    [[ -z "$(find "$home" -mmin "-$((PRUNE_DAYS * 1440))" -print -quit)" ]] || continue
+    [[ -z "$(find "$home" ! -type d -mmin "-$((PRUNE_DAYS * 1440))" -print -quit)" ]] || continue
     if grep -qxF -- "$name" <<<"$running"; then
       echo ">> Skip    : $name (running)"
       continue
@@ -589,7 +598,7 @@ EXTRAS_REQUESTED=()
 [[ -n "${AGENT_CAPSULE_WITH:-}" ]] && EXTRAS_REQUESTED=("$AGENT_CAPSULE_WITH")
 WITH_EXPLICIT=0
 
-while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
+while [[ "${1:-}" == -* ]]; do
   # Split the =VALUE form once, so each value-taking flag is implemented once.
   # --vault is deliberately absent: its bare form takes no separate value.
   case "$1" in
@@ -789,6 +798,10 @@ if [[ "$PRUNE_YES" == "1" ]]; then
   exit 1
 fi
 
+# From here on stdout belongs to the agent, so `agent-capsule . -- -p q > out` captures
+# only its answer. Status and build output go to stderr; the run gets stdout back.
+exec 3>&1 1>&2
+
 load_agent_profile "$AGENT"
 AUTH_HOME_DIR="$AUTH_ROOT_DIR/$AGENT"
 
@@ -877,10 +890,12 @@ for tagged_version in \
 done
 unset tagged_version
 
-if [[ ! "$MAX_IMAGE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+if [[ ! "$MAX_IMAGE_AGE_DAYS" =~ ^[0-9]{1,5}$ ]]; then
   echo "Invalid AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS: $MAX_IMAGE_AGE_DAYS (whole days, 0 disables)." >&2
   exit 1
 fi
+# Arithmetic would read a leading zero as octal.
+MAX_IMAGE_AGE_DAYS="$((10#$MAX_IMAGE_AGE_DAYS))"
 
 require_cmd podman
 require_cmd awk
@@ -974,12 +989,17 @@ host_time_zone() {
   local tz="${TZ:-}"
   local target
 
-  # glibc reads ":Area/City" as "Area/City". ":/path" names a host file, so it falls back to the link.
+  # glibc reads ":Area/City" as "Area/City", and a path into a zoneinfo tree names its zone.
   [[ "$tz" != :[!/]* ]] || tz="${tz#:}"
-  if [[ -n "$tz" && "${tz:0:1}" != ":" ]]; then
+  if [[ "$tz" == *zoneinfo/* ]]; then
+    printf '%s\n' "${tz#*zoneinfo/}"
+    return 0
+  fi
+  if [[ -n "$tz" && "$tz" != [:/]* ]]; then
     printf '%s\n' "$tz"
     return 0
   fi
+  # Any other path names a host file, which means nothing in the container.
   target="$(readlink /etc/localtime 2>/dev/null || true)"
   if [[ "$target" == *zoneinfo/* ]]; then
     printf '%s\n' "${target#*zoneinfo/}"
@@ -1031,7 +1051,7 @@ if [[ "$SELECT_NONE" == "1" ]]; then
   done
 fi
 
-# Authentication uses a dedicated home without project integrations or mounts.
+# Authentication uses a dedicated home, without integrations, the vault or project memory.
 if [[ "$AUTH_LOGIN" == "1" ]]; then
   REQUESTED_EXTRAS=()
   SHARED_MEMORY_ENABLED=0
@@ -1172,6 +1192,11 @@ if [[ "$AGENT" == "claude" ]]; then
   project_memory_hash_full="$(printf '%s' "$PROJECT_MEMORY_KEY" | sha256_stream)"
   PROJECT_MEMORY_HASH="${project_memory_hash_full:0:12}"
   AGENT_MEMORY_SLUG="$(printf '%s' "$CONTAINER_PROJECT_DIR" | tr -c 'a-zA-Z0-9' '-')"
+  # The slug is one folder name, and a name over 255 bytes cannot be created.
+  if [[ "$SHARED_MEMORY_ENABLED" == "1" && "${#AGENT_MEMORY_SLUG}" -gt 255 ]]; then
+    echo ">> ProjMem : project path too long for a memory folder name; project memory disabled" >&2
+    SHARED_MEMORY_ENABLED=0
+  fi
   AGENT_MEMORY_REL=".claude/projects/$AGENT_MEMORY_SLUG/memory"
   CONTAINER_MEMORY_PATH="/home/dev/$AGENT_MEMORY_REL"
 else
@@ -1301,7 +1326,9 @@ copy_agent_auth_from_auth_home "$AUTH_HOME_DIR" "$HOME_DIR"
 # Prepare the rules mount's target parent inside the session home.
 if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then
   mkdir -p "$HOME_DIR/$(dirname "$AGENT_RULES_REL")"
-  RESOLVED_SHARED_RULES="$(resolve_file_path "$SHARED_RULES" "$SHARED_RULES_EXPLICIT")"
+  rules_must_exist="$SHARED_RULES_EXPLICIT"
+  [[ "$SHARED_RULES" == "$STATE_DIR/CLAUDE.md" ]] || rules_must_exist=1
+  RESOLVED_SHARED_RULES="$(resolve_file_path "$SHARED_RULES" "$rules_must_exist")"
 fi
 
 # Prepare the shared memory dir and its in-container parent. Creating the parent
@@ -1314,10 +1341,8 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
 fi
 
 # Rewritten on every run: the vault destination can change between invocations.
-if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
-  case "$AGENT_MCP_MODE" in
-    flag)
-      cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
+if [[ "$MCPVAULT_ENABLED" == "1" && "$AGENT_MCP_MODE" == "flag" ]]; then
+  cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
 {
   "mcpServers": {
     "obsidian": {
@@ -1327,9 +1352,6 @@ if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
   }
 }
 MCPCONFIG
-      ;;
-    env | override) ;;
-  esac
 fi
 
 DOCKERFILE_SRC="$(resolve_dockerfile)"
@@ -1366,10 +1388,12 @@ HASH="$(printf '%s\n' \
   "$WORKLOG_HASH" | sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
-# Freshness is checked inside the lock only. An unlocked pre-check would save a
-# podman image inspect on runs that do not build, at the cost of running the
-# same query twice on the runs that do.
+# Freshness is checked inside the lock only. An unlocked pre-check would let runs
+# that do not build skip the lock, at the cost of a second inspect on runs that do.
 LOCK_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-capsule-$UID"
+# Only XDG_RUNTIME_DIR is known to be in memory, so the status says where the handoff files are.
+HANDOFF_WHERE="kept in memory"
+[[ -n "${XDG_RUNTIME_DIR:-}" ]] || HANDOFF_WHERE="kept in $LOCK_ROOT, which may be on disk"
 mkdir -p "$LOCK_ROOT"
 chmod 700 "$LOCK_ROOT"
 acquire_build_lock "$LOCK_ROOT/image.lock"
@@ -1377,13 +1401,10 @@ acquire_build_lock "$LOCK_ROOT/image.lock"
 # The refresh label records the last pull plus no-cache build. Image creation
 # time cannot represent that: cached selection builds create a new image without
 # refreshing upstream tools, and Podman exposes .Created as an ISO 8601 string.
-IMAGE_STATE="$(
-  podman image inspect \
-    --format '{{ index .Labels "io.agent-capsule.bundle" }} {{ index .Labels "io.agent-capsule.refreshed-at" }}' \
-    "$IMAGE_REF" 2>/dev/null || true
-)"
-IMAGE_BUNDLE_HASH="${IMAGE_STATE%% *}"
-IMAGE_REFRESHED_AT="${IMAGE_STATE##* }"
+image_labels='{{ index .Labels "io.agent-capsule.bundle" }} {{ index .Labels "io.agent-capsule.refreshed-at" }}'
+image_labels+=' {{ index .Labels "io.agent-capsule.selection" }}'
+IMAGE_STATE="$(podman image inspect --format "$image_labels" "$IMAGE_REF" 2>/dev/null || true)"
+read -r IMAGE_BUNDLE_HASH IMAGE_REFRESHED_AT IMAGE_SELECTION _ <<<"$IMAGE_STATE" || true
 
 NEEDS_BUILD=0
 REFRESH_REASON=""
@@ -1407,6 +1428,12 @@ if [[ -n "$REFRESH_REASON" ]]; then
   NEEDS_BUILD=1
 fi
 
+# A login only needs the agent CLI, and rebuilding without the integrations would make
+# the next normal run rebuild them. Any image of this agent will do; refreshes wait.
+if [[ "$AUTH_LOGIN" == "1" && "$FORCE_BUILD" != "1" && "$IMAGE_SELECTION" == "$AGENT":* ]]; then
+  NEEDS_BUILD=0
+fi
+
 if [[ "$NEEDS_BUILD" == "1" ]]; then
   mkdir -p "$BUILD_CONTEXT_DIR"
   cp -f "$DOCKERFILE_SRC" "$BUILD_CONTEXT_DIR/Dockerfile"
@@ -1422,7 +1449,6 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
   chmod -R u+w,a+rX "$BUILD_CONTEXT_DIR/plugins"
   BUILD_SELECTION_ARGS=(--build-arg "AGENT=$AGENT")
   for extra in "${KNOWN_EXTRAS[@]}"; do
-    # anydoc -> WITH_ANYDOC, explain-diff -> WITH_EXPLAIN_DIFF.
     build_arg="WITH_$(printf '%s' "$extra" | tr 'a-z-' 'A-Z_')"
     if [[ ",$EXTRAS," == *",$extra,"* ]]; then
       BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=1")
@@ -1467,6 +1493,9 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
   prune_superseded_images
 fi
+# Run this image, not the tag: once the lock is released, a launch with another
+# selection can move the tag before podman run starts.
+IMAGE_ID="$(podman image inspect --format '{{.Id}}' "$IMAGE_REF")"
 release_build_lock
 
 # ----------------------------------------------------------------------------
@@ -1576,7 +1605,6 @@ ENV_ARGS+=(-e "HERDR_AGENT=$HERDR_AGENT")
 # ----------------------------------------------------------------------------
 # Extra mounts: SRC[:DEST][:ro] -> -v SRC:DEST[:opts]
 # ----------------------------------------------------------------------------
-# The session home is the first mount; user mounts follow, then the rest.
 add_mount "$HOME_DIR" /home/dev
 
 for spec in "${MOUNT_SPECS[@]}"; do
@@ -1684,12 +1712,8 @@ fi
 # ----------------------------------------------------------------------------
 # Shared credentials live mount
 # ----------------------------------------------------------------------------
-# Bind-mount the ONE shared OAuth token (rw) into this session so a single
-# `--auth-login` serves every session and in-container token refreshes write
-# straight back to the shared file. Everything else in /home/dev stays isolated.
-# Concurrency note: two sessions refreshing at the exact same instant race on
-# this file (last-writer-wins). If the refresh rotates the refresh token, one
-# session may need to refresh again. Acceptable for the herdr workflow; no lock.
+# Read-write, so one --auth-login serves every session and refreshes land in the shared
+# file. Two sessions refreshing at the same instant race; the last write wins.
 SHARED_CRED_MOUNTED=0
 AUTH_CRED_FILE="$AUTH_HOME_DIR/$AGENT_CRED_REL"
 CONTAINER_CRED_PATH="/home/dev/$AGENT_CRED_REL"
@@ -1751,12 +1775,12 @@ forge_over_https() { # host helper
 # ----------------------------------------------------------------------------
 # GitHub token handoff
 # ----------------------------------------------------------------------------
-# The token stays in the host keyring and crosses over in a file in the RAM-backed
-# runtime dir, which the entrypoint reads into GH_TOKEN and deletes. Never -e:
-# podman writes those values into the container config on disk.
+# The token crosses over in a file in the runtime dir, which the entrypoint reads into
+# GH_TOKEN and deletes. Never -e: podman writes those values into the container config
+# on disk.
 GH_TOKEN_DIR=""
 
-if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
+if [[ ",$EXTRAS," == *,github,* ]]; then
   gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
   gh_token=""
   if ! command -v gh >/dev/null 2>&1; then
@@ -1786,7 +1810,7 @@ fi
 # capsule would rotate the host's refresh token and log the host out.
 GLAB_DIR=""
 
-if [[ ",$EXTRAS," == *,gitlab,* && "$AUTH_LOGIN" != "1" ]]; then
+if [[ ",$EXTRAS," == *,gitlab,* ]]; then
   glab_config_file="${GLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/glab-cli}/config.yml"
   glab_login="glab auth login --hostname $GITLAB_INSTANCE"
   glab_token=""
@@ -1865,10 +1889,10 @@ if [[ "$OFFLINE" == "1" ]]; then
   NETWORK_ARGS=(--network=none)
 fi
 
-# Allocate a pseudo-TTY only when stdin is one; a bare -t breaks piped or
-# batch runs (CI, herdr), e.g. `agent-capsule . -- -p "question" < prompt.txt`.
+# Allocate a pseudo-TTY only when both ends are one: a TTY on a pipe or a file adds
+# CRLF line ends and escape codes. Fd 3 is the stdout the run gets back.
 TTY_ARGS=(-i)
-[[ -t 0 ]] && TTY_ARGS=(-it)
+[[ -t 0 && -t 3 ]] && TTY_ARGS=(-it)
 
 # ----------------------------------------------------------------------------
 # Run
@@ -1884,16 +1908,16 @@ if [[ "$SHARED_CRED_MOUNTED" == "1" ]]; then
   echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_PATH (shared, read-write)"
 fi
 if [[ -n "$GH_TOKEN_DIR" ]]; then
-  echo ">> GitHub  : host gh login, kept in memory in the capsule; git uses HTTPS"
+  echo ">> GitHub  : host gh login ($HANDOFF_WHERE); git uses HTTPS"
 fi
 if [[ -n "$GLAB_DIR" ]]; then
-  echo ">> GitLab  : host glab login for $GITLAB_INSTANCE, kept in memory in the capsule; git uses HTTPS"
+  echo ">> GitLab  : host glab login for $GITLAB_INSTANCE ($HANDOFF_WHERE); git uses HTTPS"
 fi
 if [[ -n "$CA_DIR" ]]; then
   ca_count="$(grep -c -- '-----BEGIN CERTIFICATE-----' "$CA_DIR/extra.pem")"
   ca_noun=certificates
   [[ "$ca_count" == 1 ]] && ca_noun=certificate
-  echo ">> CA      : $CA_CERTS ($ca_count $ca_noun, kept in memory)"
+  echo ">> CA      : $CA_CERTS ($ca_count $ca_noun, $HANDOFF_WHERE)"
 fi
 # HERDR_AGENT can be pinned by the wrapper; when it diverges from --agent,
 # show both rather than misreport what actually runs.
@@ -1989,4 +2013,4 @@ exec podman run "${TTY_ARGS[@]}" --rm --init \
   "${ENV_ARGS[@]}" \
   "${MOUNT_ARGS[@]}" \
   -w "$CONTAINER_PROJECT_DIR" \
-  "$IMAGE_REF" "${RUN_CMD[@]}"
+  "$IMAGE_ID" "${RUN_CMD[@]}" >&3 3>&-
