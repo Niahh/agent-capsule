@@ -1403,13 +1403,10 @@ acquire_build_lock "$LOCK_ROOT/image.lock"
 # The refresh label records the last pull plus no-cache build. Image creation
 # time cannot represent that: cached selection builds create a new image without
 # refreshing upstream tools, and Podman exposes .Created as an ISO 8601 string.
-IMAGE_STATE="$(
-  podman image inspect \
-    --format '{{ index .Labels "io.agent-capsule.bundle" }} {{ index .Labels "io.agent-capsule.refreshed-at" }}' \
-    "$IMAGE_REF" 2>/dev/null || true
-)"
-IMAGE_BUNDLE_HASH="${IMAGE_STATE%% *}"
-IMAGE_REFRESHED_AT="${IMAGE_STATE##* }"
+image_labels='{{ index .Labels "io.agent-capsule.bundle" }} {{ index .Labels "io.agent-capsule.refreshed-at" }}'
+image_labels+=' {{ index .Labels "io.agent-capsule.selection" }}'
+IMAGE_STATE="$(podman image inspect --format "$image_labels" "$IMAGE_REF" 2>/dev/null || true)"
+read -r IMAGE_BUNDLE_HASH IMAGE_REFRESHED_AT IMAGE_SELECTION _ <<<"$IMAGE_STATE" || true
 
 NEEDS_BUILD=0
 REFRESH_REASON=""
@@ -1431,6 +1428,12 @@ fi
 
 if [[ -n "$REFRESH_REASON" ]]; then
   NEEDS_BUILD=1
+fi
+
+# A login only needs the agent CLI, and rebuilding without the integrations would make
+# the next normal run rebuild them. Any image of this agent will do; refreshes wait.
+if [[ "$AUTH_LOGIN" == "1" && "$FORCE_BUILD" != "1" && "$IMAGE_SELECTION" == "$AGENT":* ]]; then
+  NEEDS_BUILD=0
 fi
 
 if [[ "$NEEDS_BUILD" == "1" ]]; then

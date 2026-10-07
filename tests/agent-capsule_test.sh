@@ -40,6 +40,7 @@ printf 'CALL=%s\n' "${1:-}" >> "$PODMAN_LOG"
 previous=""
 bundle_hash=""
 refreshed_at=""
+selection=""
 image_ref=""
 for arg in "$@"; do
   printf 'ARG=%s\n' "$arg" >> "$PODMAN_LOG"
@@ -48,6 +49,9 @@ for arg in "$@"; do
   fi
   if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.refreshed-at=* ]]; then
     refreshed_at="${arg#*=}"
+  fi
+  if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.selection=* ]]; then
+    selection="${arg#*=}"
   fi
   if [[ "$previous" == "-t" ]]; then
     image_ref="$arg"
@@ -64,8 +68,8 @@ if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
     exit 0
   fi
   awk -F '\t' -v image="$image_ref" '
-    $1 == image { hash = $2; refreshed = $3 }
-    END { if (hash != "") print hash " " refreshed }
+    $1 == image { hash = $2; refreshed = $3; selection = $4 }
+    END { if (hash != "") print hash " " refreshed " " selection }
   ' "$PODMAN_IMAGE_STATE"
   exit 0
 fi
@@ -91,8 +95,8 @@ fi
 
 if [[ "${1:-}" == "build" && -n "$image_ref" && -n "$bundle_hash" ]]; then
   sleep "${PODMAN_BUILD_DELAY:-0}"
-  printf '%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
-    "${PODMAN_BUILD_EPOCH:-$refreshed_at}" >> "$PODMAN_IMAGE_STATE"
+  printf '%s\t%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
+    "${PODMAN_BUILD_EPOCH:-$refreshed_at}" "$selection" >> "$PODMAN_IMAGE_STATE"
 fi
 
 exit 0
@@ -1323,6 +1327,21 @@ new_case
 mkdir -p "$CASE_DIR/proj"
 (cd "$CASE_DIR" && CDPATH=".:/nonexistent" run_capsule --shell --session cdpath proj)
 assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
+
+# --auth-login only needs the agent CLI, so any image of that agent will do: rebuilding
+# without the integrations would only make the next normal run rebuild them.
+new_case
+run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
+: > "$PODMAN_LOG"
+run_capsule --auth-login --shell
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
+: > "$PODMAN_LOG"
+run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+: > "$PODMAN_LOG"
+run_capsule --agent codex --auth-login --shell
+assert_contains "$PODMAN_LOG" 'CALL=build'
 
 # The run starts the image this launch checked under the build lock, not the tag:
 # another launch with a different selection can move the tag right after the lock.
