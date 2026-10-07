@@ -131,17 +131,18 @@ jobs:
         if: matrix.agent == 'claude'
         run: |
           docker run --rm agent-capsule:test \
-            claude --plugin-dir /opt/superpowers/source --version
-          docker run --rm agent-capsule:test \
-            claude --plugin-dir /opt/anydoc/plugin --version
+            claude --plugin-dir /opt/superpowers/source --plugin-dir /opt/anydoc/plugin plugin list --json |
+            jq -e 'map(select(.enabled and .errors == null) | .id) | contains(["superpowers@inline", "anydoc@inline"])'
+      # Into a file, not a pipe: piped, opencode cuts this output off at 64 KiB.
       - name: OpenCode loads superpowers from invocation-scoped config
         if: matrix.agent == 'opencode'
         run: |
           docker run --rm -e AGENT_CAPSULE_AGENT=opencode \
             -e AGENT_CAPSULE_WITH=superpowers \
             -e 'OPENCODE_CONFIG_CONTENT={"plugin":["/opt/superpowers/source"]}' \
-            agent-capsule:test opencode debug config | \
-            grep -F '/opt/superpowers/source'
+            agent-capsule:test bash -c \
+            'opencode debug skill > /tmp/skills.json && \
+             grep -F "\"location\": \"/opt/superpowers/source/skills/" /tmp/skills.json'
       # As root, and as a non-root user like --keep-id, who does not own the image's superpowers clone.
       - name: Codex adds and removes the superpowers plugin
         if: matrix.agent == 'codex'
