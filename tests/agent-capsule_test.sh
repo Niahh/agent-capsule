@@ -511,15 +511,15 @@ done
 
 # These values must stay aligned when another agent profile is added.
 for profile in \
-  'claude|agent-capsule-dev:latest|claude|.claude/CLAUDE.md' \
-  'codex|agent-capsule-dev:latest|codex|.codex/AGENTS.md' \
-  'opencode|agent-capsule-dev:latest|opencode|.config/opencode/AGENTS.md'; do
-  IFS='|' read -r agent image command rules_path <<< "$profile"
+  'claude|claude|.claude/CLAUDE.md' \
+  'codex|codex|.codex/AGENTS.md' \
+  'opencode|opencode|.config/opencode/AGENTS.md'; do
+  IFS='|' read -r agent command rules_path <<< "$profile"
   new_case
   run_capsule --agent "$agent" --session "profile-$agent" "$ROOT_DIR" -- --version
   assert_contains "$PODMAN_LOG" "ARG=ai.agent=$agent"
   assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/CLAUDE.md:/home/dev/$rules_path:ro"
-  assert_arg_after "$PODMAN_LOG" "$image" "$command"
+  assert_arg_after "$PODMAN_LOG" agent-capsule-dev:latest "$command"
   assert_arg_after "$PODMAN_LOG" "$command" '--version'
 done
 
@@ -576,7 +576,7 @@ assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
 # A recent refresh survives a cached selection rebuild instead of being reset.
 assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.refreshed-at=$selection_refreshed_at"
 
-# So does changing the integrations, with the agent held fixed.
+# Changing only the integrations rebuilds too.
 : > "$PODMAN_LOG"
 run_capsule --agent codex --shell --with none --session selection-codex "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
@@ -791,10 +791,8 @@ assert_not_contains "$PODMAN_LOG" 'GITLAB_'
 assert_not_contains "$PODMAN_LOG" 'GLAB_CONFIG_DIR'
 assert_not_contains "$PODMAN_LOG" 'GIT_CONFIG_'
 
-# The token reaches the capsule in a glab config under the runtime dir, never on
-# the podman command line. The config binds it to the instance: glab sends
-# GITLAB_TOKEN to whatever host a command names. A keyring login leaves an empty
-# token in the host's config.yml.
+# The token crosses over in a host-bound glab config under the runtime dir, never on the
+# podman command line. A keyring login leaves an empty token in the host's config.yml.
 new_case
 mkdir -p "$CASE_DIR/glab-config"
 printf 'hosts:\n    gitlab.com:\n        token: ""\n        use_keyring: "true"\n' \
@@ -1107,7 +1105,6 @@ dockerfile_copy="$CASE_DIR/Dockerfile"
 cp "$ROOT_DIR/Dockerfile" "$dockerfile_copy"
 mkdir -p "$CASE_DIR/plugins"
 cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
-chmod -R u+w "$CASE_DIR/plugins/worklog"
 AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 : > "$PODMAN_LOG"
@@ -1194,8 +1191,6 @@ assert_contains "$OUTPUT" 'Add mcpvault to --with or AGENT_CAPSULE_WITH.'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
 run_capsule --with mcpvault,worklog --no-vault --session worklog-no-vault "$ROOT_DIR"
 assert_contains "$OUTPUT" '>> Worklog : disabled for this run (--no-vault)'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
@@ -1237,6 +1232,7 @@ AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
+# Unselected, the plugin is inert, so editing it rebuilds nothing.
 : > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with none --shell --session worklog-unselected "$ROOT_DIR"
@@ -1448,7 +1444,7 @@ rmdir "$legacy_lock_root/image.lock"
 # Shell completion asks the launcher for these two lists, so the contract is
 # one value per line, exit 0, and no podman anywhere near it.
 new_case
-PATH="$CASE_DIR:$PATH" run_capsule --agent list
+run_capsule --agent list
 [[ "$(cat "$OUTPUT")" == "$(printf 'claude\ncodex\nopencode')" ]] ||
   fail "--agent list is not one agent per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
@@ -1589,7 +1585,7 @@ touch "$CAPSULE_HOME/homes/legacy-home/.claude.json"
 run_capsule --prune-sessions
 assert_not_contains "$OUTPUT" 'legacy-home'
 
-# Codex and OpenCode write only below the top level, and that still counts as use.
+# A write below the top level still counts as use.
 new_case
 make_session_home deep-write 40
 touch "$CAPSULE_HOME/homes/deep-write/.claude/projects/p/s.jsonl"
