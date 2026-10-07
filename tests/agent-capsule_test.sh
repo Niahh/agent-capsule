@@ -3,12 +3,13 @@
 set -euo pipefail
 
 BASH_BIN="$(command -v bash)"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)"
 SCRIPT="$ROOT_DIR/agent-capsule"
 DOCKERFILE="$ROOT_DIR/Dockerfile"
 # The script owns its version; asserting a literal here breaks on every bump.
 LAUNCHER_VERSION="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$SCRIPT")"
-TEST_ROOT="$(mktemp -d)"
+# Resolved, or a symlinked temp dir would make the launcher's paths differ from it.
+TEST_ROOT="$(cd -P "$(mktemp -d)" >/dev/null && pwd)"
 # Session fixtures carry a read-only Go module cache, which plain rm -rf cannot remove.
 trap 'chmod -R u+w "$TEST_ROOT" 2>/dev/null; rm -rf "$TEST_ROOT"' EXIT
 
@@ -22,6 +23,11 @@ for leaked_variable in $(
   unset "$leaked_variable"
 done
 unset leaked_variable
+
+# Host settings the launcher or the git calls below would otherwise read.
+unset CDPATH GH_CONFIG_DIR GLAB_CONFIG_DIR XDG_CONFIG_HOME GITLAB_TOKEN GITLAB_ACCESS_TOKEN OAUTH_TOKEN \
+  GLAB_IS_OAUTH2 ANTHROPIC_API_KEY OPENAI_API_KEY
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 FAKE_BIN="$TEST_ROOT/bin"
 mkdir -p "$FAKE_BIN"
@@ -248,7 +254,9 @@ new_case() {
 run_capsule() {
   local run_output="${RUN_OUTPUT:-$OUTPUT}"
 
-  HOME="$HOST_HOME" \
+  # An empty volume option, or an SELinux host would add :z to every mount.
+  AGENT_CAPSULE_VOLOPT='' \
+    HOME="$HOST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     PODMAN_LOG="$PODMAN_LOG" \
     PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
@@ -1256,6 +1264,7 @@ done
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"
+command -v shasum >/dev/null || fail "this case needs shasum, the fallback it checks"
 for tool in bash awk tr mkdir chmod touch cp cat date dirname basename shasum rm sleep; do
   ln -s "$(command -v "$tool")" "$portable_bin/$tool"
 done
@@ -1265,6 +1274,7 @@ HOME="$HOST_HOME" \
   PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
   AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
   AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
+  XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
   "$BASH_BIN" "$SCRIPT" --shell --session shasum-fallback "$ROOT_DIR" > "$OUTPUT" 2>&1
 assert_contains "$PODMAN_LOG" 'CALL=run'
 [[ "$(file_mode "$CAPSULE_HOME/CLAUDE.md")" == "600" ]] || fail "default rules mode is not private"
