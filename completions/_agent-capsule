@@ -44,6 +44,12 @@ _agent_capsule_extras() {
   _values -s , 'integration' $extras
 }
 
+# The launcher hands every word after -- to the agent and uses $PWD as the project.
+if (( ${words[(i)--]} < CURRENT )); then
+  _files
+  return
+fi
+
 _arguments -S \
   '--agent=[pick the agent CLI]:agent:_agent_capsule_agents' \
   '--session=[use a named isolated home]:session:_agent_capsule_sessions' \
