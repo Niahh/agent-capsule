@@ -188,12 +188,14 @@ ARG AGENT=claude
 ARG CLAUDE_CODE_VERSION=""
 ARG CODEX_VERSION=""
 ARG OPENCODE_VERSION=""
+# npm skips a platform package that is not published yet, so make sure the CLI starts.
 RUN case "$AGENT" in \
       claude) npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}" ;; \
       codex) npm install -g "@openai/codex@${CODEX_VERSION:-latest}" ;; \
       opencode) npm install -g "opencode-ai@${OPENCODE_VERSION:-latest}" ;; \
       *) echo "unknown agent: $AGENT" >&2; exit 1 ;; \
     esac \
+    && "$AGENT" --version >/dev/null \
     && npm cache clean --force
 
 COPY entrypoint.sh /usr/local/bin/agent-capsule-entrypoint.sh
