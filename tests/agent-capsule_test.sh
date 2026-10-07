@@ -1828,4 +1828,42 @@ assert_contains "$DOCKERFILE" 'ARG WITH_TALOS=0'
 assert_contains "$DOCKERFILE" 'ARG WITH_GITHUB=0'
 assert_contains "$DOCKERFILE" 'ARG WITH_GITLAB=0'
 
+# Prints the bash completion candidates for a line typed up to its end, one per line.
+# bash-completion is not loaded, so this runs the fallback word splitting.
+complete_line() {
+  PATH="$completion_line_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+    COMP_LINE="$1" COMP_POINT="${#1}" "$BASH_BIN" -c \
+    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule; printf '%s\n' \"\${COMPREPLY[@]}\""
+}
+
+# = is in COMP_WORDBREAKS, so readline replaces only the text after it: a candidate
+# that repeats --opt= ends up typed twice.
+new_case
+completion_line_bin="$CASE_DIR/completion-bin"
+mkdir -p "$completion_line_bin" "$CAPSULE_HOME/homes/work" "$CASE_DIR/vaultdir"
+printf '#!%s\nexec %s %s "$@"\n' "$BASH_BIN" "$BASH_BIN" "$SCRIPT" > "$completion_line_bin/agent-capsule"
+chmod +x "$completion_line_bin/agent-capsule"
+: > "$CASE_DIR/mountfile"
+[[ "$(complete_line 'agent-capsule --agent=co')" == codex ]] || fail "--agent= completion repeats the flag"
+[[ "$(complete_line 'agent-capsule --session=wo')" == work ]] || fail "--session= completion repeats the flag"
+[[ "$(complete_line 'agent-capsule --with=an')" == anydoc ]] || fail "--with= completion repeats the flag"
+[[ "$(complete_line 'agent-capsule --with=anydoc,ex')" == anydoc,explain-diff ]] ||
+  fail "--with= list completion repeats the flag"
+[[ "$(complete_line "agent-capsule --vault=$CASE_DIR/vault")" == "$CASE_DIR/vaultdir" ]] ||
+  fail "--vault= completion repeats the flag"
+[[ "$(complete_line "agent-capsule --mount=$CASE_DIR/mountf")" == "$CASE_DIR/mountfile" ]] ||
+  fail "--mount= completion repeats the flag"
+
+# With no --agent on the line the launcher runs AGENT_CAPSULE_AGENT, so --with filters on it.
+new_case
+[[ -z "$(AGENT_CAPSULE_AGENT=codex complete_line 'agent-capsule --with wo')" ]] ||
+  fail "--with completion offers worklog under AGENT_CAPSULE_AGENT=codex"
+[[ "$(AGENT_CAPSULE_AGENT=codex complete_line 'agent-capsule --agent claude --with wo')" == worklog ]] ||
+  fail "--agent on the line does not override AGENT_CAPSULE_AGENT in --with completion"
+
+# --auth-login keeps its home under auth-home/, so homes/_auth is an ordinary session.
+new_case
+mkdir -p "$CAPSULE_HOME/homes/_auth"
+[[ "$(complete_line 'agent-capsule --session _a')" == _auth ]] || fail "--session completion hides the _auth session"
+
 echo "PASS: $pass_count launcher scenarios"

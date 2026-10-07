@@ -18,18 +18,16 @@ _agent_capsule_sessions() {
   local -a sessions
 
   [[ -d $homes ]] || return 1
-  # _auth is the reserved home --auth-login uses.
   sessions=(${homes}/*(/N:t))
-  sessions=(${sessions:#_auth})
   (( $#sessions )) || return 1
   _describe -t sessions 'session' sessions
 }
 
 _agent_capsule_extras() {
   local -a extras
-  local agent index
+  local agent=${AGENT_CAPSULE_AGENT:-} index
 
-  # --with filters on the agent already named on the line.
+  # --with filters on the agent the launcher will run: --agent on the line, else AGENT_CAPSULE_AGENT.
   for (( index = 1; index < CURRENT; index++ )); do
     case $words[index] in
       --agent) agent=$words[index+1] ;;
@@ -45,6 +43,12 @@ _agent_capsule_extras() {
   # Comma-separated and repeatable, so complete one element at a time.
   _values -s , 'integration' $extras
 }
+
+# The launcher hands every word after -- to the agent and uses $PWD as the project.
+if (( ${words[(i)--]} < CURRENT )); then
+  _files
+  return
+fi
 
 _arguments -S \
   '--agent=[pick the agent CLI]:agent:_agent_capsule_agents' \
