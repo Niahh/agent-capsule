@@ -637,6 +637,101 @@ AGENT_CAPSULE_GH_TOKEN_FILE="$CASE_DIR/token" "$BASH_BIN" "$ROOT_DIR/entrypoint.
   "$BASH_BIN" -c 'printf "%s" "$GH_TOKEN"; [[ ! -e "$AGENT_CAPSULE_GH_TOKEN_FILE" ]]' > "$OUTPUT"
 [[ "$(<"$OUTPUT")" == gho_entry ]] || fail "entrypoint did not export GH_TOKEN"
 
+# Without a private CA the capsule gets no CA mount and no CA variable.
+new_case
+run_capsule --shell --session ca-off "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/ca'
+assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_CA_DIR'
+
+# A configured CA file alone exposes nothing, so it is safe to export from a shell
+# profile: only --ca mounts it. Nor is the file checked, so a stale path blocks no run.
+new_case
+printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n' > "$CASE_DIR/corp.pem"
+for configured_ca in "$CASE_DIR/corp.pem" "$CASE_DIR/missing.pem"; do
+  : > "$PODMAN_LOG"
+  AGENT_CAPSULE_CA_CERTS="$configured_ca" run_capsule --shell --session ca-configured "$ROOT_DIR"
+  assert_contains "$PODMAN_LOG" 'CALL=run'
+  assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/ca'
+  assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_CA_DIR'
+done
+
+# --ca without a file to trust stops the launch before podman runs.
+new_case
+set +e
+run_capsule --ca --shell --session ca-unset "$ROOT_DIR"
+status=$?
+set -e
+assert_status_fails "$status"
+assert_contains "$OUTPUT" 'AGENT_CAPSULE_CA_CERTS'
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# Only certificates cross over, in a private file under the runtime dir: a key
+# kept in the same PEM must never reach the capsule. Windows exports use CRLF.
+new_case
+{
+  printf 'subject=CN = Corp Root\n'
+  printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n'
+  printf -- '-----BEGIN PRIVATE KEY-----\nMIGHcapsuleSecretKey\n-----END PRIVATE KEY-----\n'
+  printf -- '-----BEGIN CERTIFICATE-----\r\nMIIBcapsuleRootTwo\r\n-----END CERTIFICATE-----\r\n'
+} > "$CASE_DIR/corp.pem"
+AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" run_capsule --ca --shell --session ca-on "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca'
+assert_not_contains "$PODMAN_LOG" 'MIIBcapsuleRoot'
+assert_contains "$OUTPUT" '2 certificates'
+ca_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/ca\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+[[ "$ca_dir" == "$TEST_ROOT/xdg/"* ]] || fail "CA dir is outside the runtime dir: $ca_dir"
+expected_ca="$(printf -- '%s\n' '-----BEGIN CERTIFICATE-----' MIIBcapsuleRootOne \
+  '-----END CERTIFICATE-----' '-----BEGIN CERTIFICATE-----' MIIBcapsuleRootTwo \
+  '-----END CERTIFICATE-----')"
+[[ "$(<"$ca_dir/extra.pem")" == "$expected_ca" ]] || fail "extra.pem does not hold exactly the certificates"
+[[ "$(file_mode "$ca_dir")" == 700 ]] || fail "CA dir is not private"
+[[ "$(file_mode "$ca_dir/extra.pem")" == 600 ]] || fail "extra.pem is not private"
+
+# A CA file that is missing or holds no certificate stops the launch before podman runs.
+new_case
+printf -- '-----BEGIN PRIVATE KEY-----\nMIGHcapsuleSecretKey\n-----END PRIVATE KEY-----\n' \
+  > "$CASE_DIR/key-only.pem"
+for bad_ca in "$CASE_DIR/missing.pem" "$CASE_DIR/key-only.pem"; do
+  set +e
+  AGENT_CAPSULE_CA_CERTS="$bad_ca" run_capsule --ca --shell --session ca-bad "$ROOT_DIR"
+  status=$?
+  set -e
+  assert_status_fails "$status"
+  assert_contains "$OUTPUT" "$bad_ca"
+  assert_not_contains "$PODMAN_LOG" 'CALL='
+done
+
+# The entrypoint points TLS clients at the CA, so its dir lives as long as the
+# session. The next launch removes those of finished launches, never a live one's.
+new_case
+runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+mkdir -p "$runtime_root/ca-999999999" "$runtime_root/ca-$$"
+touch "$runtime_root/ca-999999999/extra.pem" "$runtime_root/ca-$$/extra.pem"
+run_capsule --shell --session ca-sweep "$ROOT_DIR"
+[[ ! -e "$runtime_root/ca-999999999" ]] || fail "a finished launch's CA dir survived"
+[[ -e "$runtime_root/ca-$$/extra.pem" ]] || fail "a live launch's CA dir was removed"
+rm -rf "$runtime_root/ca-$$"
+
+# The entrypoint adds the CA to what the capsule already trusts. git and Node read
+# neither SSL_CERT_FILE nor each other's variable, so each gets its own.
+new_case
+mkdir -p "$CASE_DIR/ca"
+printf 'BASE ROOTS\n' > "$CASE_DIR/base.pem"
+printf 'EXTRA ROOT\n' > "$CASE_DIR/ca/extra.pem"
+# shellcheck disable=SC2016
+SSL_CERT_FILE="$CASE_DIR/base.pem" AGENT_CAPSULE_CA_DIR="$CASE_DIR/ca" \
+  "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" "$BASH_BIN" -c \
+  'printf "%s\n" "$SSL_CERT_FILE" "$GIT_SSL_CAINFO" "$NODE_EXTRA_CA_CERTS"; cat "$SSL_CERT_FILE"' \
+  > "$OUTPUT"
+expected_trust="$(printf '%s\n' "$CASE_DIR/ca/bundle.pem" "$CASE_DIR/ca/bundle.pem" \
+  "$CASE_DIR/ca/extra.pem" 'BASE ROOTS' 'EXTRA ROOT')"
+[[ "$(<"$OUTPUT")" == "$expected_trust" ]] || fail "entrypoint did not extend the trust store: $(<"$OUTPUT")"
+# shellcheck disable=SC2016
+env -u SSL_CERT_FILE -u GIT_SSL_CAINFO -u NODE_EXTRA_CA_CERTS \
+  "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" "$BASH_BIN" -c \
+  'printf "%s" "${SSL_CERT_FILE-}${GIT_SSL_CAINFO-}${NODE_EXTRA_CA_CERTS-}"' > "$OUTPUT"
+[[ ! -s "$OUTPUT" ]] || fail "entrypoint changed TLS trust without a CA: $(<"$OUTPUT")"
+
 new_case
 run_capsule --agent claude --with superpowers,anydoc \
   --session claude-integrations "$ROOT_DIR"

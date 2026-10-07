@@ -256,6 +256,7 @@ overrides.
 - `--with TOOL[,TOOL]`: activate integrations; `list` prints them and `none` clears
   the selection.
 - `--mount SRC[:DEST][:ro]`: add a file or directory bind mount; repeat as needed.
+- `--ca`: trust the private CAs in `AGENT_CAPSULE_CA_CERTS` for this run.
 - `--vault[=PATH]`: mount the configured vault read-write, or select one with
   `=PATH`.
 - `--no-vault`: disable the vault and mcpvault for one run.
@@ -383,6 +384,30 @@ The agent can read `GH_TOKEN`, and the token can reach every repository your acc
 can. Protect the branches that matter. The launcher warns when the host `gh` stores
 its token in plain text, which it does when no keyring is available.
 
+## Private CA
+
+To reach self-hosted resources whose certificates come from a private CA, name the CA
+in PEM form and pass `--ca` to the runs that need it:
+
+```sh
+export AGENT_CAPSULE_CA_CERTS=/usr/local/share/ca-certificates/corp-root.crt
+agent-capsule --ca .
+```
+
+- The variable alone mounts nothing, so it is safe to export from a shell profile.
+  Only a run started with `--ca` gets the certificates, and only it trusts the CA.
+- The file can hold several certificates. Only the certificate blocks cross over, so
+  a private key kept in the same file stays on the host.
+- The certificates are copied to `$XDG_RUNTIME_DIR`, which is in memory, and mounted
+  into the capsule. They are never built into the image. The first launch after the
+  session ends deletes the copy. Without `$XDG_RUNTIME_DIR`, as on macOS, the copy is
+  in `$TMPDIR` instead, which is on disk.
+- The entrypoint writes a bundle of the system CAs plus yours next to them, and
+  points `SSL_CERT_FILE` (curl, and Go tools such as `gh` and `kubectl`),
+  `GIT_SSL_CAINFO` (git) and `NODE_EXTRA_CA_CERTS` (Node) at it. `/etc` is not
+  changed, so this works as root and under `--keep-id`.
+- A client that reads none of these, or ships its own CA list, does not trust the CA.
+
 ## Persistent defaults
 
 Every setting is an `AGENT_CAPSULE_*` environment variable. To stop retyping the
@@ -449,6 +474,8 @@ Shared state and mounts:
 - `AGENT_CAPSULE_MOUNT_VAULT=0`: set to `1` to mount the configured vault by default.
 - `AGENT_CAPSULE_VOLOPT=`: explicit Podman volume option, normally detected from
   SELinux support.
+- `AGENT_CAPSULE_CA_CERTS=`: PEM file of private CAs that `--ca` trusts inside the
+  capsule. See [Private CA](#private-ca).
 
 ## State layout
 

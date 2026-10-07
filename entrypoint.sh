@@ -14,6 +14,16 @@ if [[ -n "${AGENT_CAPSULE_GH_TOKEN_FILE:-}" && -f "$AGENT_CAPSULE_GH_TOKEN_FILE"
   rm -f "$AGENT_CAPSULE_GH_TOKEN_FILE"
 fi
 
+# Adds the private CA to what the capsule already trusts. git and Node read
+# neither SSL_CERT_FILE nor each other's variable, so each gets its own.
+if [[ -n "${AGENT_CAPSULE_CA_DIR:-}" && -f "$AGENT_CAPSULE_CA_DIR/extra.pem" ]]; then
+  cat "${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}" "$AGENT_CAPSULE_CA_DIR/extra.pem" \
+    > "$AGENT_CAPSULE_CA_DIR/bundle.pem"
+  export SSL_CERT_FILE="$AGENT_CAPSULE_CA_DIR/bundle.pem"
+  export GIT_SSL_CAINFO="$SSL_CERT_FILE"
+  export NODE_EXTRA_CA_CERTS="$AGENT_CAPSULE_CA_DIR/extra.pem"
+fi
+
 skills_dir="${AGENT_CAPSULE_SKILLS_DIR:-}"
 if [[ -n "$skills_dir" ]]; then
   skill="$skills_dir/explain-diff-html"
