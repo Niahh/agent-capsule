@@ -983,12 +983,17 @@ host_time_zone() {
   local tz="${TZ:-}"
   local target
 
-  # glibc reads ":Area/City" as "Area/City". ":/path" names a host file, so it falls back to the link.
+  # glibc reads ":Area/City" as "Area/City", and a path into a zoneinfo tree names its zone.
   [[ "$tz" != :[!/]* ]] || tz="${tz#:}"
-  if [[ -n "$tz" && "${tz:0:1}" != ":" ]]; then
+  if [[ "$tz" == *zoneinfo/* ]]; then
+    printf '%s\n' "${tz#*zoneinfo/}"
+    return 0
+  fi
+  if [[ -n "$tz" && "$tz" != [:/]* ]]; then
     printf '%s\n' "$tz"
     return 0
   fi
+  # Any other path names a host file, which means nothing in the container.
   target="$(readlink /etc/localtime 2>/dev/null || true)"
   if [[ "$target" == *zoneinfo/* ]]; then
     printf '%s\n' "${target#*zoneinfo/}"
