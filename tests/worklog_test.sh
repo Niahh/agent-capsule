@@ -229,11 +229,11 @@ test_leaves_the_real_index_untouched() {
   gitc add main.go
   printf 'unstaged\n' >> "$REPO/main.go"
   local before after
-  before="$(sha256sum "$REPO/.git/index")"
+  before="$(git hash-object --stdin < "$REPO/.git/index")"
   hook snapshot "do it" false > /dev/null
   printf 'new\n' > "$REPO/new.go"
   hook check "" false > /dev/null
-  after="$(sha256sum "$REPO/.git/index")"
+  after="$(git hash-object --stdin < "$REPO/.git/index")"
   if [[ "$before" == "$after" ]]; then pass; else fail "real index changed"; fi
 }
 
@@ -425,7 +425,8 @@ for t in $(declare -F | awk '$3 ~ /^test_/ {print $3}'); do
   "$t"
 done
 
-FAILS="$(wc -l < "$FAILS_FILE")"
+# Arithmetic drops the padding that BSD wc adds.
+FAILS=$(($(wc -l < "$FAILS_FILE")))
 if [[ "$FAILS" == 0 ]]; then
   echo "PASS: $PASSES worklog checks"
 else
