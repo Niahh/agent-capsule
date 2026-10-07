@@ -3,7 +3,8 @@
 // "snapshot" runs on UserPromptSubmit, "check" on Stop, "procedure" prints the procedure for /log-work.
 import { execFileSync } from 'node:child_process';
 import {
-  copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync,
+  writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -16,6 +17,8 @@ const noise = [
   '**/zz_generated*',
 ].map((glob) => `:(exclude,glob)${glob}`);
 const maxListed = 20;
+// Session homes persist, so idle sessions are pruned. A week is safe: a live one would only lose its baseline.
+const idleMs = 7 * 24 * 60 * 60 * 1000;
 
 const stripFrontmatter = (text) => text.replace(/^---\n[\s\S]*?\n---\n+/, '').trim();
 
@@ -32,8 +35,9 @@ function git(dir, args, env = {}) {
   return execFileSync('git', ['-C', dir, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
+    maxBuffer: Infinity,
     stdio: ['ignore', 'pipe', 'ignore'],
-  }).trim();
+  }).replace(/\n$/, ''); // Not trim(): a path can end in a space.
 }
 
 // A throwaway index also captures untracked files and leaves the real index alone. Seeding it from the real one
@@ -44,14 +48,27 @@ function snapshot(top, objects) {
   try {
     const index = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
     if (existsSync(index)) copyFileSync(index, env.GIT_INDEX_FILE);
-    git(top, ['add', '-A'], env);
+    try {
+      git(top, ['add', '-A', '--ignore-errors'], env);
+    } catch (err) {
+      // Status 1 means some paths, like a nested repository with no commit, could not be added but the rest were.
+      if (err.status !== 1) throw err;
+    }
     return git(top, ['write-tree'], env);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-function reason(top, numstat) {
+function head(top) {
+  try {
+    return git(top, ['rev-parse', '--verify', '-q', 'HEAD']);
+  } catch {
+    return ''; // No commit yet.
+  }
+}
+
+function reason(top, numstat, headMoved) {
   const rows = numstat.split('\n').map((row) => row.split('\t'));
   const listed = rows.slice(0, maxListed).map(([added, deleted, path]) =>
     added === '-' ? `- ${path} (binary)` : `- ${path} (+${added} -${deleted})`);
@@ -61,6 +78,7 @@ function reason(top, numstat) {
     `Stop hook: automatic work log. Today is ${today}.`,
     `Files changed in ${top} during this turn, lockfiles and generated files left out:`,
     ...listed,
+    ...(headMoved ? ['HEAD moved during this turn: leave out what a pull, merge or checkout brought in.'] : []),
     '',
     'First apply this test: does this work introduce a durable change to behavior, architecture, configuration or',
     'project knowledge that would be worth finding later? Formatting, line wrapping, typos, version bumps and',
@@ -104,30 +122,53 @@ const save = (state) => {
 };
 // Snapshots write to a private object store that reads the repository's as an alternate, so the repository never
 // collects copies of the worktree.
-const objects = {
-  GIT_OBJECT_DIRECTORY: join(objectsRoot, sessionId),
-  GIT_ALTERNATE_OBJECT_DIRECTORIES: git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']),
+const alternate = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
+const objects = (store) => ({ GIT_OBJECT_DIRECTORY: store });
+const sessionObjects = join(objectsRoot, sessionId);
+const newStore = () => {
+  mkdirSync(sessionObjects, { recursive: true });
+  const store = mkdtempSync(join(sessionObjects, 'objects-'));
+  // A file, not GIT_ALTERNATE_OBJECT_DIRECTORIES, which splits the path on any ':'.
+  mkdirSync(join(store, 'info'));
+  writeFileSync(join(store, 'info', 'alternates'), `${alternate}\n`);
+  return store;
 };
 
 if (mode === 'snapshot') {
+  // A fresh store keeps the saved baseline readable if this snapshot fails.
+  const store = newStore();
+  const skip = String(input.prompt ?? '').includes('#no-doc');
+  save({ top, store, head: head(top), tree: snapshot(top, objects(store)), skip });
   // A prompt replaces the baseline, so the objects of earlier snapshots are garbage.
-  rmSync(objects.GIT_OBJECT_DIRECTORY, { recursive: true, force: true });
-  mkdirSync(objects.GIT_OBJECT_DIRECTORY, { recursive: true });
-  save({ top, tree: snapshot(top, objects), skip: String(input.prompt ?? '').includes('#no-doc') });
+  for (const name of readdirSync(sessionObjects)) {
+    if (join(sessionObjects, name) !== store) rmSync(join(sessionObjects, name), { recursive: true, force: true });
+  }
+  const mtime = (path) => statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+  for (const name of new Set([...readdirSync(stateDir), ...readdirSync(objectsRoot)])) {
+    const paths = [join(stateDir, name), join(objectsRoot, name)];
+    if (paths.some((path) => mtime(path) > Date.now() - idleMs)) continue;
+    for (const path of paths) rmSync(path, { recursive: true, force: true });
+  }
 } else {
-  mkdirSync(objects.GIT_OBJECT_DIRECTORY, { recursive: true });
   let base = null;
   try {
     base = JSON.parse(readFileSync(stateFile, 'utf8'));
   } catch {
     // No prompt seen yet in this session: this check only sets the baseline.
   }
-  const tree = snapshot(top, objects);
+  // The diff reads both trees from the baseline's store. A baseline from before stores were
+  // per snapshot, or whose store was pruned, cannot be read and only gets replaced.
+  const usable = base?.top === top && Boolean(base.store) && existsSync(base.store);
+  const store = usable ? base.store : newStore();
+  const tree = snapshot(top, objects(store));
+  const commit = head(top);
   // A turn can start without a prompt, when a background task ends: rebaseline so it does not see this work again.
-  save({ top, tree, skip: false });
-  if (!input.stop_hook_active && base?.top === top && !base.skip) {
+  save({ top, store, head: commit, tree, skip: false });
+  if (!input.stop_hook_active && usable && !base.skip) {
     const diff = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...noise];
-    const numstat = git(top, diff, objects);
-    if (numstat) process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat) }));
+    const numstat = git(top, diff, objects(store));
+    if (numstat) {
+      process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat, base.head !== commit) }));
+    }
   }
 }

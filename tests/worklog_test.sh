@@ -2,7 +2,7 @@
 # Tests for the worklog plugin hook. Run: bash tests/worklog_test.sh
 set -uo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)"
 HOOK="${HOOK:-$ROOT_DIR/plugins/worklog/hooks/worklog.mjs}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -27,7 +27,6 @@ setup() {
   proc="$WORK/case/procedure.md"
   SID="s1"
   mkdir -p "$T_HOME" "$T_VAULT" "$REPO"
-  echo note > "$T_VAULT/note.md"
   git -C "$REPO" init -q
   printf 'a\n' > "$REPO/main.go"
   gitc add main.go
@@ -75,7 +74,8 @@ test_blocks_after_a_turn_that_edits() {
   setup
   hook snapshot "do it" false > /dev/null
   printf 'b\n' >> "$REPO/main.go"
-  assert_blocks "edit" "$(hook check "" false)" "main.go" "$(date +%A)" "$(date +%G-W%V)" \
+  # hook() clears the environment, so both sides pin the time zone.
+  assert_blocks "edit" "$(hook check "" false TZ=UTC)" "main.go" "$(TZ=UTC date +%A)" "$(TZ=UTC date +%G-W%V)" \
     "durable change to behavior"
 }
 
@@ -126,6 +126,15 @@ test_no_doc_skips_only_that_turn() {
   assert_blocks "after #no-doc" "$(hook check "" false)" "main.go"
 }
 
+test_no_doc_does_not_reach_a_turn_without_a_prompt() {
+  setup
+  hook snapshot "try this #no-doc" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  hook check "" false > /dev/null
+  printf 'c\n' >> "$REPO/main.go"
+  assert_blocks "turn after #no-doc" "$(hook check "" false)" "main.go"
+}
+
 test_counts_work_committed_during_the_turn() {
   setup
   hook snapshot "do it" false > /dev/null
@@ -134,11 +143,57 @@ test_counts_work_committed_during_the_turn() {
   assert_blocks "committed" "$(hook check "" false)" "main.go"
 }
 
+test_flags_changes_brought_in_by_git() {
+  setup
+  gitc checkout -q -b upstream
+  printf 'upstream\n' > "$REPO/upstream.go"
+  gitc add upstream.go
+  gitc commit -q -m upstream
+  gitc checkout -q -
+  hook snapshot "pull it" false > /dev/null
+  gitc merge -q upstream
+  assert_blocks "head moved" "$(hook check "" false)" "upstream.go" "HEAD moved during this turn"
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  local reason
+  reason="$(reason_of "$(hook check "" false)")"
+  if [[ "$reason" != *"HEAD moved"* ]]; then pass; else fail "HEAD reported as moved"; fi
+}
+
+test_works_before_the_first_commit() {
+  setup
+  rm -rf "$REPO/.git"
+  git -C "$REPO" init -q
+  hook snapshot "do it" false > /dev/null
+  printf 'new\n' > "$REPO/new.go"
+  assert_blocks "no commit" "$(hook check "" false)" "new.go"
+}
+
 test_counts_new_untracked_files() {
   setup
   hook snapshot "do it" false > /dev/null
   printf 'new\n' > "$REPO/new.go"
   assert_blocks "untracked" "$(hook check "" false)" "new.go"
+}
+
+test_lists_a_change_of_thousands_of_files() {
+  # Their listing outgrows the 1 MiB that node buffers by default.
+  setup
+  local long
+  long="$(printf '%0230d' 0)"
+  hook snapshot "do it" false > /dev/null
+  (cd "$REPO" && seq 5000 | sed "s/^/$long-/" | xargs touch)
+  assert_blocks "large change" "$(hook check "" false)" "- and 4980 more"
+}
+
+test_skips_paths_git_cannot_add() {
+  setup
+  mkdir "$REPO/nested"
+  git -C "$REPO/nested" init -q
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  printf 'new\n' > "$REPO/new.go"
+  assert_blocks "unaddable path" "$(hook check "" false)" "main.go" "new.go"
 }
 
 test_does_not_report_the_same_work_twice() {
@@ -150,17 +205,35 @@ test_does_not_report_the_same_work_twice() {
   assert_empty "second check" "$(hook check "" false)"
 }
 
+test_first_check_only_sets_the_baseline() {
+  setup
+  printf 'b\n' >> "$REPO/main.go"
+  assert_empty "check before snapshot" "$(hook check "" false)"
+  printf 'c\n' >> "$REPO/main.go"
+  assert_blocks "check after check" "$(hook check "" false)" "main.go"
+}
+
+test_ignores_a_baseline_from_another_repository() {
+  setup
+  hook snapshot "do it" false > /dev/null
+  REPO="$WORK/case/other"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  printf 'other\n' > "$REPO/other.go"
+  assert_empty "other repository" "$(hook check "" false)"
+}
+
 test_leaves_the_real_index_untouched() {
   setup
   printf 'staged\n' >> "$REPO/main.go"
   gitc add main.go
   printf 'unstaged\n' >> "$REPO/main.go"
   local before after
-  before="$(sha256sum "$REPO/.git/index")"
+  before="$(git hash-object --stdin < "$REPO/.git/index")"
   hook snapshot "do it" false > /dev/null
   printf 'new\n' > "$REPO/new.go"
   hook check "" false > /dev/null
-  after="$(sha256sum "$REPO/.git/index")"
+  after="$(git hash-object --stdin < "$REPO/.git/index")"
   if [[ "$before" == "$after" ]]; then pass; else fail "real index changed"; fi
 }
 
@@ -178,15 +251,83 @@ test_keeps_snapshots_out_of_the_repository() {
 
 test_drops_old_snapshot_objects_on_each_prompt() {
   setup
-  local blob
+  local blob object
   blob="$(printf 'gone\n' | git hash-object --stdin)"
+  object="*/${blob:0:2}/${blob:2}"
   hook snapshot "do it" false > /dev/null
   printf 'gone\n' > "$REPO/gone.go"
   hook check "" false > /dev/null
-  [[ -e "$T_HOME/.cache/worklog/$SID/${blob:0:2}/${blob:2}" ]] || fail "test expects the private object store"
+  [[ -n "$(find "$T_HOME/.cache/worklog" -path "$object")" ]] || fail "test expects the private object store"
   rm "$REPO/gone.go"
   hook snapshot "next" false > /dev/null
-  if [[ ! -e "$T_HOME/.cache/worklog/$SID/${blob:0:2}/${blob:2}" ]]; then pass; else fail "old snapshot kept"; fi
+  if [[ -z "$(find "$T_HOME/.cache/worklog" -path "$object")" ]]; then pass; else fail "old snapshot kept"; fi
+}
+
+test_prunes_sessions_idle_for_a_week() {
+  setup
+  local sid cache="$T_HOME/.cache/worklog" state="$T_HOME/.claude/worklog"
+  mkdir -p "$state"
+  for sid in idle recent half; do
+    mkdir -p "$cache/$sid"
+    echo '{}' > "$state/$sid"
+  done
+  # A session is idle only when both its state and its store are.
+  touch -t 202001010000 "$cache/idle" "$state/idle" "$state/half"
+  hook snapshot "do it" false > /dev/null
+  if [[ ! -e "$cache/idle" && ! -e "$state/idle" ]]; then pass; else fail "idle session kept"; fi
+  for sid in recent half "$SID"; do
+    if [[ -e "$cache/$sid" && -e "$state/$sid" ]]; then pass; else fail "session $sid pruned"; fi
+  done
+}
+
+test_keeps_the_baseline_when_a_snapshot_fails() {
+  setup
+  # Uncommitted work puts the baseline's objects in the private store.
+  printf 'pending\n' > "$REPO/pending.go"
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  cp "$REPO/.git/index" "$WORK/case/index"
+  printf 'corrupt' > "$REPO/.git/index"
+  printf '{"session_id":"%s","cwd":"%s","prompt":"next"}' "$SID" "$REPO" |
+    env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_VAULT_DEST="$T_VAULT" node "$HOOK" snapshot > /dev/null 2>&1
+  cp "$WORK/case/index" "$REPO/.git/index"
+  assert_blocks "failed snapshot" "$(hook check "" false)" "main.go"
+}
+
+test_ignores_a_baseline_without_its_store() {
+  local variant objects_before
+  # A state file from before stores were per snapshot, or one whose store was pruned.
+  for variant in old-format pruned; do
+    setup
+    hook snapshot "do it" false > /dev/null
+    if [[ "$variant" == old-format ]]; then
+      node -e 'const fs = require("fs"); const s = JSON.parse(fs.readFileSync(process.argv[1]));
+        delete s.store; fs.writeFileSync(process.argv[1], JSON.stringify(s));' "$T_HOME/.claude/worklog/$SID"
+    else
+      rm -rf "$T_HOME/.cache/worklog/$SID"
+    fi
+    printf 'b\n' >> "$REPO/main.go"
+    objects_before="$(find "$REPO/.git/objects" -type f | wc -l)"
+    assert_empty "$variant baseline" "$(hook check "" false)"
+    if [[ "$(find "$REPO/.git/objects" -type f | wc -l)" == "$objects_before" ]]; then pass; else
+      fail "$variant baseline: the check wrote objects into the repository"
+    fi
+  done
+}
+
+test_handles_unusual_repository_paths() {
+  local dir
+  for dir in "repo " "re:po"; do
+    setup
+    mv "$REPO" "$WORK/case/$dir"
+    REPO="$WORK/case/$dir"
+    # An old mtime stops git from rehashing main.go, so the snapshot must read the repository's objects.
+    touch -t 202001010000 "$REPO/main.go"
+    gitc update-index -q --refresh
+    hook snapshot "do it" false > /dev/null
+    printf 'b\n' >> "$REPO/main.go"
+    assert_blocks "repository path '$dir'" "$(hook check "" false)" "main.go"
+  done
 }
 
 test_silent_outside_a_git_repo() {
@@ -278,11 +419,35 @@ test_lists_unusual_file_names() {
   assert_blocks "file names" "$(hook check "" false)" "with space.go" "café.go"
 }
 
+test_labels_binary_files() {
+  setup
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  printf 'a\0b' > "$REPO/image.bin"
+  assert_blocks "binary" "$(hook check "" false)" "- image.bin (binary)" "- main.go (+1 -0)"
+}
+
+test_lists_twenty_files_at_most() {
+  setup
+  local out rows
+  hook snapshot "do it" false > /dev/null
+  (cd "$REPO" && seq 20 | sed 's/$/.go/' | xargs touch)
+  rows="$(reason_of "$(hook check "" false)" | grep -c '^- ')"
+  if [[ "$rows" == 20 ]]; then pass; else fail "20 files: $rows rows"; fi
+  hook snapshot "next" false > /dev/null
+  (cd "$REPO" && seq 21 | sed 's/$/.txt/' | xargs touch)
+  out="$(hook check "" false)"
+  assert_blocks "21 files" "$out" "- and 1 more"
+  rows="$(reason_of "$out" | grep -c '^- ')"
+  if [[ "$rows" == 21 ]]; then pass; else fail "21 files: $rows rows"; fi
+}
+
 for t in $(declare -F | awk '$3 ~ /^test_/ {print $3}'); do
   "$t"
 done
 
-FAILS="$(wc -l < "$FAILS_FILE")"
+# Arithmetic drops the padding that BSD wc adds.
+FAILS=$(($(wc -l < "$FAILS_FILE")))
 if [[ "$FAILS" == 0 ]]; then
   echo "PASS: $PASSES worklog checks"
 else
