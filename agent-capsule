@@ -65,17 +65,19 @@ acquire_build_lock() {
   local stale_path=""
 
   while ! (set -o noclobber; printf '%s\n' "$$" > "$lock_path") 2>/dev/null; do
-    # Versions before 0.3 used a directory lock with no owner metadata. It may
-    # belong to a live older launcher, so only the user can decide it is stale.
+    # No version creates a directory here, and one would never go away: say so
+    # instead of waiting on it forever.
     if [[ -d "$lock_path" ]]; then
-      echo "Legacy directory lock found: $lock_path" >&2
-      echo "Wait for older builds to finish, then remove the legacy directory lock." >&2
+      echo "Not a lock file: $lock_path. Remove it, then run again." >&2
       return 1
     elif [[ -f "$lock_path" ]]; then
       lock_owner="$(<"$lock_path")"
       if [[ "$lock_owner" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_owner" 2>/dev/null; then
         stale_path="$lock_path.stale.$$"
         if mv "$lock_path" "$stale_path" 2>/dev/null; then
+          # Another waiter may have replaced the dead lock since it was read. Give a
+          # live one back; ln fails rather than overwrite a lock taken meanwhile.
+          [[ "$(<"$stale_path")" == "$lock_owner" ]] || ln "$stale_path" "$lock_path" 2>/dev/null || true
           rm -f "$stale_path"
           continue
         fi

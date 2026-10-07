@@ -1468,8 +1468,7 @@ timeout 2 env \
 [[ "$status" == "0" ]] || fail "stale image lock was not reclaimed"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
-# A directory lock belongs to an older launcher and has no owner metadata. It
-# must be preserved because that launcher may still be building.
+# A directory at the lock path is reported and left alone, never waited on.
 new_case
 legacy_lock_root="$TEST_ROOT/xdg/agent-capsule-$UID"
 mkdir -p "$legacy_lock_root/image.lock"
@@ -1485,7 +1484,7 @@ timeout 2 env \
   "$BASH_BIN" "$SCRIPT" --shell --session legacy-lock "$ROOT_DIR" > "$OUTPUT" 2>&1 || status=$?
 assert_status_fails "$status"
 [[ -d "$legacy_lock_root/image.lock" ]] || fail "legacy image lock was removed"
-assert_contains "$OUTPUT" 'legacy directory lock'
+assert_contains "$OUTPUT" 'Not a lock file'
 rmdir "$legacy_lock_root/image.lock"
 
 # Shell completion asks the launcher for these two lists, so the contract is
