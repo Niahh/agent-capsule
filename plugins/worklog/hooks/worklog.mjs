@@ -34,7 +34,7 @@ function git(dir, args, env = {}) {
     env: { ...process.env, ...env },
     maxBuffer: Infinity,
     stdio: ['ignore', 'pipe', 'ignore'],
-  }).trim();
+  }).replace(/\n$/, ''); // Not trim(): a path can end in a space.
 }
 
 // A throwaway index also captures untracked files and leaves the real index alone. Seeding it from the real one
@@ -111,11 +111,15 @@ const save = (state) => {
 // Snapshots write to a private object store that reads the repository's as an alternate, so the repository never
 // collects copies of the worktree.
 const alternate = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
-const objects = (store) => ({ GIT_OBJECT_DIRECTORY: store, GIT_ALTERNATE_OBJECT_DIRECTORIES: alternate });
+const objects = (store) => ({ GIT_OBJECT_DIRECTORY: store });
 const sessionObjects = join(objectsRoot, sessionId);
 const newStore = () => {
   mkdirSync(sessionObjects, { recursive: true });
-  return mkdtempSync(join(sessionObjects, 'objects-'));
+  const store = mkdtempSync(join(sessionObjects, 'objects-'));
+  // A file, not GIT_ALTERNATE_OBJECT_DIRECTORIES, which splits the path on any ':'.
+  mkdirSync(join(store, 'info'));
+  writeFileSync(join(store, 'info', 'alternates'), `${alternate}\n`);
+  return store;
 };
 
 if (mode === 'snapshot') {

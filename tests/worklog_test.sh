@@ -224,6 +224,21 @@ test_keeps_the_baseline_when_a_snapshot_fails() {
   assert_blocks "failed snapshot" "$(hook check "" false)" "main.go"
 }
 
+test_handles_unusual_repository_paths() {
+  local dir
+  for dir in "repo " "re:po"; do
+    setup
+    mv "$REPO" "$WORK/case/$dir"
+    REPO="$WORK/case/$dir"
+    # An old mtime stops git from rehashing main.go, so the snapshot must read the repository's objects.
+    touch -t 202001010000 "$REPO/main.go"
+    gitc update-index -q --refresh
+    hook snapshot "do it" false > /dev/null
+    printf 'b\n' >> "$REPO/main.go"
+    assert_blocks "repository path '$dir'" "$(hook check "" false)" "main.go"
+  done
+}
+
 test_silent_outside_a_git_repo() {
   setup
   REPO="$WORK/case/plain"
