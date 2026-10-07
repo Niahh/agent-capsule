@@ -142,24 +142,25 @@ jobs:
             -e 'OPENCODE_CONFIG_CONTENT={"plugin":["/opt/superpowers/source"]}' \
             agent-capsule:test opencode debug config | \
             grep -F '/opt/superpowers/source'
+      # As root, and as a non-root user like --keep-id, who does not own the image's superpowers clone.
       - name: Codex adds and removes the superpowers plugin
         if: matrix.agent == 'codex'
         run: |
-          codex_home="capsule-codex-smoke-${GITHUB_RUN_ID}"
-          trap 'docker volume rm "$codex_home" >/dev/null' EXIT
-          docker volume create "$codex_home"
-          docker run --rm -v "$codex_home:/home/dev" \
-            -e AGENT_CAPSULE_AGENT=codex \
-            -e AGENT_CAPSULE_WITH=superpowers \
-            agent-capsule:test bash -c \
-            'test -e /home/dev/.codex/.superpowers-capsule-managed && \
-             ! codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
-          docker run --rm -v "$codex_home:/home/dev" \
-            -e AGENT_CAPSULE_AGENT=codex \
-            -e AGENT_CAPSULE_WITH= \
-            agent-capsule:test bash -c \
-            'test ! -e /home/dev/.codex/.superpowers-capsule-managed && \
-             codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
+          for user in 0:0 "$(id -u):$(id -g)"; do
+            codex_home="$(mktemp -d)"
+            docker run --rm --user "$user" -v "$codex_home:/home/dev" \
+              -e AGENT_CAPSULE_AGENT=codex \
+              -e AGENT_CAPSULE_WITH=superpowers \
+              agent-capsule:test bash -c \
+              'test -e /home/dev/.codex/.superpowers-capsule-managed && \
+               ! codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
+            docker run --rm --user "$user" -v "$codex_home:/home/dev" \
+              -e AGENT_CAPSULE_AGENT=codex \
+              -e AGENT_CAPSULE_WITH= \
+              agent-capsule:test bash -c \
+              'test ! -e /home/dev/.codex/.superpowers-capsule-managed && \
+               codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
+          done
 
   # The matrix enables every integration, so only a default build can show that
   # optional CLIs stay out unless selected.

@@ -133,6 +133,7 @@ RUN if [ "$WITH_MCPVAULT" = 1 ]; then \
 # Codex activates Superpowers from /opt/superpowers/source at startup, so its
 # .git must survive. Resolve the latest release tag when no version is pinned,
 # then put the tagged checkout on a real branch for the local marketplace clone.
+# Under --keep-id the user does not own the clone, and git checks a local clone's source at its .git.
 RUN if [ "$WITH_SUPERPOWERS" = 1 ]; then \
       superpowers_ref="${SUPERPOWERS_VERSION:-latest}" \
       && if [ "$superpowers_ref" = latest ]; then \
@@ -142,7 +143,8 @@ RUN if [ "$WITH_SUPERPOWERS" = 1 ]; then \
       fi \
       && git clone --depth 1 --branch "$superpowers_ref" \
         https://github.com/obra/superpowers.git /opt/superpowers/source \
-      && git -C /opt/superpowers/source checkout -B main; \
+      && git -C /opt/superpowers/source checkout -B main \
+      && git config --system --add safe.directory /opt/superpowers/source/.git; \
     fi
 
 # Checked like the kubernetes binaries. talos's install script is not used
