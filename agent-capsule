@@ -468,8 +468,9 @@ path_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
 }
 
-# The newest top-level entry: the launcher refreshes .agent on every start, and
-# claude rewrites .claude.json while it runs.
+# The newest top-level file: the launcher refreshes .agent on every start, and
+# claude rewrites .claude.json while it runs. Directory times move when pruning
+# empties them, so they do not count as use.
 home_last_used() { # home
   local newest=0
   local entry mtime
@@ -477,7 +478,7 @@ home_last_used() { # home
   while IFS= read -r -d '' entry; do
     mtime="$(path_mtime "$entry")"
     [[ "$mtime" -le "$newest" ]] || newest="$mtime"
-  done < <(find "$1" -maxdepth 1 -print0)
+  done < <(find "$1" -mindepth 1 -maxdepth 1 ! -type d -print0)
   printf '%s' "$newest"
 }
 
@@ -522,7 +523,7 @@ prune_session_homes() {
     idle_days=$(((now - $(home_last_used "$home")) / 86400))
     [[ "$idle_days" -ge "$PRUNE_DAYS" ]] || continue
     # Codex and OpenCode write only below the top level, so check the whole tree.
-    [[ -z "$(find "$home" -mmin "-$((PRUNE_DAYS * 1440))" -print -quit)" ]] || continue
+    [[ -z "$(find "$home" ! -type d -mmin "-$((PRUNE_DAYS * 1440))" -print -quit)" ]] || continue
     if grep -qxF -- "$name" <<<"$running"; then
       echo ">> Skip    : $name (running)"
       continue

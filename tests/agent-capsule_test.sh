@@ -1574,6 +1574,13 @@ assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_not_contains "$PODMAN_LOG" 'CALL=rmi'
 assert_not_contains "$OUTPUT" '>> Pruned'
 
+# Removing caches rewrites directory times, which must not make an idle home look used.
+new_case
+make_session_home idle-home 40
+run_capsule --prune-caches --yes
+run_capsule --prune-sessions
+assert_contains "$OUTPUT" 'idle-home'
+
 # Without --yes, prune only reports. Homes with nothing to free are not listed.
 new_case
 make_session_home idle-home 40
