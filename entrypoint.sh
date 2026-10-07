@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reconcile the capsule-managed pieces of /home/dev, then start the agent.
+# Take over the handed-off gh token, trust the private CA, reconcile the
+# capsule-managed pieces of /home/dev, then start the agent.
 #
 # /home/dev is bind-mounted from a persistent host session home, so anything
 # this places there outlives the run. Each piece carries a marker file: without
