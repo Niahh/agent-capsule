@@ -127,6 +127,15 @@ test_no_doc_skips_only_that_turn() {
   assert_blocks "after #no-doc" "$(hook check "" false)" "main.go"
 }
 
+test_no_doc_does_not_reach_a_turn_without_a_prompt() {
+  setup
+  hook snapshot "try this #no-doc" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  hook check "" false > /dev/null
+  printf 'c\n' >> "$REPO/main.go"
+  assert_blocks "turn after #no-doc" "$(hook check "" false)" "main.go"
+}
+
 test_counts_work_committed_during_the_turn() {
   setup
   hook snapshot "do it" false > /dev/null
@@ -195,6 +204,24 @@ test_does_not_report_the_same_work_twice() {
   printf 'b\n' >> "$REPO/main.go"
   hook check "" false > /dev/null
   assert_empty "second check" "$(hook check "" false)"
+}
+
+test_first_check_only_sets_the_baseline() {
+  setup
+  printf 'b\n' >> "$REPO/main.go"
+  assert_empty "check before snapshot" "$(hook check "" false)"
+  printf 'c\n' >> "$REPO/main.go"
+  assert_blocks "check after check" "$(hook check "" false)" "main.go"
+}
+
+test_ignores_a_baseline_from_another_repository() {
+  setup
+  hook snapshot "do it" false > /dev/null
+  REPO="$WORK/case/other"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  printf 'other\n' > "$REPO/other.go"
+  assert_empty "other repository" "$(hook check "" false)"
 }
 
 test_leaves_the_real_index_untouched() {
@@ -370,6 +397,29 @@ test_lists_unusual_file_names() {
   printf 'n\n' > "$REPO/with space.go"
   printf 'n\n' > "$REPO/café.go"
   assert_blocks "file names" "$(hook check "" false)" "with space.go" "café.go"
+}
+
+test_labels_binary_files() {
+  setup
+  hook snapshot "do it" false > /dev/null
+  printf 'b\n' >> "$REPO/main.go"
+  printf 'a\0b' > "$REPO/image.bin"
+  assert_blocks "binary" "$(hook check "" false)" "- image.bin (binary)" "- main.go (+1 -0)"
+}
+
+test_lists_twenty_files_at_most() {
+  setup
+  local out rows
+  hook snapshot "do it" false > /dev/null
+  (cd "$REPO" && seq 20 | sed 's/$/.go/' | xargs touch)
+  rows="$(reason_of "$(hook check "" false)" | grep -c '^- ')"
+  if [[ "$rows" == 20 ]]; then pass; else fail "20 files: $rows rows"; fi
+  hook snapshot "next" false > /dev/null
+  (cd "$REPO" && seq 21 | sed 's/$/.txt/' | xargs touch)
+  out="$(hook check "" false)"
+  assert_blocks "21 files" "$out" "- and 1 more"
+  rows="$(reason_of "$out" | grep -c '^- ')"
+  if [[ "$rows" == 21 ]]; then pass; else fail "21 files: $rows rows"; fi
 }
 
 for t in $(declare -F | awk '$3 ~ /^test_/ {print $3}'); do
