@@ -3,41 +3,9 @@
 ARG NODE_TAG=trixie-slim
 ARG GO_TAG=trixie
 
-# Tool versions are empty by default, which means latest at build time.
-# agent-capsule passes a value only when AGENT_CAPSULE_*_VERSION pins one, so
-# there is no second set of defaults here to drift out of step with the script.
-ARG GOLANGCI_LINT_VERSION=""
-ARG KUBECTL_VERSION=""
-ARG HELM_VERSION=""
-ARG TALOSCTL_VERSION=""
-ARG GH_VERSION=""
-ARG GLAB_VERSION=""
-ARG SUPERPOWERS_VERSION=""
-ARG CLAUDE_CODE_VERSION=""
-ARG CODEX_VERSION=""
-ARG OPENCODE_VERSION=""
-ARG ANYDOC_VERSION=""
-ARG MCPVAULT_VERSION=""
-ARG SKILLS_VERSION=""
-
 FROM golang:${GO_TAG} AS go-toolchain
 
 FROM node:${NODE_TAG}
-
-# Re-declare after FROM so the build arg is visible to the RUN step below.
-ARG GOLANGCI_LINT_VERSION
-ARG KUBECTL_VERSION
-ARG HELM_VERSION
-ARG TALOSCTL_VERSION
-ARG GH_VERSION
-ARG GLAB_VERSION
-ARG SUPERPOWERS_VERSION
-ARG CLAUDE_CODE_VERSION
-ARG CODEX_VERSION
-ARG OPENCODE_VERSION
-ARG ANYDOC_VERSION
-ARG MCPVAULT_VERSION
-ARG SKILLS_VERSION
 
 # pipefail so a failing curl cannot feed an empty script to sh (DL4006).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -53,10 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc libc6-dev tzdata-legacy \
     && rm -rf /var/lib/apt/lists/*
 
+# Every RUN after an ARG has that arg's value in its cache key, so each ARG sits just above the RUN that reads it.
+# A *_VERSION left empty, as the launcher passes it unless pinned, means latest.
+
 # Install golangci-lint from the official prebuilt binary (the project advises
 # against `go install`). Land it in /usr/local/bin, not $GOPATH/bin: /home/dev is
 # bind-mounted at runtime and would mask /home/dev/go/bin. When pinned, install.sh
 # comes from the same release tag so the installer matches what it installs.
+ARG GOLANGCI_LINT_VERSION=""
 RUN if [ -n "$GOLANGCI_LINT_VERSION" ]; then \
       curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/$GOLANGCI_LINT_VERSION/install.sh" \
         | sh -s -- -b /usr/local/bin "$GOLANGCI_LINT_VERSION"; \
@@ -65,23 +37,14 @@ RUN if [ -n "$GOLANGCI_LINT_VERSION" ]; then \
         | sh -s -- -b /usr/local/bin; \
     fi
 
-# Selection. The launcher passes these from --agent and --with; the defaults
-# mirror its own, so a bare `docker build .` still produces a usable image.
-ARG AGENT=claude
-ARG WITH_ANYDOC=0
-ARG WITH_EXPLAIN_DIFF=0
-ARG WITH_GITHUB=0
-ARG WITH_GITLAB=0
-ARG WITH_KUBERNETES=0
-ARG WITH_MCPVAULT=0
-ARG WITH_SUPERPOWERS=0
-ARG WITH_TALOS=0
-ARG WITH_WORKLOG=0
-
-# Integrations are installed only when selected, one layer each: a RUN's cache
-# key is its expanded command, so toggling one leaves the others cached.
+# Integrations are installed only when selected, one layer each, so toggling one
+# leaves the layers above it cached. The launcher passes WITH_* from --with; the
+# defaults mirror its own, so a bare `docker build .` installs none of them.
 # Files that become agent state stay under /opt because /home/dev is
 # bind-mounted from the host session home at runtime.
+ARG WITH_ANYDOC=0
+ARG ANYDOC_VERSION=""
+ARG SKILLS_VERSION=""
 RUN if [ "$WITH_ANYDOC" = 1 ]; then \
       npm install -g "@firecrawl/anydoc@${ANYDOC_VERSION:-latest}" \
       && anydoc_root="$(npm root -g)/@firecrawl/anydoc" \
@@ -99,6 +62,7 @@ RUN if [ "$WITH_ANYDOC" = 1 ]; then \
     fi
 
 # Pinned to a gist revision, so image rebuilds are reproducible.
+ARG WITH_EXPLAIN_DIFF=0
 RUN if [ "$WITH_EXPLAIN_DIFF" = 1 ]; then \
       mkdir -p /opt/explain-diff-html \
       && explain_diff_url='https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/' \
@@ -107,7 +71,9 @@ RUN if [ "$WITH_EXPLAIN_DIFF" = 1 ]; then \
     fi
 
 # Release binaries, checked against the SHA-256 sums published beside them.
-# helm's install script is not used because it needs openssl.
+ARG WITH_KUBERNETES=0
+ARG KUBECTL_VERSION=""
+ARG HELM_VERSION=""
 RUN if [ "$WITH_KUBERNETES" = 1 ]; then \
       arch="$(dpkg --print-architecture)" \
       && kubectl_version="${KUBECTL_VERSION:-$(curl -sSfL https://dl.k8s.io/release/stable.txt)}" \
@@ -125,6 +91,8 @@ RUN if [ "$WITH_KUBERNETES" = 1 ]; then \
       && rm /tmp/helm.tar.gz; \
     fi
 
+ARG WITH_MCPVAULT=0
+ARG MCPVAULT_VERSION=""
 RUN if [ "$WITH_MCPVAULT" = 1 ]; then \
       npm install -g "@bitbonsai/mcpvault@${MCPVAULT_VERSION:-latest}" \
       && npm cache clean --force; \
@@ -133,6 +101,9 @@ RUN if [ "$WITH_MCPVAULT" = 1 ]; then \
 # Codex activates Superpowers from /opt/superpowers/source at startup, so its
 # .git must survive. Resolve the latest release tag when no version is pinned,
 # then put the tagged checkout on a real branch for the local marketplace clone.
+# Under --keep-id the user does not own the clone, and git checks a local clone's source at its .git.
+ARG WITH_SUPERPOWERS=0
+ARG SUPERPOWERS_VERSION=""
 RUN if [ "$WITH_SUPERPOWERS" = 1 ]; then \
       superpowers_ref="${SUPERPOWERS_VERSION:-latest}" \
       && if [ "$superpowers_ref" = latest ]; then \
@@ -142,11 +113,14 @@ RUN if [ "$WITH_SUPERPOWERS" = 1 ]; then \
       fi \
       && git clone --depth 1 --branch "$superpowers_ref" \
         https://github.com/obra/superpowers.git /opt/superpowers/source \
-      && git -C /opt/superpowers/source checkout -B main; \
+      && git -C /opt/superpowers/source checkout -B main \
+      && git config --system --add safe.directory /opt/superpowers/source/.git; \
     fi
 
 # Checked like the kubernetes binaries. talos's install script is not used
 # because it checks every version against the latest release's sums.
+ARG WITH_TALOS=0
+ARG TALOSCTL_VERSION=""
 RUN if [ "$WITH_TALOS" = 1 ]; then \
       talos_release=https://github.com/siderolabs/talos/releases \
       && talosctl_version="${TALOSCTL_VERSION:-latest}" \
@@ -164,6 +138,8 @@ RUN if [ "$WITH_TALOS" = 1 ]; then \
     fi
 
 # Checked against the release's own sums, like talosctl.
+ARG WITH_GITHUB=0
+ARG GH_VERSION=""
 RUN if [ "$WITH_GITHUB" = 1 ]; then \
       gh_release=https://github.com/cli/cli/releases \
       && gh_version="${GH_VERSION:-latest}" \
@@ -184,6 +160,8 @@ RUN if [ "$WITH_GITHUB" = 1 ]; then \
     fi
 
 # Checked against the release's own sums, like gh.
+ARG WITH_GITLAB=0
+ARG GLAB_VERSION=""
 RUN if [ "$WITH_GITLAB" = 1 ]; then \
       glab_release=https://gitlab.com/gitlab-org/cli/-/releases \
       && glab_version="${GLAB_VERSION:-latest}" \
@@ -205,16 +183,25 @@ RUN if [ "$WITH_GITLAB" = 1 ]; then \
 
 # One CLI, not three: a run uses exactly one agent and each package is large.
 # Last of the selected installs, so switching agents reuses every layer above.
+# The default mirrors the launcher's, so a bare `docker build .` still produces a usable image.
+ARG AGENT=claude
+ARG CLAUDE_CODE_VERSION=""
+ARG CODEX_VERSION=""
+ARG OPENCODE_VERSION=""
+# npm skips a platform package that is not published yet, so make sure the CLI starts.
 RUN case "$AGENT" in \
       claude) npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}" ;; \
       codex) npm install -g "@openai/codex@${CODEX_VERSION:-latest}" ;; \
       opencode) npm install -g "opencode-ai@${OPENCODE_VERSION:-latest}" ;; \
       *) echo "unknown agent: $AGENT" >&2; exit 1 ;; \
     esac \
+    && "$AGENT" --version >/dev/null \
     && npm cache clean --force
 
 COPY entrypoint.sh /usr/local/bin/agent-capsule-entrypoint.sh
 # COPY cannot depend on a build arg; the files stay inert unless --plugin-dir names them.
+# Declared anyway, so the build does not warn that the launcher's WITH_WORKLOG went unused.
+ARG WITH_WORKLOG=0
 COPY plugins/worklog /opt/worklog/plugin
 
 ENV HOME=/home/dev \
