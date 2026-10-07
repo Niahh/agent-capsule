@@ -801,6 +801,10 @@ if [[ "$PRUNE_YES" == "1" ]]; then
   exit 1
 fi
 
+# From here on stdout belongs to the agent, so `agent-capsule . -- -p q > out` captures
+# only its answer. Status and build output go to stderr; the run gets stdout back.
+exec 3>&1 1>&2
+
 load_agent_profile "$AGENT"
 AUTH_HOME_DIR="$AUTH_ROOT_DIR/$AGENT"
 
@@ -1900,10 +1904,10 @@ if [[ "$OFFLINE" == "1" ]]; then
   NETWORK_ARGS=(--network=none)
 fi
 
-# Allocate a pseudo-TTY only when stdin is one; a bare -t breaks piped or
-# batch runs (CI, herdr), e.g. `agent-capsule . -- -p "question" < prompt.txt`.
+# Allocate a pseudo-TTY only when both ends are one: a TTY on a pipe or a file adds
+# CRLF line ends and escape codes. Fd 3 is the stdout the run gets back.
 TTY_ARGS=(-i)
-[[ -t 0 ]] && TTY_ARGS=(-it)
+[[ -t 0 && -t 3 ]] && TTY_ARGS=(-it)
 
 # ----------------------------------------------------------------------------
 # Run
@@ -2024,4 +2028,4 @@ exec podman run "${TTY_ARGS[@]}" --rm --init \
   "${ENV_ARGS[@]}" \
   "${MOUNT_ARGS[@]}" \
   -w "$CONTAINER_PROJECT_DIR" \
-  "$IMAGE_ID" "${RUN_CMD[@]}"
+  "$IMAGE_ID" "${RUN_CMD[@]}" >&3 3>&-

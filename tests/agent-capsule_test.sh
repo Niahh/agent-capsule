@@ -1328,6 +1328,15 @@ mkdir -p "$CASE_DIR/proj"
 (cd "$CASE_DIR" && CDPATH=".:/nonexistent" run_capsule --shell --session cdpath proj)
 assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
 
+# Status goes to stderr, so `agent-capsule . -- -p q > out` captures only the agent.
+new_case
+HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
+  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p question > "$OUTPUT" 2> "$CASE_DIR/stderr"
+[[ ! -s "$OUTPUT" ]] || fail "status reached stdout: $(head -n 3 "$OUTPUT")"
+assert_contains "$CASE_DIR/stderr" '>> Project :'
+
 # --auth-login only needs the agent CLI, so any image of that agent will do: rebuilding
 # without the integrations would only make the next normal run rebuild them.
 new_case
