@@ -2,7 +2,7 @@
 # Tests for the worklog plugin hook. Run: bash tests/worklog_test.sh
 set -uo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)"
 HOOK="${HOOK:-$ROOT_DIR/plugins/worklog/hooks/worklog.mjs}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
