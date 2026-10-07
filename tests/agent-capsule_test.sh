@@ -1310,6 +1310,12 @@ for tz_value in '' ':/etc/localtime'; do
   fi
 done
 
+# An exported CDPATH makes cd print where it went, which would double every resolved path.
+new_case
+mkdir -p "$CASE_DIR/proj"
+(cd "$CASE_DIR" && CDPATH=".:/nonexistent" run_capsule --shell --session cdpath proj)
+assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
+
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"

@@ -49,6 +49,9 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
   exit 1
 fi
 
+# With it exported, cd prints where it went, so every $(cd ... && pwd) would return two lines.
+unset CDPATH
+
 # The image build is the only critical section, and there is one image, so one
 # lock. Assigned only after the atomic file creation wins, or the EXIT trap
 # would delete a lock this process does not own.
