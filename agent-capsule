@@ -1305,11 +1305,11 @@ add_mount() { # src dest [ro]
 # ----------------------------------------------------------------------------
 # 0.1 kept one shared authentication home; 0.2 splits it per agent. Leaving the
 # old one in place would silently mix two agents' credentials, so refuse. Every
-# other 0.1 artifact is inert, and the README lists the migration steps.
+# other 0.1 artifact is inert, and docs/upgrading.md lists the migration steps.
 if [[ -e "$AUTH_ROOT_DIR/.claude" ]]; then
   echo "Authentication state from agent-capsule 0.1: $AUTH_ROOT_DIR/.claude" >&2
   echo "No files were changed. Read the 'Upgrading from 0.1' section:" >&2
-  echo "https://github.com/Niahh/agent-capsule#upgrading-from-01" >&2
+  echo "https://github.com/Niahh/agent-capsule/blob/main/docs/upgrading.md#upgrading-from-01" >&2
   exit 1
 fi
 
