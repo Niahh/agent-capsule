@@ -37,6 +37,8 @@ limits. Everything else on the host stays out of reach.
 ## Requirements
 
 - Linux with rootless Podman configured, **or** macOS with Podman (see below)
+- bash 4.4 or later. macOS ships bash 3.2 as `/bin/bash`, so install a current one,
+  for example with Homebrew.
 - `make` for `make install` (or copy `agent-capsule`, `Dockerfile`,
   `entrypoint.sh`, and the `plugins/` directory manually)
 
@@ -53,16 +55,20 @@ podman machine init
 podman machine start
 ```
 
+`--with github`, `--with gitlab` and `--ca` also mount a directory under `$TMPDIR`,
+which macOS keeps in `/var/folders`, outside `$HOME`.
+
 If `agent-capsule` was installed via Nix (nix-darwin, `nix profile install`,
 `nix build`, etc.), also mount `/nix/store`. The closures of any Nix-built
 tools bind-mounted into the container with `--mount` need to be visible to the
 VM. Passing any `--volume` at all replaces Podman's implicit
-default instead of adding to it, so `$HOME:$HOME` must be listed explicitly
-too. `--volume` also can't be added to an already-created machine, so get
-both in from the start:
+default instead of adding to it, so `$HOME:$HOME` and `/var/folders` must be listed
+explicitly too. `--volume` also can't be added to an already-created machine, so get
+them all in from the start:
 
 ```sh
-podman machine init --volume $HOME:$HOME --volume /nix/store:/nix/store:ro
+podman machine init --volume $HOME:$HOME --volume /var/folders:/var/folders \
+  --volume /nix/store:/nix/store:ro
 podman machine start
 ```
 
@@ -76,74 +82,52 @@ Leaving out `$HOME:$HOME` breaks the launch, since agent-capsule bind-mounts
 make install                    # -> ~/.local/bin/agent-capsule
                                 #    ~/.local/share/agent-capsule/{Dockerfile,entrypoint.sh,plugins/}
 make install PREFIX=/usr/local  # alternative destination
+make uninstall                  # remove what make install copied
+nix profile install github:Niahh/agent-capsule  # or with Nix
 ```
+
+To update, pull the repository and run `make install` again.
 
 The image builds on first run and again whenever the selection changes, because it
 contains only the agent and integrations the run asked for. Switching back is
 usually seconds: the layers of a combination you have built before are cached, so
 only the first build of each is slow. Each rebuild also removes the untagged image
-it replaced, which `AGENT_CAPSULE_PRUNE=0` disables. Podman keeps shared layers and
-cannot remove an old image while a running container still uses it, so the guarantee
-is one tagged runnable image rather than one physical object in container storage.
+it replaced, which `AGENT_CAPSULE_PRUNE=0` disables. Podman keeps layers that images
+share, and cannot remove an image a running container still uses. So the guarantee is
+one tagged runnable image, not one object in container storage.
 
 It also performs a full rebuild once the last no-cache refresh is more than seven
 days old, to pick up new tool releases. See
 [Tool versions and upgrades](#tool-versions-and-upgrades). Use `--build` to rebuild
 from scratch at any time.
 
-## Upgrading from 0.2
+## Quick start
 
-- The config file is gone. `~/.agent-capsule/config` is no longer read, and
-  `AGENT_CAPSULE_CONFIG` no longer selects one. Move its contents into `export`
-  lines in `~/.bashrc` or `~/.zshrc`, see [Persistent defaults](#persistent-defaults).
-  A leftover file is inert, not an error.
-- `--check-updates` is removed. Nothing is pinned to compare against.
-- Tools are no longer pinned by default. Every tool tracks its latest release and
-  the image refreshes weekly; `AGENT_CAPSULE_*_VERSION` pins one if needed.
-- The image is built for one agent and one set of integrations, so `--agent` and
-  `--with` now rebuild it. Each rebuild prunes the image it replaced.
-- The legacy `--shared-claude-md*` flags and the `superclaude` and `hunkdiff`
-  integrations are no longer recognised by name; they fail as an unknown option
-  and an unknown extra.
-- Session names may no longer begin with a dot.
-
-## Upgrading from 0.1
-
-Version 0.3 does not change legacy configuration or state automatically. The
-launcher stops before changing files if it finds the 0.1 shared authentication
-home at `auth-home/.claude`, which would otherwise mix two agents' credentials.
-Every other item below is inert rather than detected, so work through the list.
-Back up `~/.agent-capsule` before upgrading.
-
-Update the old configuration and state before launching version 0.3:
-
-- Replace `superclaude` with `superpowers` in `AGENT_CAPSULE_WITH` and `--with`.
-  They provide different features, so review the Superpowers workflow before enabling it.
-- Remove `hunkdiff` from configuration. It is no longer included.
-- Replace `AGENT_CAPSULE_SHARED_CLAUDE_MD` or `AGENT_CAPSULE_SHARED_AGENTS_MD`
-  with `AGENT_CAPSULE_SHARED_RULES`. Rename the related `_ENABLED` and `_READONLY`
-  variables in the same way.
-- Replace the `--shared-claude-md*` flags with their `--shared-rules*` equivalents.
-- The launcher uses one tag, `<AGENT_CAPSULE_IMAGE>:latest`, rebuilt per selection.
-  Older `:base` and hashed integration images are never selected again; remove them
-  with `podman rmi`.
-- Credentials now live in `auth-home/<agent>/`. Move the legacy root entries
-  (`.claude`, `.claude.json`, `.codex`, and `.local/share/opencode/auth.json`)
-  out of `auth-home/`, then authenticate each agent again with
-  `--agent NAME --auth-login`.
-- Session homes now carry an agent marker. Move unmarked 0.1 homes out of `homes/`,
-  or choose a new `--session` name. Unnamed Codex sessions use a `-codex` suffix.
-- Move any capsule-managed OpenCode `opencode.json` and its
-  `.opencode.json.capsule` marker out of the old session home.
-- `CLAUDE.md` is now the default global rules file for every agent. Merge an existing
-  `~/.agent-capsule/AGENTS.md` into it, then move the old file out of the config directory.
-- The container starts in the project's resolved host path. `/workspace` remains
-  available for scripts that require the old path.
+```sh
+agent-capsule --auth-login          # once: log in, credentials are shared afterwards
+agent-capsule ~/code/myapp          # run Claude Code in a capsule on a project
+agent-capsule --shell .             # a shell inside the capsule instead of the agent
+agent-capsule --agent opencode .    # run opencode instead of Claude Code
+agent-capsule --session fix-auth ~/code/myapp   # named session for parallel agents
+agent-capsule --with superpowers .              # activate bundled development skills
+agent-capsule --with explain-diff .             # explain a change as interactive HTML
+agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
+agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # log significant work
+agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
+agent-capsule --with github .                   # gh with the host gh login, git over HTTPS
+agent-capsule --with gitlab .                   # glab with the host glab login, git over HTTPS
+agent-capsule --ca .                            # trust a private CA to reach self-hosted resources
+agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
+agent-capsule . -- -p "list the TODOs" > out.md # only the answer reaches stdout
+agent-capsule --agent codex --auth-login        # once: log in to Codex instead
+agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on a project
+```
 
 ## Tool versions and upgrades
 
-Every bundled tool tracks its latest release by default. No version updates are
-required in agent-capsule itself.
+Every bundled tool tracks its latest release by default, except the explain-diff
+skill, which is pinned to a gist revision. No version updates are required in
+agent-capsule itself.
 
 Because "latest" is only true as of a full refresh, the image records when it last
 pulled the base image and bypassed the layer cache. It repeats that refresh after
@@ -190,26 +174,6 @@ the leading `v`.
 The default base tags are the floating `node:trixie-slim` and `golang:trixie` tags.
 Set `AGENT_CAPSULE_NODE_TAG` or `AGENT_CAPSULE_GO_TAG` to override them.
 
-## Quick start
-
-```sh
-agent-capsule --auth-login          # once: log in, credentials are shared afterwards
-agent-capsule ~/code/myapp          # run Claude Code in a capsule on a project
-agent-capsule --shell .             # a shell inside the capsule instead of the agent
-agent-capsule --agent opencode .    # run opencode instead of Claude Code
-agent-capsule --session fix-auth ~/code/myapp   # named session for parallel agents
-agent-capsule --with superpowers .              # activate bundled development skills
-agent-capsule --with explain-diff .             # explain a change as interactive HTML
-agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
-agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # log significant work
-agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
-agent-capsule --with github .                   # gh with the host gh login, git over HTTPS
-agent-capsule --with gitlab .                   # glab with the host glab login, git over HTTPS
-agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
-agent-capsule --agent codex --auth-login        # once: log in to Codex instead
-agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on a project
-```
-
 ## Agents
 
 Claude Code is the default. `--agent codex` runs the OpenAI Codex CLI and `--agent
@@ -233,19 +197,29 @@ The `explain-diff` integration activates Geoffrey Litt's
 for Claude Code, Codex, and OpenCode. The skill writes a self-contained interactive
 HTML explanation to `/tmp`.
 
+API keys set on the host reach the agent that uses them: `ANTHROPIC_API_KEY` for
+claude, `OPENAI_API_KEY` for codex, both for opencode. Like the GitHub token, each
+crosses over as a file in `$XDG_RUNTIME_DIR`, which the entrypoint moves into the
+environment and deletes. The agent can read them.
+
 The launcher forwards `SUPERPOWERS_DISABLE_TELEMETRY`, `DISABLE_TELEMETRY`, and
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` when those variables are set on the host.
 Their values are not placed in the Podman command line.
 
 Differences under opencode: per-project memory is unavailable (it is a Claude Code
 mechanism), Superpowers and MCP servers use invocation-scoped configuration, and the
-claude-only `anydoc` and `worklog` integrations are rejected. User-owned OpenCode
+claude-only `anydoc` and `worklog` integrations are rejected on the command line and
+dropped with a notice when they come from `AGENT_CAPSULE_WITH`. User-owned OpenCode
 configuration files are left untouched.
 
 Codex also has no shared Claude memory. Its `--auth-login` defaults to device-code
 authentication because its browser callback stays inside the container. Custom login
 arguments after `--` replace that default, and mcpvault uses Codex configuration
 overrides.
+
+Status lines and build output go to stderr, and a TTY is allocated only when stdin
+and stdout are both terminals. So `agent-capsule . -- -p "question" > answer.md`
+captures only the answer.
 
 ## Flags at a glance
 
@@ -257,7 +231,7 @@ overrides.
 - `--keep-id`: use the host UID and GID inside the container.
 - `--with TOOL[,TOOL]`: activate integrations; `list` prints them and `none` clears
   the selection.
-- `--mount SRC[:DEST][:ro]`: add a file or directory bind mount; repeat as needed.
+- `-m, --mount SRC[:DEST][:ro]`: add a file or directory bind mount; repeat as needed.
 - `--ca`: trust the private CAs in `AGENT_CAPSULE_CA_CERTS` for this run.
 - `--vault[=PATH]`: mount the configured vault read-write, or select one with
   `=PATH`.
@@ -273,6 +247,7 @@ overrides.
 - `--yes`: remove what the prune flag lists.
 - `--version`: print the launcher version.
 - `--versions`: print each configured tool pin, or `latest` when unpinned.
+- `-h, --help`: show the option summary.
 
 ## Obsidian vault over MCP
 
@@ -336,7 +311,10 @@ created. The startup banner shows which procedure is active.
 - The hook sees changed files only. It does not see ops commands that change no file,
   other repositories, or directories that are not in git.
 - Its worktree snapshots live in `~/.cache/worklog/` in the session home, not in the
-  repository.
+  repository. Those of sessions idle for a week are removed by the next snapshot.
+- Uncommitted edits inside git submodules are not seen; a new submodule commit is.
+- When HEAD moves during a turn, as after a pull, merge or checkout, the request says
+  so, so that work brought in by git is left out.
 - In non-interactive `-p` runs the printed result can be the log reply rather than
   the answer, so leave `worklog` out of `--with` for those runs.
 
@@ -452,7 +430,7 @@ agent-capsule --ca .
 
 ## Persistent defaults
 
-Every setting is an `AGENT_CAPSULE_*` environment variable. To stop retyping the
+Most settings are `AGENT_CAPSULE_*` environment variables. To stop retyping the
 integrations you always want, export them from `~/.bashrc` or `~/.zshrc`:
 
 ```sh
@@ -496,14 +474,16 @@ Sessions and runtime limits:
 - `AGENT_CAPSULE_KEEPID=0`: set to `1` to use the host UID and GID inside.
 - `AGENT_CAPSULE_OFFLINE=0`: set to `1` to disable container networking.
 - `TZ=`: forwarded to the container; when unset, the zone comes from the
-  `/etc/localtime` link, so dates and commit times match the host.
+  `/etc/localtime` link, so dates and commit times match the host. A path into a
+  zoneinfo tree is forwarded as its zone; any other path falls back to the link.
 
 Shared state and mounts:
 
-- `AGENT_CAPSULE_SHARED_RULES=~/.agent-capsule/CLAUDE.md`: global rules file.
+- `AGENT_CAPSULE_SHARED_RULES=$AGENT_CAPSULE_HOME/CLAUDE.md`: global rules file. Only
+  the default is created when missing; any other path must exist.
 - `AGENT_CAPSULE_SHARED_RULES_ENABLED=1`: set to `0` to disable global rules.
 - `AGENT_CAPSULE_SHARED_RULES_READONLY=1`: set to `0` for a writable rules mount.
-- `AGENT_CAPSULE_WORKLOG_PROCEDURE=~/.agent-capsule/log-work.md`: worklog
+- `AGENT_CAPSULE_WORKLOG_PROCEDURE=$AGENT_CAPSULE_HOME/log-work.md`: worklog
   procedure. The default file is used only when it exists; a path set here must
   exist.
 - `AGENT_CAPSULE_SHARED_MEMORY_ENABLED=1`: set to `0` to disable Claude project
@@ -533,8 +513,9 @@ log-work.md              worklog procedure, when you write one
 build/                   image build context
 ```
 
-Session names may contain letters, digits, dots, underscores, and hyphens. Other
-characters are rejected to prevent different names from sharing the same home.
+Session names may contain letters, digits, dots, underscores, and hyphens, are 1 to
+120 characters long, and may not begin with a dot. Other characters are rejected to
+prevent different names from sharing the same home.
 
 Linked Git worktrees keep the same absolute working-directory path inside and outside
 the container. The repository's common Git directory is mounted at its host path when
@@ -630,6 +611,55 @@ disappear once `--agent codex` or `--agent opencode` is on the line.
 `agent-capsule --help` prints a short option summary. This README is the detailed
 reference. Defaults can be overridden with `AGENT_CAPSULE_*` environment variables,
 including image name, base tags, resource limits, paths, and volume options.
+
+## Upgrading from 0.2
+
+- The config file is gone. `~/.agent-capsule/config` is no longer read, and
+  `AGENT_CAPSULE_CONFIG` no longer selects one. Move its contents into `export`
+  lines in `~/.bashrc` or `~/.zshrc`, see [Persistent defaults](#persistent-defaults).
+  A leftover file is inert, not an error.
+- `--check-updates` is removed. Nothing is pinned to compare against.
+- Tools are no longer pinned by default. Every tool tracks its latest release and
+  the image refreshes weekly; `AGENT_CAPSULE_*_VERSION` pins one if needed.
+- The image is built for one agent and one set of integrations, so `--agent` and
+  `--with` now rebuild it. Each rebuild prunes the image it replaced.
+- The legacy `--shared-claude-md*` flags and the `superclaude` and `hunkdiff`
+  integrations are no longer recognised by name; they fail as an unknown option
+  and an unknown extra.
+- Session names may no longer begin with a dot.
+
+## Upgrading from 0.1
+
+Version 0.3 does not change legacy configuration or state automatically. The
+launcher stops before changing files if it finds the 0.1 shared authentication
+home at `auth-home/.claude`, which would otherwise mix two agents' credentials.
+Every other item below is inert rather than detected, so work through the list.
+Back up `~/.agent-capsule` before upgrading.
+
+Update the old configuration and state before launching version 0.3:
+
+- Replace `superclaude` with `superpowers` in `AGENT_CAPSULE_WITH` and `--with`.
+  They provide different features, so review the Superpowers workflow before enabling it.
+- Remove `hunkdiff` from configuration. It is no longer included.
+- Replace `AGENT_CAPSULE_SHARED_CLAUDE_MD` or `AGENT_CAPSULE_SHARED_AGENTS_MD`
+  with `AGENT_CAPSULE_SHARED_RULES`. Rename the related `_ENABLED` and `_READONLY`
+  variables in the same way.
+- Replace the `--shared-claude-md*` flags with their `--shared-rules*` equivalents.
+- The launcher uses one tag, `<AGENT_CAPSULE_IMAGE>:latest`, rebuilt per selection.
+  Older `:base` and hashed integration images are never selected again; remove them
+  with `podman rmi`.
+- Credentials now live in `auth-home/<agent>/`. Move the legacy root entries
+  (`.claude`, `.claude.json`, `.codex`, and `.local/share/opencode/auth.json`)
+  out of `auth-home/`, then authenticate each agent again with
+  `--agent NAME --auth-login`.
+- Session homes now carry an agent marker. Move unmarked 0.1 homes out of `homes/`,
+  or choose a new `--session` name. Unnamed Codex sessions use a `-codex` suffix.
+- Move any capsule-managed OpenCode `opencode.json` and its
+  `.opencode.json.capsule` marker out of the old session home.
+- `CLAUDE.md` is now the default global rules file for every agent. Merge an existing
+  `~/.agent-capsule/AGENTS.md` into it, then move the old file out of the config directory.
+- The container starts in the project's resolved host path. `/workspace` remains
+  available for scripts that require the old path.
 
 ## License
 

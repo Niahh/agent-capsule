@@ -2,7 +2,7 @@
 
 ## Before pushing
 
-Run the behavior tests and linters. CI runs the same checks:
+Run the behavior tests and linters. CI runs the same checks, plus image builds:
 
 ```sh
 make test
@@ -11,6 +11,9 @@ shellcheck agent-capsule entrypoint.sh scripts/check-shell-completion \
   completions/agent-capsule.bash
 hadolint Dockerfile
 ```
+
+The tests need bash 4.4 or later, git, node and perl. `nix develop` provides them
+with shellcheck and hadolint, and `nix flake check` runs every check above.
 
 ## Commits and branches
 
