@@ -7,10 +7,7 @@
   outputs =
     { self, nixpkgs }:
     let
-      # On macOS, Podman only runs containers through a Linux VM ("podman
-      # machine"), which is where the rootless namespace/subuid handling
-      # actually happens -- the script and its host-side dependencies here
-      # are portable bash/coreutils, so it works there too.
+      # macOS runs the containers in a Podman machine VM; the launcher itself is portable shell.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -19,9 +16,20 @@
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # Keep the package version in sync with VERSION= in the script.
+      # Read from VERSION= in the script, so there is one place to bump.
       version =
         builtins.head (builtins.match ''.*VERSION="([^"]+)".*'' (builtins.readFile ./agent-capsule));
+
+      # What make and the test suites need, for the checks and for `nix develop`.
+      testInputs =
+        pkgs: with pkgs; [
+          bash
+          coreutils
+          git
+          gnumake
+          nodejs
+          perl
+        ];
     in
     {
       packages = forAllSystems (pkgs: rec {
@@ -83,39 +91,31 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [
-            shellcheck
-            hadolint
-          ];
+          packages =
+            testInputs pkgs
+            ++ (with pkgs; [
+              shellcheck
+              hadolint
+            ]);
         };
       });
 
-      # Mirrors .github/workflows/lint.yml, plus a build of the package
-      # itself (`nix flake check` only evaluates `packages`, it does not
-      # build them unless they are also listed here).
+      # The lint and test targets, plus the package: `nix flake check` builds only what is listed here.
       checks = forAllSystems (pkgs: {
         package = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-capsule;
         shellcheck =
-          pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-            shellcheck ${self}/agent-capsule ${self}/entrypoint.sh \
-              ${self}/scripts/check-shell-completion \
-              ${self}/tests/agent-capsule_test.sh ${self}/tests/worklog_test.sh \
-              ${self}/tests/install_test.sh ${self}/completions/agent-capsule.bash
+          pkgs.runCommand "shellcheck" { nativeBuildInputs = with pkgs; [ gnumake shellcheck ]; } ''
+            make -C ${self} shellcheck
             touch $out
           '';
-        hadolint = pkgs.runCommand "hadolint" { nativeBuildInputs = [ pkgs.hadolint ]; } ''
-          hadolint --config ${self}/.hadolint.yaml ${self}/Dockerfile
+        hadolint = pkgs.runCommand "hadolint" { nativeBuildInputs = with pkgs; [ gnumake hadolint ]; } ''
+          make -C ${self} hadolint
           touch $out
         '';
-        launcher-tests =
-          pkgs.runCommand "launcher-tests"
-            { nativeBuildInputs = with pkgs; [ bash coreutils git nodejs perl ]; }
-            ''
-              bash ${self}/tests/agent-capsule_test.sh
-              bash ${self}/tests/worklog_test.sh
-              bash ${self}/tests/install_test.sh
-              touch $out
-            '';
+        launcher-tests = pkgs.runCommand "launcher-tests" { nativeBuildInputs = testInputs pkgs; } ''
+          make -C ${self} test
+          touch $out
+        '';
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);

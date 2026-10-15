@@ -10,7 +10,7 @@ make lint      # shellcheck and hadolint
 ```
 
 The tests need bash 4.4 or later, git, node and perl. `nix develop` provides them
-with shellcheck and hadolint, and `nix flake check` runs every check above.
+with make, shellcheck and hadolint, and `nix flake check` runs every check above.
 
 ## Commits and branches
 
