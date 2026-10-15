@@ -24,6 +24,7 @@ help:
 test:
 	@bash tests/agent-capsule_test.sh
 	@bash tests/worklog_test.sh
+	@bash tests/install_test.sh
 
 install:
 	@install -d "$(BINDIR)"
@@ -56,6 +57,7 @@ install:
 	  *) echo "WARNING: $(BINDIR) is not on your PATH, add it, e.g.:"; \
 	     echo "  export PATH=\"$(BINDIR):\$$PATH\"" ;; \
 	esac
+	@SHELL="$$SHELL" scripts/check-shell-completion "$(BASHCOMPDIR)" "$(ZSHCOMPDIR)"
 
 uninstall:
 	@rm -f "$(BINDIR)/agent-capsule"

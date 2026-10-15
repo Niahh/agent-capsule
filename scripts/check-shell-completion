@@ -1,0 +1,44 @@
+#!/bin/sh
+
+set -eu
+
+bash_completion_dir="$1"
+zsh_completion_dir="$2"
+configured_shell="${SHELL:-}"
+
+case "${configured_shell##*/}" in
+  bash)
+    if "$configured_shell" -ic '
+      complete -p agent-capsule >/dev/null 2>&1 || {
+        declare -F _completion_loader >/dev/null &&
+        _completion_loader agent-capsule >/dev/null 2>&1 &&
+        complete -p agent-capsule >/dev/null 2>&1
+      }
+    ' </dev/null >/dev/null 2>&1; then
+      echo "Bash completion is active."
+    else
+      echo "Bash completion is installed but is not active."
+      echo "Add this to ~/.bashrc, then start a new shell:"
+      printf '  source "%s/agent-capsule"\n' "$bash_completion_dir"
+      echo 'See README.md, section "Shell completion".'
+    fi
+    ;;
+  zsh)
+    if AGENT_CAPSULE_COMPLETION_DIR="$zsh_completion_dir" "$configured_shell" -ic "
+      (( \${fpath[(Ie)\${AGENT_CAPSULE_COMPLETION_DIR}]} )) &&
+      whence -w _agent-capsule >/dev/null
+    " </dev/null >/dev/null 2>&1; then
+      echo "Zsh completion is active."
+    else
+      echo "Zsh completion is installed but is not active."
+      echo "Add these lines to ~/.zshrc before compinit, then start a new shell:"
+      printf "  fpath=(\"%s\" \$fpath)\n" "$zsh_completion_dir"
+      echo '  autoload -Uz compinit && compinit'
+      echo 'See README.md, section "Shell completion".'
+    fi
+    ;;
+  *)
+    echo "Completion files are installed for Bash and Zsh."
+    echo 'See README.md, section "Shell completion".'
+    ;;
+esac
