@@ -17,7 +17,7 @@ COPY --from=go-toolchain /usr/local/go /usr/local/go
 # any cgo package fail.
 # tzdata-legacy keeps old zone names such as US/Eastern, which a forwarded TZ can carry.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git curl ca-certificates ripgrep less procps openssh-client bash \
+      git curl ca-certificates ripgrep less procps openssh-client \
       gcc libc6-dev tzdata-legacy \
     && rm -rf /var/lib/apt/lists/*
 
