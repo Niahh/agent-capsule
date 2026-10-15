@@ -11,6 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: make test
+      - name: make install and uninstall put every file in place and take it back
+        run: |
+          prefix="$RUNNER_TEMP/prefix"
+          make install PREFIX="$prefix"
+          for file in bin/agent-capsule share/agent-capsule/Dockerfile share/agent-capsule/entrypoint.sh \
+            share/bash-completion/completions/agent-capsule share/zsh/site-functions/_agent-capsule; do
+            test -f "$prefix/$file"
+          done
+          diff -r plugins/worklog "$prefix/share/agent-capsule/plugins/worklog"
+          make uninstall PREFIX="$prefix"
+          test -z "$(find "$prefix" -type f)"
 
   shellcheck:
     runs-on: ubuntu-latest
