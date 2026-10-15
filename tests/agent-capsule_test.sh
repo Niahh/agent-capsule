@@ -738,24 +738,25 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_offtoken \
   run_capsule --shell --session gh-off "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GH=0'
 [[ ! -s "$GH_LOG" ]] || fail "host gh was called without --with github"
-assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
 assert_not_contains "$PODMAN_LOG" 'GIT_CONFIG_'
 assert_not_contains "$PODMAN_LOG" 'GH_TOKEN'
 
-# The token reaches the capsule in a file under the runtime dir, never on the
-# podman command line: podman keeps that in the container config on disk.
+# The token reaches the capsule as GH_TOKEN in the keys dir under the runtime dir,
+# never on the podman command line: podman keeps that in the container config on disk.
 new_case github-token-handoff
 PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_secret123 \
   AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-on "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GH=1'
 assert_not_contains "$PODMAN_LOG" 'gho_secret123'
 assert_not_contains "$OUTPUT" 'plain text'
-assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token'
-gh_token_dir="$(mount_source /run/agent-capsule/gh)"
-[[ "$gh_token_dir" == "$XDG_DIR/"* ]] || fail "token dir is outside the runtime dir: $gh_token_dir"
-[[ "$(<"$gh_token_dir/token")" == gho_secret123 ]] || fail "token file does not hold the host token"
-[[ "$(file_mode "$gh_token_dir")" == 700 ]] || fail "token dir is not private"
-[[ "$(file_mode "$gh_token_dir/token")" == 600 ]] || fail "token file is not private"
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys'
+keys_dir="$(mount_source /run/agent-capsule/keys)"
+[[ "$keys_dir" == "$XDG_DIR/"* ]] || fail "keys dir is outside the runtime dir: $keys_dir"
+[[ "$(<"$keys_dir/GH_TOKEN")" == gho_secret123 ]] || fail "the token file does not hold the host token"
+[[ "$(file_mode "$keys_dir")" == 700 ]] || fail "keys dir is not private"
+[[ "$(file_mode "$keys_dir/GH_TOKEN")" == 600 ]] || fail "token file is not private"
+assert_contains "$OUTPUT" '>> GitHub  : host gh login (kept in memory); git uses HTTPS'
 
 # Inside the capsule, git reaches GitHub over HTTPS with gh's credentials, whatever
 # form the remote takes.
@@ -776,7 +777,8 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN='' \
   AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-logged-out "$ROOT_DIR"
 assert_contains "$OUTPUT" 'gh auth login'
 assert_contains "$PODMAN_LOG" 'CALL=run'
-assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
+
 
 # A host gh without a keyring keeps its token in plain text, which defeats the point.
 new_case github-plain-text-token
@@ -787,10 +789,10 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_plain GH_CONFIG_DIR="$CASE_DIR/gh-co
 assert_contains "$OUTPUT" 'plain text'
 assert_not_contains "$OUTPUT" 'gho_plain'
 
-# Handoff dirs of finished launches are removed, never a live one's. gh and key dirs
-# outlive a launch only when it died before its entrypoint ran; glab and CA dirs last
-# the whole session, because glab and TLS clients read them until it ends.
-for kind_and_file in gh:token keys:ANTHROPIC_API_KEY glab:config.yml ca:extra.pem; do
+# Handoff dirs of finished launches are removed, never a live one's. A keys dir outlives
+# a launch only when it died before its entrypoint ran; glab and CA dirs last the whole
+# session, because glab and TLS clients read them until it ends.
+for kind_and_file in keys:GH_TOKEN glab:config.yml ca:extra.pem; do
   kind="${kind_and_file%%:*}"
   file="${kind_and_file#*:}"
   new_case "handoff-sweep-$kind"
@@ -801,15 +803,6 @@ for kind_and_file in gh:token keys:ANTHROPIC_API_KEY glab:config.yml ca:extra.pe
   [[ ! -e "$runtime_root/$kind-999999999" ]] || fail "a finished launch's $kind dir survived"
   [[ -e "$runtime_root/$kind-$$/$file" ]] || fail "a live launch's $kind dir was removed"
 done
-
-# The entrypoint moves the token into GH_TOKEN and deletes the file before the
-# command starts.
-new_case entrypoint-gh-token
-printf 'gho_entry' > "$CASE_DIR/token"
-# shellcheck disable=SC2016
-AGENT_CAPSULE_GH_TOKEN_FILE="$CASE_DIR/token" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
-  "$BASH_BIN" -c 'printf "%s" "$GH_TOKEN"; [[ ! -e "$AGENT_CAPSULE_GH_TOKEN_FILE" ]]' > "$OUTPUT"
-[[ "$(<"$OUTPUT")" == gho_entry ]] || fail "entrypoint did not export GH_TOKEN"
 
 # Without a private CA the capsule gets no CA mount and no CA variable.
 new_case ca-off
@@ -1747,6 +1740,7 @@ run_capsule --shell --session first-home "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 CAPSULE_HOME="$other_capsule_home" run_capsule --shell --session second-home "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
+
 
 # Floating distro tags keep both toolchains on their latest upstream release.
 assert_contains "$SCRIPT" "NODE_TAG=\"\${AGENT_CAPSULE_NODE_TAG:-trixie-slim}\""
