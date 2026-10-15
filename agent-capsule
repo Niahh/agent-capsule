@@ -118,18 +118,29 @@ STATE_DIR="${AGENT_CAPSULE_HOME:-$HOME/.agent-capsule}"
 IMAGE_NAME="${AGENT_CAPSULE_IMAGE:-agent-capsule-dev}"
 NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-trixie}"
-CLAUDE_CODE_VERSION="${AGENT_CAPSULE_CLAUDE_CODE_VERSION:-}"
-CODEX_VERSION="${AGENT_CAPSULE_CODEX_VERSION:-}"
-OPENCODE_VERSION="${AGENT_CAPSULE_OPENCODE_VERSION:-}"
-ANYDOC_VERSION="${AGENT_CAPSULE_ANYDOC_VERSION:-}"
-MCPVAULT_VERSION="${AGENT_CAPSULE_MCPVAULT_VERSION:-}"
-SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-}"
-GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-}"
-KUBECTL_VERSION="${AGENT_CAPSULE_KUBECTL_VERSION:-}"
-HELM_VERSION="${AGENT_CAPSULE_HELM_VERSION:-}"
-TALOSCTL_VERSION="${AGENT_CAPSULE_TALOSCTL_VERSION:-}"
-GH_VERSION="${AGENT_CAPSULE_GH_VERSION:-}"
-GLAB_VERSION="${AGENT_CAPSULE_GLAB_VERSION:-}"
+# The tools a pin can fix, in --versions order: name, variable and kind. The variable
+# is read from AGENT_CAPSULE_<VARIABLE> and passed as the build arg <VARIABLE>. npm
+# packages pin a semver, the others a Git tag with its leading v. Empty means latest.
+PINS=(
+  "claude-code CLAUDE_CODE_VERSION semver"
+  "codex CODEX_VERSION semver"
+  "opencode OPENCODE_VERSION semver"
+  "anydoc ANYDOC_VERSION semver"
+  "mcpvault MCPVAULT_VERSION semver"
+  "superpowers SUPERPOWERS_VERSION tag"
+  "golangci-lint GOLANGCI_LINT_VERSION tag"
+  "kubectl KUBECTL_VERSION tag"
+  "helm HELM_VERSION tag"
+  "talosctl TALOSCTL_VERSION tag"
+  "gh GH_VERSION tag"
+  "glab GLAB_VERSION tag"
+)
+declare -A PIN
+for row in "${PINS[@]}"; do
+  read -r _ pin_var _ <<<"$row"
+  pin_env="AGENT_CAPSULE_$pin_var"
+  PIN[$pin_var]="${!pin_env:-}"
+done
 
 # Unpinned tools track latest at build time, so an old image quietly stops doing
 # that. Age is the only signal for it: the bundle hash cannot see upstream move.
@@ -765,21 +776,11 @@ while [[ "${1:-}" == -* ]]; do
       exit 0
       ;;
     --versions)
-      cat <<VERSIONS
-agent-capsule $VERSION
-claude-code $(selected_version "$CLAUDE_CODE_VERSION")
-codex $(selected_version "$CODEX_VERSION")
-opencode $(selected_version "$OPENCODE_VERSION")
-anydoc $(selected_version "$ANYDOC_VERSION")
-mcpvault $(selected_version "$MCPVAULT_VERSION")
-superpowers $(selected_version "$SUPERPOWERS_VERSION")
-golangci-lint $(selected_version "$GOLANGCI_LINT_VERSION")
-kubectl $(selected_version "$KUBECTL_VERSION")
-helm $(selected_version "$HELM_VERSION")
-talosctl $(selected_version "$TALOSCTL_VERSION")
-gh $(selected_version "$GH_VERSION")
-glab $(selected_version "$GLAB_VERSION")
-VERSIONS
+      echo "agent-capsule $VERSION"
+      for row in "${PINS[@]}"; do
+        read -r pin_tool pin_var _ <<<"$row"
+        echo "$pin_tool $(selected_version "${PIN[$pin_var]}")"
+      done
       exit 0
       ;;
     -h|--help)
@@ -873,35 +874,25 @@ fi
 # ----------------------------------------------------------------------------
 # Validate environment
 # ----------------------------------------------------------------------------
-for package_version in \
-  "$CLAUDE_CODE_VERSION" \
-  "$CODEX_VERSION" \
-  "$OPENCODE_VERSION" \
-  "$ANYDOC_VERSION" \
-  "$MCPVAULT_VERSION"; do
-  [[ -n "$package_version" ]] || continue
-  if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-    echo "Invalid pinned package version: $package_version" >&2
-    exit 1
-  fi
+for row in "${PINS[@]}"; do
+  read -r _ pin_var pin_kind <<<"$row"
+  pin="${PIN[$pin_var]}"
+  [[ -n "$pin" ]] || continue
+  case "$pin_kind" in
+    semver)
+      if [[ ! "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+        echo "Invalid pinned package version: $pin" >&2
+        exit 1
+      fi
+      ;;
+    tag)
+      if [[ ! "$pin" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+        echo "Invalid pinned tagged version: $pin" >&2
+        exit 1
+      fi
+      ;;
+  esac
 done
-unset package_version
-
-for tagged_version in \
-  "$SUPERPOWERS_VERSION" \
-  "$GOLANGCI_LINT_VERSION" \
-  "$KUBECTL_VERSION" \
-  "$HELM_VERSION" \
-  "$TALOSCTL_VERSION" \
-  "$GH_VERSION" \
-  "$GLAB_VERSION"; do
-  [[ -n "$tagged_version" ]] || continue
-  if [[ ! "$tagged_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-    echo "Invalid pinned tagged version: $tagged_version" >&2
-    exit 1
-  fi
-done
-unset tagged_version
 
 if [[ ! "$MAX_IMAGE_AGE_DAYS" =~ ^[0-9]{1,5}$ ]]; then
   echo "Invalid AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS: $MAX_IMAGE_AGE_DAYS (whole days, 0 disables)." >&2
@@ -1466,11 +1457,15 @@ WORKLOG_HASH="$(sha256_dir "$WORKLOG_PLUGIN_SRC")"
 # ----------------------------------------------------------------------------
 # The image holds the selected agent and the user's tools, so both belong in the
 # hash. --with is not in it: it never changes what is installed.
+PIN_VALUES=()
+PIN_BUILD_ARGS=()
+for row in "${PINS[@]}"; do
+  read -r _ pin_var _ <<<"$row"
+  PIN_VALUES+=("${PIN[$pin_var]}")
+  PIN_BUILD_ARGS+=(--build-arg "$pin_var=${PIN[$pin_var]}")
+done
 HASH="$(printf '%s\n' \
-  "$NODE_TAG" "$GO_TAG" "$AGENT" "$TOOLS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
-  "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" \
-  "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" "$KUBECTL_VERSION" "$HELM_VERSION" \
-  "$TALOSCTL_VERSION" "$GH_VERSION" "$GLAB_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" \
+  "$NODE_TAG" "$GO_TAG" "$AGENT" "$TOOLS" "${PIN_VALUES[@]}" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" \
   "$WORKLOG_HASH" | sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
@@ -1553,18 +1548,7 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     "${BUILD_REFRESH_ARGS[@]}" \
     --build-arg "NODE_TAG=$NODE_TAG" \
     --build-arg "GO_TAG=$GO_TAG" \
-    --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
-    --build-arg "CODEX_VERSION=$CODEX_VERSION" \
-    --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
-    --build-arg "ANYDOC_VERSION=$ANYDOC_VERSION" \
-    --build-arg "MCPVAULT_VERSION=$MCPVAULT_VERSION" \
-    --build-arg "SUPERPOWERS_VERSION=$SUPERPOWERS_VERSION" \
-    --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
-    --build-arg "KUBECTL_VERSION=$KUBECTL_VERSION" \
-    --build-arg "HELM_VERSION=$HELM_VERSION" \
-    --build-arg "TALOSCTL_VERSION=$TALOSCTL_VERSION" \
-    --build-arg "GH_VERSION=$GH_VERSION" \
-    --build-arg "GLAB_VERSION=$GLAB_VERSION" \
+    "${PIN_BUILD_ARGS[@]}" \
     "${BUILD_SELECTION_ARGS[@]}" \
     --label "io.agent-capsule.bundle=$HASH" \
     --label "io.agent-capsule.refreshed-at=$REFRESHED_AT" \
