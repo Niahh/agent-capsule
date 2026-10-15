@@ -279,6 +279,8 @@ capsule_env() {
 }
 
 run_capsule() {
+  # Each launch starts a fresh log, unless launches share one on purpose.
+  [[ -n "${KEEP_PODMAN_LOG:-}" ]] || : > "$PODMAN_LOG"
   capsule_env
   env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" "$@" > "${RUN_OUTPUT:-$OUTPUT}" 2>&1
 }
@@ -297,7 +299,6 @@ for agent_and_skills_dir in \
     --session "explain-diff-$agent" "$ROOT_DIR"
   assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WITH=explain-diff'
   assert_contains "$PODMAN_LOG" "ARG=AGENT_CAPSULE_SKILLS_DIR=$skills_dir"
-  : > "$PODMAN_LOG"
 done
 
 new_case
@@ -317,7 +318,6 @@ opencode_mcp='"mcp":{"obsidian":{"type":"local","command":["mcpvault","/vault"]}
 assert_contains "$PODMAN_LOG" \
   "OPENCODE_CONFIG_CONTENT={\"plugin\":[\"/opt/superpowers/source\"],$opencode_mcp}"
 
-: > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state \
   --with superpowers,mcpvault --no-vault "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT={"plugin":["/opt/superpowers/source"]}'
@@ -326,24 +326,20 @@ assert_not_contains "$PODMAN_LOG" 'obsidian'
 user_config="$config_dir/opencode.json"
 mkdir -p "$config_dir"
 printf '%s\n' '{"theme":"user-owned"}' > "$user_config"
-: > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state \
   --with mcpvault --vault="$vault_dir" "$ROOT_DIR"
 [[ "$(<"$user_config")" == '{"theme":"user-owned"}' ]] || fail "user OpenCode config changed"
 assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}"
 
-: > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state --with none "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
 [[ "$(<"$user_config")" == '{"theme":"user-owned"}' ]] || fail "user OpenCode config changed"
 
 # Vault flags are last-one-wins, in both directions.
-: > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state \
   --with mcpvault --no-vault --vault="$vault_dir" "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}"
 
-: > "$PODMAN_LOG"
 run_capsule --agent opencode --shell --session opencode-state \
   --with mcpvault --vault="$vault_dir" --no-vault "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'obsidian'
@@ -362,11 +358,9 @@ run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-va
 assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
 assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
-: > "$PODMAN_LOG"
 run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir/sub"
 assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
-: > "$PODMAN_LOG"
 run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$CASE_DIR/notes2"
 assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
 
@@ -425,7 +419,6 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'HELM_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'TALOSCTL_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'GH_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'GLAB_VERSION='
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --shell --session pinned-build "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
@@ -437,7 +430,6 @@ new_case
 for cluster_pin in KUBECTL_VERSION=v1.2.3 HELM_VERSION=v4.5.6 TALOSCTL_VERSION=v7.8.9 \
   GH_VERSION=v2.3.4 GLAB_VERSION=v1.2.3; do
   run_capsule --shell --session cluster-pins "$ROOT_DIR"
-  : > "$PODMAN_LOG"
   (export "AGENT_CAPSULE_$cluster_pin" && run_capsule --shell --session cluster-pins "$ROOT_DIR")
   assert_contains "$PODMAN_LOG" 'CALL=build'
   assert_arg_after "$PODMAN_LOG" --build-arg "$cluster_pin"
@@ -448,7 +440,6 @@ done
 new_case
 PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-image "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
-: > "$PODMAN_LOG"
 run_capsule --shell --session stale-image "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
@@ -466,7 +457,6 @@ assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.refreshed-at='
 # the requested agent also changes its bundle hash.
 new_case
 PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-selection "$ROOT_DIR"
-: > "$PODMAN_LOG"
 run_capsule --agent codex --shell --session stale-selection-codex "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
@@ -474,7 +464,6 @@ assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
 
 new_case
 PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session age-disabled "$ROOT_DIR"
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=0 \
   run_capsule --shell --session age-disabled "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
@@ -563,14 +552,12 @@ assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'AGENT=claude'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
 
-: > "$PODMAN_LOG"
 run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 selection_refreshed_at="$(awk -F '\t' 'END { print $3 }' "$PODMAN_IMAGE_STATE")"
 [[ -n "$selection_refreshed_at" ]] || fail "the stub recorded no refresh time"
 
 # Switching the agent changes what is installed, so it must rebuild.
-: > "$PODMAN_LOG"
 run_capsule --agent codex --shell --with superpowers \
   --session selection-codex "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=agent-capsule-dev:latest'
@@ -587,19 +574,16 @@ assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
 assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.refreshed-at=$selection_refreshed_at"
 
 # Changing only the integrations rebuilds too.
-: > "$PODMAN_LOG"
 run_capsule --agent codex --shell --with none --session selection-codex "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
 assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.selection=codex:none'
 
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_IMAGE=preexisting:image \
   run_capsule --agent codex --shell --session custom-image "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_contains "$PODMAN_LOG" 'ARG=preexisting:image'
 
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --agent codex --shell --session universal-version-change "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
@@ -611,14 +595,12 @@ run_capsule --shell --session cluster-default "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=0'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=0'
 for agent in claude codex opencode; do
-  : > "$PODMAN_LOG"
   run_capsule --agent "$agent" --with talos,kubernetes --shell \
     --session "cluster-$agent" "$ROOT_DIR"
   assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=1'
   assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=1'
   assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.selection=$agent:kubernetes,talos"
 done
-: > "$PODMAN_LOG"
 run_capsule --with talos --shell --session cluster-talos-only "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=0'
 assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=1'
@@ -708,7 +690,6 @@ assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_CA_DIR'
 new_case
 printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n' > "$CASE_DIR/corp.pem"
 for configured_ca in "$CASE_DIR/corp.pem" "$CASE_DIR/missing.pem"; do
-  : > "$PODMAN_LOG"
   AGENT_CAPSULE_CA_CERTS="$configured_ca" run_capsule --shell --session ca-configured "$ROOT_DIR"
   assert_contains "$PODMAN_LOG" 'CALL=run'
   assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/ca'
@@ -900,18 +881,15 @@ assert_contains "$PODMAN_LOG" 'CALL=run'
 # login for the instance crosses over, and only a stored OAuth flag counts.
 new_case
 for env_token in GITLAB_TOKEN GITLAB_ACCESS_TOKEN OAUTH_TOKEN; do
-  : > "$PODMAN_LOG"
   (export "$env_token=glpat-from-env" &&
     PATH="$GLAB_FAKE_BIN:$PATH" run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR")
   assert_contains "$OUTPUT" 'glab auth login --hostname gitlab.com'
   assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
 done
-: > "$PODMAN_LOG"
 GITLAB_TOKEN=glpat-from-env GLAB_IS_OAUTH2=false FAKE_GLAB_OAUTH=true PATH="$GLAB_FAKE_BIN:$PATH" \
   FAKE_GLAB_TOKEN=oauth-stored run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
 assert_contains "$OUTPUT" 'personal access token'
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
-: > "$PODMAN_LOG"
 GITLAB_TOKEN=glpat-from-env PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-stored \
   run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
 glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
@@ -937,7 +915,6 @@ for flag in --security-opt=no-new-privileges --cap-drop=ALL --pids-limit=512 --m
   assert_contains "$PODMAN_LOG" "ARG=$flag"
 done
 assert_not_contains "$PODMAN_LOG" 'ARG=--network=none'
-: > "$PODMAN_LOG"
 run_capsule --offline --shell --session hardening "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=--network=none'
 
@@ -953,7 +930,6 @@ run_capsule --shell --session shared-auth "$ROOT_DIR"
 [[ ! -e "$CAPSULE_HOME/homes/shared-auth/.claude/.credentials.json" ]] || fail "the token was copied"
 assert_contains "$PODMAN_LOG" \
   "ARG=$auth_home/.claude/.credentials.json:/home/dev/.claude/.credentials.json"
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_SHARE_AUTH=0 run_capsule --shell --session unshared-auth "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" '.credentials.json'
 [[ ! -e "$CAPSULE_HOME/homes/unshared-auth/.claude.json" ]] || fail "unshared auth was copied"
@@ -965,7 +941,6 @@ mkdir -p "$vault_dir"
 run_capsule --with mcpvault --vault="$vault_dir" --session mcp-claude "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --mcp-config /home/dev/.mcp-servers.json
 assert_contains "$CAPSULE_HOME/homes/mcp-claude/.mcp-servers.json" '"args": ["/vault"]'
-: > "$PODMAN_LOG"
 run_capsule --agent codex --with mcpvault --vault="$vault_dir" --session mcp-codex "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.command="mcpvault"'
 assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.args=["/vault"]'
@@ -977,7 +952,6 @@ assert_arg_after "$PODMAN_LOG" claude --plugin-dir
 assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/superpowers/source
 assert_contains "$PODMAN_LOG" 'ARG=/opt/anydoc/plugin'
 
-: > "$PODMAN_LOG"
 run_capsule --agent claude --with none --session claude-no-integrations "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/superpowers/source'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/anydoc/plugin'
@@ -1021,12 +995,10 @@ keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "
 [[ "$(file_mode "$keys_dir")" == 700 ]] || fail "keys dir is not private"
 [[ "$(file_mode "$keys_dir/OPENAI_API_KEY")" == 600 ]] || fail "key file is not private"
 # Each agent gets only its own provider's key, and no key means no handoff at all.
-: > "$PODMAN_LOG"
 ANTHROPIC_API_KEY=anthropic-secret OPENAI_API_KEY=openai-secret \
   run_capsule --agent claude --shell --session claude-env "$ROOT_DIR"
 keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
 [[ -f "$keys_dir/ANTHROPIC_API_KEY" && ! -e "$keys_dir/OPENAI_API_KEY" ]] || fail "claude got the wrong keys"
-: > "$PODMAN_LOG"
 run_capsule --agent claude --shell --session claude-env "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
 
@@ -1126,11 +1098,9 @@ mkdir -p "$CASE_DIR/plugins"
 cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
 AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 printf '\n' >> "$entrypoint_copy"
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 new_case
@@ -1145,7 +1115,6 @@ assert_not_contains "$PODMAN_LOG" '/etc/agent-capsule/log-work.md'
 [[ ! -e "$CAPSULE_HOME/log-work.md" ]] || fail "the default procedure file was created"
 
 printf 'steps\n' > "$CAPSULE_HOME/log-work.md"
-: > "$PODMAN_LOG"
 run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-on "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/log-work.md:/etc/agent-capsule/log-work.md:ro"
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WORKLOG_PROCEDURE=/etc/agent-capsule/log-work.md'
@@ -1179,7 +1148,6 @@ assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/log-work.md:/etc/agent-capsule/
 assert_contains "$OUTPUT" ">> Worklog : $CAPSULE_HOME/log-work.md -> /etc/agent-capsule/log-work.md"
 # A broken one fails loudly instead of falling back to the built-in procedure.
 rm "$CASE_DIR/notes/log-work.md"
-: > "$PODMAN_LOG"
 run_capsule_fails --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR"
 assert_contains "$OUTPUT" "File not found: $CAPSULE_HOME/log-work.md"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
@@ -1231,23 +1199,19 @@ chmod -R u+w "$CASE_DIR/plugins/worklog"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 printf '\n' >> "$CASE_DIR/plugins/worklog/procedure.md"
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
 # Unselected, the plugin is inert, so editing it rebuilds nothing.
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with none --shell --session worklog-unselected "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 printf '\n' >> "$CASE_DIR/plugins/worklog/procedure.md"
-: > "$PODMAN_LOG"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with none --shell --session worklog-unselected "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
@@ -1335,14 +1299,11 @@ assert_contains "$CASE_DIR/stderr" '>> Project :'
 # without the integrations would only make the next normal run rebuild them.
 new_case
 run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
-: > "$PODMAN_LOG"
 run_capsule --auth-login --shell
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
-: > "$PODMAN_LOG"
 run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
-: > "$PODMAN_LOG"
 run_capsule --agent codex --auth-login --shell
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
@@ -1357,7 +1318,6 @@ assert_arg_after "$PODMAN_LOG" "$image_id" claude
 for age_and_refresh in 08:yes 010:no 00:no; do
   new_case
   PODMAN_BUILD_EPOCH="$(($(date +%s) - 9 * 86400))" run_capsule --shell --session age-digits "$ROOT_DIR"
-  : > "$PODMAN_LOG"
   AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS="${age_and_refresh%%:*}" \
     run_capsule --shell --session age-digits "$ROOT_DIR"
   if [[ "${age_and_refresh#*:}" == yes ]]; then
@@ -1459,7 +1419,6 @@ assert_contains "$PODMAN_LOG" \
 # Launching from a plain subdirectory must not mount the repository .git:
 # without its worktree around it, git in the container would report the
 # whole repo as deleted.
-: > "$PODMAN_LOG"
 sub_dir="$main_repo/pkg"
 mkdir -p "$sub_dir"
 run_capsule --shell --session subdir-launch "$sub_dir"
@@ -1472,12 +1431,12 @@ assert_contains "$PODMAN_LOG" \
 
 new_case
 (
-  RUN_OUTPUT="$CASE_DIR/first.output" PODMAN_BUILD_DELAY=0.2 \
+  KEEP_PODMAN_LOG=1 RUN_OUTPUT="$CASE_DIR/first.output" PODMAN_BUILD_DELAY=0.2 \
     run_capsule --shell --session concurrent-first "$ROOT_DIR"
 ) &
 first_pid=$!
 (
-  RUN_OUTPUT="$CASE_DIR/second.output" PODMAN_BUILD_DELAY=0.2 \
+  KEEP_PODMAN_LOG=1 RUN_OUTPUT="$CASE_DIR/second.output" PODMAN_BUILD_DELAY=0.2 \
     run_capsule --shell --session concurrent-second "$ROOT_DIR"
 ) &
 second_pid=$!
@@ -1584,7 +1543,6 @@ PODMAN_DANGLING="$CASE_DIR/dangling"
 : > "$PODMAN_DANGLING"
 run_capsule --shell --session prune-no-build "$ROOT_DIR"
 printf '%s\n' cccc3333 > "$PODMAN_DANGLING"
-: > "$PODMAN_LOG"
 run_capsule --shell --session prune-no-build "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 assert_not_contains "$PODMAN_LOG" 'CALL=rmi'
@@ -1705,8 +1663,8 @@ for prune_args in '--prune-caches=soon' '--prune-sessions=-1' '--yes' \
   # shellcheck disable=SC2086
   run_capsule_fails $prune_args
   assert_not_contains "$OUTPUT" 'Unknown option'
+  assert_not_contains "$PODMAN_LOG" 'CALL='
 done
-assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # Every launch records last use on the session marker.
 new_case
@@ -1722,7 +1680,6 @@ other_capsule_home="$CASE_DIR/other-capsule"
 mkdir -p "$other_capsule_home"
 run_capsule --shell --session first-home "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
-: > "$PODMAN_LOG"
 CAPSULE_HOME="$other_capsule_home" run_capsule --shell --session second-home "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 
