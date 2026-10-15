@@ -106,6 +106,41 @@ exit 1
 GH
 chmod +x "$GH_FAKE_BIN/gh"
 
+# The host glab, kept off FAKE_BIN like gh. Like the real one, a value that is not
+# set prints nothing and still succeeds.
+GLAB_FAKE_BIN="$TEST_ROOT/glab-bin"
+mkdir -p "$GLAB_FAKE_BIN"
+printf '#!%s\n' "$BASH_BIN" > "$GLAB_FAKE_BIN/glab"
+cat >> "$GLAB_FAKE_BIN/glab" <<'GLAB'
+printf '%s\n' "$*" >> "$GLAB_LOG"
+fake_host="${FAKE_GLAB_HOST:-gitlab.com}"
+# Like the real glab, these variables answer before the stored login, for any host.
+env_token="${GITLAB_TOKEN:-${GITLAB_ACCESS_TOKEN:-${OAUTH_TOKEN:-}}}"
+if [[ "${1:-} ${2:-} ${3:-}" == "config get token" && -n "$env_token" ]]; then
+  printf '%s\n' "$env_token"
+  exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get is_oauth2" && -n "${GLAB_IS_OAUTH2:-}" ]]; then
+  printf '%s\n' "$GLAB_IS_OAUTH2"
+  exit 0
+fi
+if [[ "$*" == "config get token --host $fake_host" && -n "${FAKE_GLAB_TOKEN:-}" ]]; then
+  printf '%s\n' "$FAKE_GLAB_TOKEN"
+  exit 0
+fi
+if [[ "$*" == "config get is_oauth2 --host $fake_host" && -n "${FAKE_GLAB_OAUTH:-}" ]]; then
+  printf '%s\n' "$FAKE_GLAB_OAUTH"
+  exit 0
+fi
+if [[ "$*" == "auth git-credential get" && -n "${FAKE_GLAB_TOKEN:-}" ]]; then
+  printf 'capability[]=authtype\nusername=glab\npassword=%s\n' "$FAKE_GLAB_TOKEN"
+  exit 0
+fi
+[[ "${1:-} ${2:-}" == "config get" ]] && exit 0
+exit 1
+GLAB
+chmod +x "$GLAB_FAKE_BIN/glab"
+
 if command -v sha256sum >/dev/null 2>&1; then
   SHA256_COMMAND=(sha256sum)
 else
@@ -186,10 +221,12 @@ new_case() {
   PODMAN_IMAGE_STATE="$CASE_DIR/podman-images"
   OUTPUT="$CASE_DIR/output"
   GH_LOG="$CASE_DIR/gh.log"
-  export GH_LOG
+  GLAB_LOG="$CASE_DIR/glab.log"
+  export GH_LOG GLAB_LOG
   mkdir -p "$CAPSULE_HOME" "$HOST_HOME"
   : > "$PODMAN_LOG"
   : > "$GH_LOG"
+  : > "$GLAB_LOG"
   : > "$PODMAN_IMAGE_STATE"
   PODMAN_DANGLING=""
   ((pass_count += 1))
@@ -333,6 +370,7 @@ assert_contains "$OUTPUT" 'kubectl latest'
 assert_contains "$OUTPUT" 'helm latest'
 assert_contains "$OUTPUT" 'talosctl latest'
 assert_contains "$OUTPUT" 'gh latest'
+assert_contains "$OUTPUT" 'glab latest'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # An unset pin reaches the build as an empty arg, which the Dockerfile reads as
@@ -345,6 +383,7 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'KUBECTL_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'HELM_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'TALOSCTL_VERSION='
 assert_arg_after "$PODMAN_LOG" --build-arg 'GH_VERSION='
+assert_arg_after "$PODMAN_LOG" --build-arg 'GLAB_VERSION='
 : > "$PODMAN_LOG"
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
   run_capsule --shell --session pinned-build "$ROOT_DIR"
@@ -355,7 +394,7 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
 # unpinned build would keep the old image.
 new_case
 for cluster_pin in KUBECTL_VERSION=v1.2.3 HELM_VERSION=v4.5.6 TALOSCTL_VERSION=v7.8.9 \
-  GH_VERSION=v2.3.4; do
+  GH_VERSION=v2.3.4 GLAB_VERSION=v1.2.3; do
   run_capsule --shell --session cluster-pins "$ROOT_DIR"
   : > "$PODMAN_LOG"
   (export "AGENT_CAPSULE_$cluster_pin" && run_capsule --shell --session cluster-pins "$ROOT_DIR")
@@ -731,6 +770,159 @@ env -u SSL_CERT_FILE -u GIT_SSL_CAINFO -u NODE_EXTRA_CA_CERTS \
   "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" "$BASH_BIN" -c \
   'printf "%s" "${SSL_CERT_FILE-}${GIT_SSL_CAINFO-}${NODE_EXTRA_CA_CERTS-}"' > "$OUTPUT"
 [[ ! -s "$OUTPUT" ]] || fail "entrypoint changed TLS trust without a CA: $(<"$OUTPUT")"
+
+# Without gitlab the host glab is never asked, and the capsule gets no token, no
+# token mount, no GitLab variable and no git rewrite.
+new_case
+PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-offtoken \
+  run_capsule --shell --session glab-off "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITLAB=0'
+[[ ! -s "$GLAB_LOG" ]] || fail "host glab was called without --with gitlab"
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
+assert_not_contains "$PODMAN_LOG" 'GITLAB_'
+assert_not_contains "$PODMAN_LOG" 'GLAB_CONFIG_DIR'
+assert_not_contains "$PODMAN_LOG" 'GIT_CONFIG_'
+
+# The token reaches the capsule in a glab config under the runtime dir, never on
+# the podman command line. The config binds it to the instance: glab sends
+# GITLAB_TOKEN to whatever host a command names. A keyring login leaves an empty
+# token in the host's config.yml.
+new_case
+mkdir -p "$CASE_DIR/glab-config"
+printf 'hosts:\n    gitlab.com:\n        token: ""\n        use_keyring: "true"\n' \
+  > "$CASE_DIR/glab-config/config.yml"
+PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-secret123 GLAB_CONFIG_DIR="$CASE_DIR/glab-config" \
+  run_capsule --with gitlab --shell --session glab-on "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITLAB=1'
+assert_not_contains "$PODMAN_LOG" 'glpat-secret123'
+assert_not_contains "$OUTPUT" 'plain text'
+assert_contains "$PODMAN_LOG" 'ARG=GLAB_CONFIG_DIR=/run/agent-capsule/glab'
+assert_not_contains "$PODMAN_LOG" 'GITLAB_TOKEN'
+assert_contains "$PODMAN_LOG" 'ARG=GITLAB_HOST=gitlab.com'
+glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+[[ "$glab_dir" == "$TEST_ROOT/xdg/"* ]] || fail "glab dir is outside the runtime dir: $glab_dir"
+expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token: 'glpat-secret123'")"
+[[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
+  fail "the glab config does not bind the token to gitlab.com: $(<"$glab_dir/config.yml")"
+[[ "$(file_mode "$glab_dir")" == 700 ]] || fail "glab dir is not private"
+[[ "$(file_mode "$glab_dir/config.yml")" == 600 ]] || fail "glab config is not private"
+
+# A self-managed instance: its remotes go over HTTPS with glab's credentials,
+# whatever form they take, and glab targets it outside a repository too.
+new_case
+PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_HOST=gitlab.corp.example FAKE_GLAB_TOKEN=glpat-corp \
+  AGENT_CAPSULE_GITLAB_HOST=gitlab.corp.example \
+  run_capsule --with gitlab --shell --session glab-corp "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'ARG=GITLAB_HOST=gitlab.corp.example'
+glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.corp.example:' "        token: 'glpat-corp'")"
+[[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
+  fail "the glab config does not bind the token to the instance: $(<"$glab_dir/config.yml")"
+mapfile -t git_env < <(sed -n 's/^ARG=\(GIT_CONFIG_.*\)$/\1/p' "$PODMAN_LOG")
+for remote in git@gitlab.corp.example:g/r ssh://git@gitlab.corp.example/g/r; do
+  rewritten="$(env "${git_env[@]}" HOME="$CASE_DIR" GIT_CONFIG_NOSYSTEM=1 \
+    git ls-remote --get-url "$remote")"
+  [[ "$rewritten" == https://gitlab.corp.example/g/r ]] || fail "$remote became $rewritten"
+done
+credential="$(printf 'protocol=https\nhost=gitlab.corp.example\npath=g/r\n\n' |
+  env "${git_env[@]}" PATH="$GLAB_FAKE_BIN:$PATH" HOME="$CASE_DIR" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_TERMINAL_PROMPT=0 FAKE_GLAB_TOKEN=glpat-corp git credential fill)"
+[[ "$credential" == *password=glpat-corp* ]] || fail "git does not ask glab for GitLab credentials"
+
+# With both forges, each keeps its own rewrite and credential helper.
+new_case
+PATH="$GH_FAKE_BIN:$GLAB_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_both FAKE_GLAB_TOKEN=glpat-both \
+  run_capsule --with github,gitlab --shell --session forges "$ROOT_DIR"
+mapfile -t git_env < <(sed -n 's/^ARG=\(GIT_CONFIG_.*\)$/\1/p' "$PODMAN_LOG")
+for host_and_token in github.com=gho_both gitlab.com=glpat-both; do
+  host="${host_and_token%%=*}"
+  rewritten="$(env "${git_env[@]}" HOME="$CASE_DIR" GIT_CONFIG_NOSYSTEM=1 \
+    git ls-remote --get-url "git@$host:o/r")"
+  [[ "$rewritten" == "https://$host/o/r" ]] || fail "git@$host:o/r became $rewritten"
+  credential="$(printf 'protocol=https\nhost=%s\npath=o/r\n\n' "$host" |
+    env "${git_env[@]}" PATH="$GH_FAKE_BIN:$GLAB_FAKE_BIN:$PATH" HOME="$CASE_DIR" \
+      GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 FAKE_GH_TOKEN=gho_both \
+      FAKE_GLAB_TOKEN=glpat-both git credential fill)"
+  [[ "$credential" == *"password=${host_and_token#*=}"* ]] || fail "wrong credentials for $host"
+done
+
+# A host without a glab login for the instance still starts the capsule, and says how to log in.
+new_case
+PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN='' \
+  run_capsule --with gitlab --shell --session glab-logged-out "$ROOT_DIR"
+assert_contains "$OUTPUT" 'glab auth login --hostname gitlab.com'
+assert_contains "$PODMAN_LOG" 'CALL=run'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
+
+# An OAuth token expires within hours, and refreshing it in the capsule would log
+# the host out, so only a personal access token crosses over.
+new_case
+PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=oauth-access-token FAKE_GLAB_OAUTH=true \
+  run_capsule --with gitlab --shell --session glab-oauth "$ROOT_DIR"
+assert_contains "$OUTPUT" 'personal access token'
+assert_contains "$PODMAN_LOG" 'CALL=run'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
+
+# A host glab without a keyring keeps its token in plain text.
+new_case
+mkdir -p "$CASE_DIR/glab-config"
+printf 'hosts:\n    gitlab.com:\n        token: glpat-plain\n' > "$CASE_DIR/glab-config/config.yml"
+PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-plain GLAB_CONFIG_DIR="$CASE_DIR/glab-config" \
+  run_capsule --with gitlab --shell --session glab-plain "$ROOT_DIR"
+assert_contains "$OUTPUT" 'plain text'
+assert_not_contains "$OUTPUT" 'glpat-plain'
+
+# The host ends up in git config keys and URLs, so only a bare hostname passes.
+new_case
+for bad_host in https://gitlab.corp.example gitlab.corp.example:8443 gitlab.corp.example/sub \
+  -gitlab.corp.example; do
+  set +e
+  PATH="$GLAB_FAKE_BIN:$PATH" AGENT_CAPSULE_GITLAB_HOST="$bad_host" \
+    run_capsule --with gitlab --shell --session glab-bad-host "$ROOT_DIR"
+  status=$?
+  set -e
+  assert_status_fails "$status"
+  assert_contains "$OUTPUT" "$bad_host"
+  assert_not_contains "$PODMAN_LOG" 'CALL='
+done
+# A launch without gitlab never uses the host, so a bad one does not stop it.
+PATH="$GLAB_FAKE_BIN:$PATH" AGENT_CAPSULE_GITLAB_HOST=gitlab.corp.example:8443 \
+  run_capsule --shell --session glab-unused-host "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=run'
+
+# A token exported on the host would answer for any instance, so only the stored
+# login for the instance crosses over, and only a stored OAuth flag counts.
+new_case
+for env_token in GITLAB_TOKEN GITLAB_ACCESS_TOKEN OAUTH_TOKEN; do
+  : > "$PODMAN_LOG"
+  (export "$env_token=glpat-from-env" &&
+    PATH="$GLAB_FAKE_BIN:$PATH" run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR")
+  assert_contains "$OUTPUT" 'glab auth login --hostname gitlab.com'
+  assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
+done
+: > "$PODMAN_LOG"
+GITLAB_TOKEN=glpat-from-env GLAB_IS_OAUTH2=false FAKE_GLAB_OAUTH=true PATH="$GLAB_FAKE_BIN:$PATH" \
+  FAKE_GLAB_TOKEN=oauth-stored run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
+assert_contains "$OUTPUT" 'personal access token'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
+: > "$PODMAN_LOG"
+GITLAB_TOKEN=glpat-from-env PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-stored \
+  run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
+glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token: 'glpat-stored'")"
+[[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
+  fail "the host's GITLAB_TOKEN replaced the stored login: $(<"$glab_dir/config.yml")"
+
+# glab reads its config for the whole session, so the next launch removes the dirs
+# of finished sessions, never a live one's.
+new_case
+runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+mkdir -p "$runtime_root/glab-999999999" "$runtime_root/glab-$$"
+touch "$runtime_root/glab-999999999/config.yml" "$runtime_root/glab-$$/config.yml"
+run_capsule --shell --session glab-sweep "$ROOT_DIR"
+[[ ! -e "$runtime_root/glab-999999999" ]] || fail "a finished session's glab dir survived"
+[[ -e "$runtime_root/glab-$$/config.yml" ]] || fail "a live session's glab dir was removed"
+rm -rf "$runtime_root/glab-$$"
 
 new_case
 run_capsule --agent claude --with superpowers,anydoc \
@@ -1239,7 +1431,8 @@ PATH="$CASE_DIR:$PATH" run_capsule --agent list
   fail "--agent list is not one agent per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --with list
-expected_extras="$(printf '%s\n' anydoc explain-diff github kubernetes mcpvault superpowers talos worklog)"
+expected_extras="$(printf '%s\n' anydoc explain-diff github gitlab kubernetes mcpvault superpowers talos \
+  worklog)"
 [[ "$(cat "$OUTPUT")" == "$expected_extras" ]] ||
   fail "--with list is not one integration per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
@@ -1460,12 +1653,13 @@ for version_variable in \
   assert_contains "$DOCKERFILE" "\${$version_variable:-latest}"
 done
 # An undeclared build arg is dropped with only a warning, so a pin would be ignored.
-for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION GH_VERSION; do
+for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION GH_VERSION GLAB_VERSION; do
   assert_contains "$DOCKERFILE" "ARG $version_variable"
 done
 # A bare `docker build .` must leave the optional CLIs out, like the launcher does.
 assert_contains "$DOCKERFILE" 'ARG WITH_KUBERNETES=0'
 assert_contains "$DOCKERFILE" 'ARG WITH_TALOS=0'
 assert_contains "$DOCKERFILE" 'ARG WITH_GITHUB=0'
+assert_contains "$DOCKERFILE" 'ARG WITH_GITLAB=0'
 
 echo "PASS: $pass_count launcher scenarios"

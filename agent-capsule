@@ -31,11 +31,13 @@
 #   -h, --help             show this help
 #
 # Integrations:
-#   superpowers, explain-diff, mcpvault, anydoc, worklog, kubernetes, talos, github
+#   superpowers, explain-diff, mcpvault, anydoc, worklog, kubernetes, talos, github,
+#   gitlab
 #   mcpvault requires --vault, and worklog requires mcpvault.
 #   anydoc and worklog are available only with claude.
 #   kubernetes installs kubectl and helm. talos installs talosctl.
 #   github installs gh and lends it the host's gh login.
+#   gitlab installs glab and lends it the host's glab login for AGENT_CAPSULE_GITLAB_HOST.
 #
 # Documentation: https://github.com/Niahh/agent-capsule
 #
@@ -115,6 +117,7 @@ KUBECTL_VERSION="${AGENT_CAPSULE_KUBECTL_VERSION:-}"
 HELM_VERSION="${AGENT_CAPSULE_HELM_VERSION:-}"
 TALOSCTL_VERSION="${AGENT_CAPSULE_TALOSCTL_VERSION:-}"
 GH_VERSION="${AGENT_CAPSULE_GH_VERSION:-}"
+GLAB_VERSION="${AGENT_CAPSULE_GLAB_VERSION:-}"
 
 # Unpinned tools track latest at build time, so an old image quietly stops doing
 # that. Age is the only signal for it: the bundle hash cannot see upstream move.
@@ -134,7 +137,7 @@ selected_version() {
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
-KNOWN_EXTRAS=(anydoc explain-diff github kubernetes mcpvault superpowers talos worklog)
+KNOWN_EXTRAS=(anydoc explain-diff github gitlab kubernetes mcpvault superpowers talos worklog)
 
 BUILD_DIR="$STATE_DIR/build"
 AUTH_ROOT_DIR="$STATE_DIR/auth-home"
@@ -169,6 +172,9 @@ VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
 
 # PEM file of the private CAs that --ca makes the capsule trust. Set alone, it mounts nothing.
 CA_CERTS="${AGENT_CAPSULE_CA_CERTS:-}"
+
+# The one GitLab instance --with gitlab reaches: its glab config binds one token to one host.
+GITLAB_INSTANCE="${AGENT_CAPSULE_GITLAB_HOST:-gitlab.com}"
 
 # Claude receives capsule-generated MCP servers through a file in the session
 # home, which is bind-mounted at /home/dev, and the --mcp-config flag.
@@ -748,6 +754,7 @@ kubectl $(selected_version "$KUBECTL_VERSION")
 helm $(selected_version "$HELM_VERSION")
 talosctl $(selected_version "$TALOSCTL_VERSION")
 gh $(selected_version "$GH_VERSION")
+glab $(selected_version "$GLAB_VERSION")
 VERSIONS
       exit 0
       ;;
@@ -860,7 +867,8 @@ for tagged_version in \
   "$KUBECTL_VERSION" \
   "$HELM_VERSION" \
   "$TALOSCTL_VERSION" \
-  "$GH_VERSION"; do
+  "$GH_VERSION" \
+  "$GLAB_VERSION"; do
   [[ -n "$tagged_version" ]] || continue
   if [[ ! "$tagged_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
     echo "Invalid pinned tagged version: $tagged_version" >&2
@@ -1048,6 +1056,12 @@ for extra in "${KNOWN_EXTRAS[@]}"; do
     break
   done
 done
+
+# The host ends up in git config keys and URLs.
+if [[ ",$EXTRAS," == *,gitlab,* && ! "$GITLAB_INSTANCE" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+  echo "Invalid AGENT_CAPSULE_GITLAB_HOST: $GITLAB_INSTANCE (a bare hostname, without scheme or port)." >&2
+  exit 1
+fi
 
 # One tag for every selection: the io.agent-capsule.bundle label decides whether
 # what it points at matches what this run asked for.
@@ -1348,8 +1362,8 @@ HASH="$(printf '%s\n' \
   "$NODE_TAG" "$GO_TAG" "$AGENT" "$EXTRAS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" "$KUBECTL_VERSION" "$HELM_VERSION" \
-  "$TALOSCTL_VERSION" "$GH_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" "$WORKLOG_HASH" |
-  sha256_stream)"
+  "$TALOSCTL_VERSION" "$GH_VERSION" "$GLAB_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" \
+  "$WORKLOG_HASH" | sha256_stream)"
 BUILD_CONTEXT_DIR="$BUILD_DIR/context"
 
 # Freshness is checked inside the lock only. An unlocked pre-check would save a
@@ -1445,6 +1459,7 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     --build-arg "HELM_VERSION=$HELM_VERSION" \
     --build-arg "TALOSCTL_VERSION=$TALOSCTL_VERSION" \
     --build-arg "GH_VERSION=$GH_VERSION" \
+    --build-arg "GLAB_VERSION=$GLAB_VERSION" \
     "${BUILD_SELECTION_ARGS[@]}" \
     --label "io.agent-capsule.bundle=$HASH" \
     --label "io.agent-capsule.refreshed-at=$REFRESHED_AT" \
@@ -1693,15 +1708,45 @@ fi
 # ----------------------------------------------------------------------------
 # In-memory handoff
 # ----------------------------------------------------------------------------
-# Token dirs of launches that died before their entrypoint ran, and CA dirs of
-# finished sessions. exec hands the launcher's PID to podman, so a live session
-# still holds the PID in its dir's name.
-for stale_dir in "$LOCK_ROOT"/gh-* "$LOCK_ROOT"/ca-*; do
+# gh token dirs of launches that died before their entrypoint ran, and the glab
+# and CA dirs of finished sessions. exec hands the launcher's PID to podman, so a
+# live session still holds the PID in its dir's name.
+for stale_dir in "$LOCK_ROOT"/gh-* "$LOCK_ROOT"/glab-* "$LOCK_ROOT"/ca-*; do
   [[ -d "$stale_dir" ]] || continue
   stale_pid="${stale_dir##*-}"
   [[ "$stale_pid" =~ ^[0-9]+$ ]] || continue
   kill -0 "$stale_pid" 2>/dev/null || rm -rf "$stale_dir"
 done
+
+# A fresh private dir in the runtime dir, mounted at /run/agent-capsule/NAME.
+HANDOFF_DIR=""
+handoff_dir() { # name
+  HANDOFF_DIR="$LOCK_ROOT/$1-$$"
+  rm -rf "$HANDOFF_DIR"
+  mkdir -m 700 "$HANDOFF_DIR"
+  add_mount "$HANDOFF_DIR" "/run/agent-capsule/$1"
+}
+
+# ----------------------------------------------------------------------------
+# Forge remotes
+# ----------------------------------------------------------------------------
+# git reads these per run, so the repo and the session home stay untouched. One
+# list for every forge, since GIT_CONFIG_* indices must not collide.
+GIT_CONFIG_ARGS=()
+add_git_config() { # key value
+  local index=$((${#GIT_CONFIG_ARGS[@]} / 4))
+
+  GIT_CONFIG_ARGS+=(-e "GIT_CONFIG_KEY_$index=$1" -e "GIT_CONFIG_VALUE_$index=$2")
+}
+
+# The capsule has no SSH key, so a forge's remotes go over HTTPS, with its CLI as
+# the only credential helper for it.
+forge_over_https() { # host helper
+  add_git_config "url.https://$1/.insteadOf" "git@$1:"
+  add_git_config "url.https://$1/.insteadOf" "ssh://git@$1/"
+  add_git_config "credential.https://$1.helper" ""
+  add_git_config "credential.https://$1.helper" "$2"
+}
 
 # ----------------------------------------------------------------------------
 # GitHub token handoff
@@ -1710,7 +1755,6 @@ done
 # runtime dir, which the entrypoint reads into GH_TOKEN and deletes. Never -e:
 # podman writes those values into the container config on disk.
 GH_TOKEN_DIR=""
-GH_CONTAINER_TOKEN_DIR=/run/agent-capsule/gh
 
 if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
   gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
@@ -1723,28 +1767,60 @@ if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
     if grep -q 'oauth_token:' "$gh_hosts_file" 2>/dev/null; then
       echo ">> GitHub  : warning: the host gh keeps its token in plain text in $gh_hosts_file" >&2
     fi
-    GH_TOKEN_DIR="$LOCK_ROOT/gh-$$"
-    rm -rf "$GH_TOKEN_DIR"
-    mkdir -m 700 "$GH_TOKEN_DIR"
+    handoff_dir gh
+    GH_TOKEN_DIR="$HANDOFF_DIR"
     (umask 077 && printf '%s' "$gh_token" > "$GH_TOKEN_DIR/token")
-    add_mount "$GH_TOKEN_DIR" "$GH_CONTAINER_TOKEN_DIR"
-    ENV_ARGS+=(-e "AGENT_CAPSULE_GH_TOKEN_FILE=$GH_CONTAINER_TOKEN_DIR/token")
+    ENV_ARGS+=(-e AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token)
   fi
   unset gh_token
 
-  # The capsule has no SSH key, so GitHub remotes go over HTTPS with gh's
-  # credentials. Set per run, so the repo and the session home stay untouched.
-  ENV_ARGS+=(
-    -e GIT_CONFIG_COUNT=4
-    -e 'GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf'
-    -e 'GIT_CONFIG_VALUE_0=git@github.com:'
-    -e 'GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf'
-    -e 'GIT_CONFIG_VALUE_1=ssh://git@github.com/'
-    -e 'GIT_CONFIG_KEY_2=credential.https://github.com.helper'
-    -e 'GIT_CONFIG_VALUE_2='
-    -e 'GIT_CONFIG_KEY_3=credential.https://github.com.helper'
-    -e 'GIT_CONFIG_VALUE_3=!gh auth git-credential'
-  )
+  forge_over_https github.com '!gh auth git-credential'
+fi
+
+# ----------------------------------------------------------------------------
+# GitLab token handoff
+# ----------------------------------------------------------------------------
+# The GitHub handoff, but as a glab config that binds the token to the instance:
+# glab sends GITLAB_TOKEN to whatever host a command names. Only a personal access
+# token crosses over: an OAuth token expires within hours, and refreshing it in the
+# capsule would rotate the host's refresh token and log the host out.
+GLAB_DIR=""
+
+if [[ ",$EXTRAS," == *,gitlab,* && "$AUTH_LOGIN" != "1" ]]; then
+  glab_config_file="${GLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/glab-cli}/config.yml"
+  glab_login="glab auth login --hostname $GITLAB_INSTANCE"
+  glab_token=""
+  # glab answers these before its stored login, and for any host.
+  glab_get=(env -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u OAUTH_TOKEN -u GLAB_IS_OAUTH2 glab config get)
+  if ! command -v glab >/dev/null 2>&1; then
+    echo ">> GitLab  : glab is not installed on the host, so glab in the capsule is logged out" >&2
+  elif ! glab_token="$("${glab_get[@]}" token --host "$GITLAB_INSTANCE" 2>/dev/null)" ||
+    [[ -z "$glab_token" ]]; then
+    echo ">> GitLab  : no glab login for $GITLAB_INSTANCE on the host. Run there: $glab_login" >&2
+  elif [[ "$("${glab_get[@]}" is_oauth2 --host "$GITLAB_INSTANCE" 2>/dev/null)" == true ]]; then
+    echo ">> GitLab  : the host glab uses OAuth for $GITLAB_INSTANCE, which the capsule cannot" \
+      "refresh. Log in there with a personal access token (api, write_repository): $glab_login" >&2
+  else
+    # A keyring login leaves an empty token in the file.
+    if grep -Eq "^[[:space:]]+token:[[:space:]]*[\"']?[^\"'[:space:]]" "$glab_config_file" 2>/dev/null; then
+      echo ">> GitLab  : warning: the host glab keeps a token in plain text in $glab_config_file" >&2
+    fi
+    handoff_dir glab
+    GLAB_DIR="$HANDOFF_DIR"
+    (umask 077 && printf "hosts:\n    %s:\n        token: '%s'\n" "$GITLAB_INSTANCE" "$glab_token" \
+      > "$GLAB_DIR/config.yml")
+    ENV_ARGS+=(-e GLAB_CONFIG_DIR=/run/agent-capsule/glab)
+  fi
+  unset glab_token
+
+  # glab then targets the instance outside a repository, and refuses one whose
+  # remotes are on another host.
+  ENV_ARGS+=(-e "GITLAB_HOST=$GITLAB_INSTANCE")
+  forge_over_https "$GITLAB_INSTANCE" '!glab auth git-credential'
+fi
+
+if ((${#GIT_CONFIG_ARGS[@]} > 0)); then
+  ENV_ARGS+=(-e "GIT_CONFIG_COUNT=$((${#GIT_CONFIG_ARGS[@]} / 4))" "${GIT_CONFIG_ARGS[@]}")
 fi
 
 # ----------------------------------------------------------------------------
@@ -1754,11 +1830,9 @@ fi
 # entrypoint keeps the trust bundle next to them, so the dir lasts the session.
 CA_DIR=""
 if [[ -n "$CA_PEM" ]]; then
-  CA_DIR="$LOCK_ROOT/ca-$$"
-  rm -rf "$CA_DIR"
-  mkdir -m 700 "$CA_DIR"
+  handoff_dir ca
+  CA_DIR="$HANDOFF_DIR"
   (umask 077 && printf '%s\n' "$CA_PEM" > "$CA_DIR/extra.pem")
-  add_mount "$CA_DIR" /run/agent-capsule/ca
   ENV_ARGS+=(-e AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca)
 fi
 
@@ -1811,6 +1885,9 @@ if [[ "$SHARED_CRED_MOUNTED" == "1" ]]; then
 fi
 if [[ -n "$GH_TOKEN_DIR" ]]; then
   echo ">> GitHub  : host gh login, kept in memory in the capsule; git uses HTTPS"
+fi
+if [[ -n "$GLAB_DIR" ]]; then
+  echo ">> GitLab  : host glab login for $GITLAB_INSTANCE, kept in memory in the capsule; git uses HTTPS"
 fi
 if [[ -n "$CA_DIR" ]]; then
   ca_count="$(grep -c -- '-----BEGIN CERTIFICATE-----' "$CA_DIR/extra.pem")"
