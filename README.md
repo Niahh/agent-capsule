@@ -180,9 +180,10 @@ AGENT_CAPSULE_GOLANGCI_LINT_VERSION
 AGENT_CAPSULE_KUBECTL_VERSION
 AGENT_CAPSULE_HELM_VERSION
 AGENT_CAPSULE_TALOSCTL_VERSION
+AGENT_CAPSULE_GH_VERSION
 ```
 
-Superpowers, golangci-lint, kubectl, Helm, and talosctl use Git tags, including the
+Superpowers, golangci-lint, kubectl, Helm, talosctl, and gh use Git tags, including the
 leading `v`.
 `agent-capsule --versions` prints `latest` for everything unpinned.
 The default base tags are the floating `node:trixie-slim` and `golang:trixie` tags.
@@ -201,6 +202,7 @@ agent-capsule --with explain-diff .             # explain a change as interactiv
 agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
 agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # log significant work
 agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
+agent-capsule --with github .                   # gh with the host gh login, git over HTTPS
 agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
 agent-capsule --agent codex --auth-login        # once: log in to Codex instead
 agent-capsule --agent codex ~/code/myapp        # run Codex CLI in a capsule on a project
@@ -353,6 +355,33 @@ To keep them in every session, add them to `AGENT_CAPSULE_WITH`, see
 The cluster must be reachable from the container, so these commands fail under
 `--offline`. A kubeconfig that calls an exec credential plugin also needs that plugin
 inside the image.
+
+## GitHub
+
+`--with github` installs `gh` and lends it the host's `gh` login. Log in once on the
+host, where `gh` keeps the token in the system keyring:
+
+```sh
+gh auth login --scopes workflow      # on the host
+agent-capsule --with github .
+```
+
+- The launcher reads the token with `gh auth token` and passes it through a file in
+  `$XDG_RUNTIME_DIR`, which is in memory. The entrypoint moves it into `GH_TOKEN` and
+  deletes the file before the agent starts. If the container never starts, the next
+  launch deletes it. Without `$XDG_RUNTIME_DIR`, as on macOS, the file is in `$TMPDIR`
+  instead, which is on disk.
+- It is not passed with `-e`, because podman stores those values in the container
+  config on disk.
+- Inside the capsule, `git@github.com:` and `ssh://git@github.com/` remotes go over
+  HTTPS, with `gh` as the credential helper. This is set per run through
+  `GIT_CONFIG_*` variables. The repository and the session home are not changed.
+- `workflow` lets pushes change `.github/workflows/`. GitHub rejects them without it.
+- Without `github`, the session gets no token, no `gh` and no git rewrite.
+
+The agent can read `GH_TOKEN`, and the token can reach every repository your account
+can. Protect the branches that matter. The launcher warns when the host `gh` stores
+its token in plain text, which it does when no keyring is available.
 
 ## Persistent defaults
 

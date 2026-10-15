@@ -49,6 +49,7 @@ jobs:
             --build-arg "AGENT=${{ matrix.agent }}" \
             --build-arg "WITH_ANYDOC=$anydoc" \
             --build-arg WITH_EXPLAIN_DIFF=1 \
+            --build-arg WITH_GITHUB=1 \
             --build-arg WITH_KUBERNETES=1 \
             --build-arg WITH_MCPVAULT=1 \
             --build-arg WITH_SUPERPOWERS=1 \
@@ -77,6 +78,8 @@ jobs:
           docker run --rm agent-capsule:test kubectl version --client
           docker run --rm agent-capsule:test helm version
           docker run --rm agent-capsule:test talosctl version --client
+      - name: gh is installed
+        run: docker run --rm agent-capsule:test gh --version
       - name: The explain-diff skill is linked and then removed again
         run: |
           skills_home="capsule-skills-smoke-${GITHUB_RUN_ID}-${{ matrix.agent }}"
@@ -125,18 +128,18 @@ jobs:
              codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
 
   # The matrix enables every integration, so only a default build can show that
-  # the cluster CLIs stay out unless selected.
+  # optional CLIs stay out unless selected.
   image-default:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - run: docker build -t agent-capsule:default .
-      - name: Unselected cluster CLIs are absent
+      - name: Unselected CLIs are absent
         run: |
           # Otherwise a broken image would pass every absence check below.
           docker run --rm agent-capsule:default true
-          for tool in kubectl helm talosctl; do
+          for tool in kubectl helm talosctl gh; do
             if docker run --rm agent-capsule:default bash -c "command -v $tool"; then
               echo "$tool is present in the default image" >&2
               exit 1

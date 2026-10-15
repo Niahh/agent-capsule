@@ -7,6 +7,13 @@
 # safe way to remove it when the integration is deactivated.
 set -e
 
+# First, so the token file is gone even if a later step fails.
+if [[ -n "${AGENT_CAPSULE_GH_TOKEN_FILE:-}" && -f "$AGENT_CAPSULE_GH_TOKEN_FILE" ]]; then
+  GH_TOKEN="$(<"$AGENT_CAPSULE_GH_TOKEN_FILE")"
+  export GH_TOKEN
+  rm -f "$AGENT_CAPSULE_GH_TOKEN_FILE"
+fi
+
 skills_dir="${AGENT_CAPSULE_SKILLS_DIR:-}"
 if [[ -n "$skills_dir" ]]; then
   skill="$skills_dir/explain-diff-html"

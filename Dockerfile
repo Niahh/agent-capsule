@@ -10,6 +10,7 @@ ARG GOLANGCI_LINT_VERSION=""
 ARG KUBECTL_VERSION=""
 ARG HELM_VERSION=""
 ARG TALOSCTL_VERSION=""
+ARG GH_VERSION=""
 ARG SUPERPOWERS_VERSION=""
 ARG CLAUDE_CODE_VERSION=""
 ARG CODEX_VERSION=""
@@ -27,6 +28,7 @@ ARG GOLANGCI_LINT_VERSION
 ARG KUBECTL_VERSION
 ARG HELM_VERSION
 ARG TALOSCTL_VERSION
+ARG GH_VERSION
 ARG SUPERPOWERS_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG CODEX_VERSION
@@ -66,6 +68,7 @@ RUN if [ -n "$GOLANGCI_LINT_VERSION" ]; then \
 ARG AGENT=claude
 ARG WITH_ANYDOC=0
 ARG WITH_EXPLAIN_DIFF=0
+ARG WITH_GITHUB=0
 ARG WITH_KUBERNETES=0
 ARG WITH_MCPVAULT=0
 ARG WITH_SUPERPOWERS=0
@@ -155,6 +158,26 @@ RUN if [ "$WITH_TALOS" = 1 ]; then \
         "$(curl -sSfL "$talosctl_url/sha256sum.txt" | awk -v file="$talosctl_file" '$2 == file {print $1}')" \
         | sha256sum -c - \
       && chmod 0755 /usr/local/bin/talosctl; \
+    fi
+
+# Checked against the release's own sums, like talosctl.
+RUN if [ "$WITH_GITHUB" = 1 ]; then \
+      gh_release=https://github.com/cli/cli/releases \
+      && gh_version="${GH_VERSION:-latest}" \
+      && if [ "$gh_version" = latest ]; then \
+        gh_version="$(curl -sSfL -o /dev/null -w '%{url_effective}' "$gh_release/latest")" \
+        && gh_version="${gh_version##*/}"; \
+      fi \
+      && gh_name="gh_${gh_version#v}_linux_$(dpkg --print-architecture)" \
+      && gh_url="$gh_release/download/$gh_version" \
+      && curl -sSfL "$gh_url/$gh_name.tar.gz" -o /tmp/gh.tar.gz \
+      && printf '%s  /tmp/gh.tar.gz\n' \
+        "$(curl -sSfL "$gh_url/gh_${gh_version#v}_checksums.txt" \
+          | awk -v file="$gh_name.tar.gz" '$2 == file {print $1}')" \
+        | sha256sum -c - \
+      && tar -xzf /tmp/gh.tar.gz -C /usr/local/bin --strip-components=2 --no-same-owner \
+        "$gh_name/bin/gh" \
+      && rm /tmp/gh.tar.gz; \
     fi
 
 # One CLI, not three: a run uses exactly one agent and each package is large.
