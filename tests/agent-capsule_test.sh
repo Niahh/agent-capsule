@@ -251,6 +251,7 @@ new_case() {
   CAPSULE_HOME="$CASE_DIR/capsule"
   HOST_HOME="$CASE_DIR/home"
   PODMAN_LOG="$CASE_DIR/podman.log"
+  XDG_DIR="$CASE_DIR/xdg"
   PODMAN_IMAGE_STATE="$CASE_DIR/podman-images"
   OUTPUT="$CASE_DIR/output"
   GH_LOG="$CASE_DIR/gh.log"
@@ -277,7 +278,7 @@ run_capsule() {
     PODMAN_DANGLING="${PODMAN_DANGLING:-}" \
     AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
     AGENT_CAPSULE_DOCKERFILE="${AGENT_CAPSULE_DOCKERFILE:-$DOCKERFILE}" \
-    XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+    XDG_RUNTIME_DIR="$XDG_DIR" \
     "$BASH_BIN" "$SCRIPT" "$@" > "$run_output" 2>&1
 }
 
@@ -642,7 +643,7 @@ assert_not_contains "$PODMAN_LOG" 'gho_secret123'
 assert_not_contains "$OUTPUT" 'plain text'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token'
 gh_token_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/gh\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
-[[ "$gh_token_dir" == "$TEST_ROOT/xdg/"* ]] || fail "token dir is outside the runtime dir: $gh_token_dir"
+[[ "$gh_token_dir" == "$XDG_DIR/"* ]] || fail "token dir is outside the runtime dir: $gh_token_dir"
 [[ "$(<"$gh_token_dir/token")" == gho_secret123 ]] || fail "token file does not hold the host token"
 [[ "$(file_mode "$gh_token_dir")" == 700 ]] || fail "token dir is not private"
 [[ "$(file_mode "$gh_token_dir/token")" == 600 ]] || fail "token file is not private"
@@ -679,13 +680,12 @@ assert_not_contains "$OUTPUT" 'gho_plain'
 
 # Token dirs of finished launches are removed. A live launch keeps its own.
 new_case
-runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+runtime_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$runtime_root/gh-999999999" "$runtime_root/gh-$$"
 touch "$runtime_root/gh-999999999/token" "$runtime_root/gh-$$/token"
 run_capsule --shell --session gh-sweep "$ROOT_DIR"
 [[ ! -e "$runtime_root/gh-999999999" ]] || fail "a finished launch's token dir survived"
 [[ -e "$runtime_root/gh-$$/token" ]] || fail "a live launch's token dir was removed"
-rm -rf "$runtime_root/gh-$$"
 
 # The entrypoint moves the token into GH_TOKEN and deletes the file before the
 # command starts.
@@ -734,7 +734,7 @@ assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca'
 assert_not_contains "$PODMAN_LOG" 'MIIBcapsuleRoot'
 assert_contains "$OUTPUT" '2 certificates'
 ca_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/ca\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
-[[ "$ca_dir" == "$TEST_ROOT/xdg/"* ]] || fail "CA dir is outside the runtime dir: $ca_dir"
+[[ "$ca_dir" == "$XDG_DIR/"* ]] || fail "CA dir is outside the runtime dir: $ca_dir"
 expected_ca="$(printf -- '%s\n' '-----BEGIN CERTIFICATE-----' MIIBcapsuleRootOne \
   '-----END CERTIFICATE-----' '-----BEGIN CERTIFICATE-----' MIIBcapsuleRootTwo \
   '-----END CERTIFICATE-----')"
@@ -755,13 +755,12 @@ done
 # The entrypoint points TLS clients at the CA, so its dir lives as long as the
 # session. The next launch removes those of finished launches, never a live one's.
 new_case
-runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+runtime_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$runtime_root/ca-999999999" "$runtime_root/ca-$$"
 touch "$runtime_root/ca-999999999/extra.pem" "$runtime_root/ca-$$/extra.pem"
 run_capsule --shell --session ca-sweep "$ROOT_DIR"
 [[ ! -e "$runtime_root/ca-999999999" ]] || fail "a finished launch's CA dir survived"
 [[ -e "$runtime_root/ca-$$/extra.pem" ]] || fail "a live launch's CA dir was removed"
-rm -rf "$runtime_root/ca-$$"
 
 # The entrypoint adds the CA to what the capsule already trusts. git and Node read
 # neither SSL_CERT_FILE nor each other's variable, so each gets its own.
@@ -810,7 +809,7 @@ assert_contains "$PODMAN_LOG" 'ARG=GLAB_CONFIG_DIR=/run/agent-capsule/glab'
 assert_not_contains "$PODMAN_LOG" 'GITLAB_TOKEN'
 assert_contains "$PODMAN_LOG" 'ARG=GITLAB_HOST=gitlab.com'
 glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
-[[ "$glab_dir" == "$TEST_ROOT/xdg/"* ]] || fail "glab dir is outside the runtime dir: $glab_dir"
+[[ "$glab_dir" == "$XDG_DIR/"* ]] || fail "glab dir is outside the runtime dir: $glab_dir"
 expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token: 'glpat-secret123'")"
 [[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
   fail "the glab config does not bind the token to gitlab.com: $(<"$glab_dir/config.yml")"
@@ -922,13 +921,12 @@ expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token:
 # glab reads its config for the whole session, so the next launch removes the dirs
 # of finished sessions, never a live one's.
 new_case
-runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+runtime_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$runtime_root/glab-999999999" "$runtime_root/glab-$$"
 touch "$runtime_root/glab-999999999/config.yml" "$runtime_root/glab-$$/config.yml"
 run_capsule --shell --session glab-sweep "$ROOT_DIR"
 [[ ! -e "$runtime_root/glab-999999999" ]] || fail "a finished session's glab dir survived"
 [[ -e "$runtime_root/glab-$$/config.yml" ]] || fail "a live session's glab dir was removed"
-rm -rf "$runtime_root/glab-$$"
 
 # Every capsule runs without capabilities or privilege escalation, within limits,
 # and --offline takes the network away.
@@ -1016,7 +1014,7 @@ assert_not_contains "$PODMAN_LOG" 'anthropic-secret'
 assert_not_contains "$PODMAN_LOG" 'openai-secret'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys'
 keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
-[[ "$keys_dir" == "$TEST_ROOT/xdg/"* ]] || fail "keys dir is outside the runtime dir: $keys_dir"
+[[ "$keys_dir" == "$XDG_DIR/"* ]] || fail "keys dir is outside the runtime dir: $keys_dir"
 [[ "$(<"$keys_dir/ANTHROPIC_API_KEY")" == anthropic-secret ]] || fail "the Anthropic key was not handed over"
 [[ "$(<"$keys_dir/OPENAI_API_KEY")" == openai-secret ]] || fail "the OpenAI key was not handed over"
 [[ "$(file_mode "$keys_dir")" == 700 ]] || fail "keys dir is not private"
@@ -1043,13 +1041,12 @@ AGENT_CAPSULE_KEYS_DIR="$CASE_DIR/keys" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
 
 # Key dirs of launches that died before their entrypoint ran are removed, never a live one's.
 new_case
-runtime_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+runtime_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$runtime_root/keys-999999999" "$runtime_root/keys-$$"
 touch "$runtime_root/keys-999999999/ANTHROPIC_API_KEY" "$runtime_root/keys-$$/ANTHROPIC_API_KEY"
 run_capsule --shell --session keys-sweep "$ROOT_DIR"
 [[ ! -e "$runtime_root/keys-999999999" ]] || fail "a finished launch's keys dir survived"
 [[ -e "$runtime_root/keys-$$/ANTHROPIC_API_KEY" ]] || fail "a live launch's keys dir was removed"
-rm -rf "$runtime_root/keys-$$"
 
 new_case
 run_capsule_fails --agent codex --with anydoc --session unsupported-extra "$ROOT_DIR"
@@ -1330,7 +1327,7 @@ assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
 new_case
 HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
   PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" XDG_RUNTIME_DIR="$XDG_DIR" \
   "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p question > "$OUTPUT" 2> "$CASE_DIR/stderr"
 [[ ! -s "$OUTPUT" ]] || fail "status reached stdout: $(head -n 3 "$OUTPUT")"
 assert_contains "$CASE_DIR/stderr" '>> Project :'
@@ -1418,7 +1415,7 @@ HOME="$HOST_HOME" \
   PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
   AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
   AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
-  XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  XDG_RUNTIME_DIR="$XDG_DIR" \
   "$BASH_BIN" "$SCRIPT" --shell --session shasum-fallback "$ROOT_DIR" > "$OUTPUT" 2>&1
 assert_contains "$PODMAN_LOG" 'CALL=run'
 [[ "$(file_mode "$CAPSULE_HOME/CLAUDE.md")" == "600" ]] || fail "default rules mode is not private"
@@ -1490,13 +1487,13 @@ wait "$first_pid"
 wait "$second_pid"
 [[ "$(grep -c '^CALL=build$' "$PODMAN_LOG")" == "1" ]] ||
   fail "concurrent launches built the image more than once"
-[[ ! -e "$TEST_ROOT/xdg/agent-capsule-$UID/image.lock" ]] ||
+[[ ! -e "$XDG_DIR/agent-capsule-$UID/image.lock" ]] ||
   fail "image build lock was not removed"
 
 # A process killed before its EXIT trap leaves a stale lock. The next launch
 # must reclaim it instead of waiting forever.
 new_case
-stale_lock_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+stale_lock_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$stale_lock_root"
 printf '%s\n' 999999999 > "$stale_lock_root/image.lock"
 status=0
@@ -1507,14 +1504,14 @@ timeout 2 env \
   PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
   AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
   AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
-  XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  XDG_RUNTIME_DIR="$XDG_DIR" \
   "$BASH_BIN" "$SCRIPT" --shell --session stale-lock "$ROOT_DIR" > "$OUTPUT" 2>&1 || status=$?
 [[ "$status" == "0" ]] || fail "stale image lock was not reclaimed"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
 # A directory at the lock path is reported and left alone, never waited on.
 new_case
-legacy_lock_root="$TEST_ROOT/xdg/agent-capsule-$UID"
+legacy_lock_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$legacy_lock_root/image.lock"
 status=0
 timeout 2 env \
@@ -1524,12 +1521,11 @@ timeout 2 env \
   PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
   AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
   AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
-  XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  XDG_RUNTIME_DIR="$XDG_DIR" \
   "$BASH_BIN" "$SCRIPT" --shell --session legacy-lock "$ROOT_DIR" > "$OUTPUT" 2>&1 || status=$?
 assert_status_fails "$status"
 [[ -d "$legacy_lock_root/image.lock" ]] || fail "legacy image lock was removed"
 assert_contains "$OUTPUT" 'Not a lock file'
-rmdir "$legacy_lock_root/image.lock"
 
 # Shell completion asks the launcher for these two lists, so the contract is
 # one value per line, exit 0, and no podman anywhere near it.
