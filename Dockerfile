@@ -7,6 +7,9 @@ ARG GO_TAG=trixie
 # agent-capsule passes a value only when AGENT_CAPSULE_*_VERSION pins one, so
 # there is no second set of defaults here to drift out of step with the script.
 ARG GOLANGCI_LINT_VERSION=""
+ARG KUBECTL_VERSION=""
+ARG HELM_VERSION=""
+ARG TALOSCTL_VERSION=""
 ARG SUPERPOWERS_VERSION=""
 ARG CLAUDE_CODE_VERSION=""
 ARG CODEX_VERSION=""
@@ -21,6 +24,9 @@ FROM node:${NODE_TAG}
 
 # Re-declare after FROM so the build arg is visible to the RUN step below.
 ARG GOLANGCI_LINT_VERSION
+ARG KUBECTL_VERSION
+ARG HELM_VERSION
+ARG TALOSCTL_VERSION
 ARG SUPERPOWERS_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG CODEX_VERSION
@@ -59,8 +65,10 @@ RUN if [ -n "$GOLANGCI_LINT_VERSION" ]; then \
 ARG AGENT=claude
 ARG WITH_ANYDOC=0
 ARG WITH_EXPLAIN_DIFF=0
+ARG WITH_KUBERNETES=0
 ARG WITH_MCPVAULT=0
 ARG WITH_SUPERPOWERS=0
+ARG WITH_TALOS=0
 
 # Integrations are installed only when selected, one layer each: a RUN's cache
 # key is its expanded command, so toggling one leaves the others cached.
@@ -90,6 +98,25 @@ RUN if [ "$WITH_EXPLAIN_DIFF" = 1 ]; then \
       && curl -sSfL "$explain_diff_url" -o /opt/explain-diff-html/SKILL.md; \
     fi
 
+# Release binaries, checked against the SHA-256 sums published beside them.
+# helm's install script is not used because it needs openssl.
+RUN if [ "$WITH_KUBERNETES" = 1 ]; then \
+      arch="$(dpkg --print-architecture)" \
+      && kubectl_version="${KUBECTL_VERSION:-$(curl -sSfL https://dl.k8s.io/release/stable.txt)}" \
+      && kubectl_url="https://dl.k8s.io/release/$kubectl_version/bin/linux/$arch/kubectl" \
+      && curl -sSfL "$kubectl_url" -o /usr/local/bin/kubectl \
+      && printf '%s  /usr/local/bin/kubectl\n' "$(curl -sSfL "$kubectl_url.sha256")" | sha256sum -c - \
+      && chmod 0755 /usr/local/bin/kubectl \
+      && helm_version="${HELM_VERSION:-$(curl -sSfL https://get.helm.sh/helm-latest-version)}" \
+      && helm_url="https://get.helm.sh/helm-$helm_version-linux-$arch.tar.gz" \
+      && curl -sSfL "$helm_url" -o /tmp/helm.tar.gz \
+      && printf '%s  /tmp/helm.tar.gz\n' "$(curl -sSfL "$helm_url.sha256sum" | awk '{print $1}')" \
+        | sha256sum -c - \
+      && tar -xzf /tmp/helm.tar.gz -C /usr/local/bin --strip-components=1 --no-same-owner \
+        "linux-$arch/helm" \
+      && rm /tmp/helm.tar.gz; \
+    fi
+
 RUN if [ "$WITH_MCPVAULT" = 1 ]; then \
       npm install -g "@bitbonsai/mcpvault@${MCPVAULT_VERSION:-latest}" \
       && npm cache clean --force; \
@@ -108,6 +135,24 @@ RUN if [ "$WITH_SUPERPOWERS" = 1 ]; then \
       && git clone --depth 1 --branch "$superpowers_ref" \
         https://github.com/obra/superpowers.git /opt/superpowers/source \
       && git -C /opt/superpowers/source checkout -B main; \
+    fi
+
+# Checked like the kubernetes binaries. talos's install script is not used
+# because it checks every version against the latest release's sums.
+RUN if [ "$WITH_TALOS" = 1 ]; then \
+      talos_release=https://github.com/siderolabs/talos/releases \
+      && talosctl_version="${TALOSCTL_VERSION:-latest}" \
+      && if [ "$talosctl_version" = latest ]; then \
+        talosctl_version="$(curl -sSfL -o /dev/null -w '%{url_effective}' "$talos_release/latest")" \
+        && talosctl_version="${talosctl_version##*/}"; \
+      fi \
+      && talosctl_file="talosctl-linux-$(dpkg --print-architecture)" \
+      && talosctl_url="$talos_release/download/$talosctl_version" \
+      && curl -sSfL "$talosctl_url/$talosctl_file" -o /usr/local/bin/talosctl \
+      && printf '%s  /usr/local/bin/talosctl\n' \
+        "$(curl -sSfL "$talosctl_url/sha256sum.txt" | awk -v file="$talosctl_file" '$2 == file {print $1}')" \
+        | sha256sum -c - \
+      && chmod 0755 /usr/local/bin/talosctl; \
     fi
 
 # One CLI, not three: a run uses exactly one agent and each package is large.
