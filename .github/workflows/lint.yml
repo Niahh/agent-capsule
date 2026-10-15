@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: |
-          shellcheck agent-capsule tests/agent-capsule_test.sh entrypoint.sh \
+          shellcheck agent-capsule tests/agent-capsule_test.sh tests/worklog_test.sh entrypoint.sh \
             completions/agent-capsule.bash
 
   hadolint:
@@ -30,7 +30,7 @@ jobs:
           config: .hadolint.yaml
 
   # Every image now carries one agent and only the selected integrations, so
-  # each agent needs its own build. anydoc is claude-only, matching the launcher.
+  # each agent needs its own build. anydoc and worklog are claude-only, matching the launcher.
   image-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -43,7 +43,8 @@ jobs:
       - name: Build the ${{ matrix.agent }} image with every supported integration
         run: |
           anydoc=0
-          if [ "${{ matrix.agent }}" = claude ]; then anydoc=1; fi
+          worklog=0
+          if [ "${{ matrix.agent }}" = claude ]; then anydoc=1; worklog=1; fi
           docker build -t agent-capsule:test \
             --build-arg "AGENT=${{ matrix.agent }}" \
             --build-arg "WITH_ANYDOC=$anydoc" \
@@ -52,6 +53,7 @@ jobs:
             --build-arg WITH_MCPVAULT=1 \
             --build-arg WITH_SUPERPOWERS=1 \
             --build-arg WITH_TALOS=1 \
+            --build-arg "WITH_WORKLOG=$worklog" \
             .
       - name: Only the selected agent is installed
         run: |
@@ -69,6 +71,7 @@ jobs:
           docker run --rm agent-capsule:test bash -c 'test -d /opt/superpowers/source'
           docker run --rm agent-capsule:test bash -c 'test -f /opt/explain-diff-html/SKILL.md'
           docker run --rm agent-capsule:test mcpvault --help
+          docker run --rm agent-capsule:test bash -c 'test -f /opt/worklog/plugin/.claude-plugin/plugin.json'
       - name: Cluster CLIs are installed
         run: |
           docker run --rm agent-capsule:test kubectl version --client
@@ -139,6 +142,8 @@ jobs:
               exit 1
             fi
           done
+      - name: Legacy zone names resolve
+        run: docker run --rm -e TZ=US/Eastern agent-capsule:default date +%Z | grep -Eqx 'E[SD]T'
 
   nix:
     runs-on: ubuntu-latest

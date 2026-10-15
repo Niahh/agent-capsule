@@ -37,8 +37,8 @@ limits. Everything else on the host stays out of reach.
 ## Requirements
 
 - Linux with rootless Podman configured, **or** macOS with Podman (see below)
-- `make` for `make install` (or copy `agent-capsule`, `Dockerfile`, and
-  `entrypoint.sh` manually)
+- `make` for `make install` (or copy `agent-capsule`, `Dockerfile`,
+  `entrypoint.sh`, and the `plugins/` directory manually)
 
 ### macOS
 
@@ -74,7 +74,7 @@ Leaving out `$HOME:$HOME` breaks the launch, since agent-capsule bind-mounts
 
 ```sh
 make install                    # -> ~/.local/bin/agent-capsule
-                                #    ~/.local/share/agent-capsule/{Dockerfile,entrypoint.sh}
+                                #    ~/.local/share/agent-capsule/{Dockerfile,entrypoint.sh,plugins/}
 make install PREFIX=/usr/local  # alternative destination
 ```
 
@@ -199,6 +199,7 @@ agent-capsule --session fix-auth ~/code/myapp   # named session for parallel age
 agent-capsule --with superpowers .              # activate bundled development skills
 agent-capsule --with explain-diff .             # explain a change as interactive HTML
 agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
+agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # log significant work
 agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
 agent-capsule . -- -p "explain this repo"       # args after -- go to the agent
 agent-capsule --agent codex --auth-login        # once: log in to Codex instead
@@ -234,8 +235,8 @@ Their values are not placed in the Podman command line.
 
 Differences under opencode: per-project memory is unavailable (it is a Claude Code
 mechanism), Superpowers and MCP servers use invocation-scoped configuration, and the
-claude-only `anydoc` integration is rejected. User-owned OpenCode configuration files
-are left untouched.
+claude-only `anydoc` and `worklog` integrations are rejected. User-owned OpenCode
+configuration files are left untouched.
 
 Codex also has no shared Claude memory. Its `--auth-login` defaults to device-code
 authentication because its browser callback stays inside the container. Custom login
@@ -299,6 +300,38 @@ Notes:
   server through invocation-scoped configuration, so user config files stay intact.
   Codex receives configuration overrides layered over its existing `config.toml`.
 
+## Work log in Obsidian
+
+`--with mcpvault,worklog` makes Claude Code write up significant work in your vault.
+After each turn that changes files in a git repository, the session gets one extra turn
+to update the note that documents the work and to tick an entry in today's note.
+It needs `mcpvault`, and so a vault, and it is available only with claude.
+
+```sh
+agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # for one run
+export AGENT_CAPSULE_WITH=mcpvault,worklog                      # or by default
+```
+
+The built-in procedure learns your vault's conventions from its README or index notes.
+To use your own, write `~/.agent-capsule/log-work.md`, or point the variable at a file:
+
+```sh
+export AGENT_CAPSULE_WORKLOG_PROCEDURE="$HOME/notes/log-work.md"
+```
+
+The file is mounted read-only at `/etc/agent-capsule/log-work.md`. A path set in the
+variable must exist. The default path is used only when the file exists, and is never
+created. The startup banner shows which procedure is active.
+
+- `/worklog:log-work [what]` logs by hand, whatever the last turn changed.
+- Put `#no-doc` in a prompt to skip logging for that turn.
+- The hook sees changed files only. It does not see ops commands that change no file,
+  other repositories, or directories that are not in git.
+- Its worktree snapshots live in `~/.cache/worklog/` in the session home, not in the
+  repository.
+- In non-interactive `-p` runs the printed result can be the log reply rather than
+  the answer, so leave `worklog` out of `--with` for those runs.
+
 ## Kubernetes and Talos
 
 `--with kubernetes` installs `kubectl` and `helm`, and `--with talos` installs
@@ -350,6 +383,7 @@ Selection and image lifecycle:
 - `AGENT_CAPSULE_NODE_TAG=trixie-slim`: Node base image tag.
 - `AGENT_CAPSULE_GO_TAG=trixie`: Go toolchain image tag.
 - `AGENT_CAPSULE_DOCKERFILE=`: explicit path to the installed Dockerfile.
+  `entrypoint.sh` and `plugins/worklog/` must sit beside it.
 - `AGENT_CAPSULE_*_VERSION=`: optional tool pins listed under
   [Tool versions and upgrades](#tool-versions-and-upgrades).
 
@@ -362,12 +396,17 @@ Sessions and runtime limits:
 - `AGENT_CAPSULE_PIDS_LIMIT=512`: container process limit.
 - `AGENT_CAPSULE_KEEPID=0`: set to `1` to use the host UID and GID inside.
 - `AGENT_CAPSULE_OFFLINE=0`: set to `1` to disable container networking.
+- `TZ=`: forwarded to the container; when unset, the zone comes from the
+  `/etc/localtime` link, so dates and commit times match the host.
 
 Shared state and mounts:
 
 - `AGENT_CAPSULE_SHARED_RULES=~/.agent-capsule/CLAUDE.md`: global rules file.
 - `AGENT_CAPSULE_SHARED_RULES_ENABLED=1`: set to `0` to disable global rules.
 - `AGENT_CAPSULE_SHARED_RULES_READONLY=1`: set to `0` for a writable rules mount.
+- `AGENT_CAPSULE_WORKLOG_PROCEDURE=~/.agent-capsule/log-work.md`: worklog
+  procedure. The default file is used only when it exists; a path set here must
+  exist.
 - `AGENT_CAPSULE_SHARED_MEMORY_ENABLED=1`: set to `0` to disable Claude project
   memory sharing.
 - `AGENT_CAPSULE_SHARED_MEMORY_READONLY=0`: set to `1` for read-only shared memory.
@@ -388,6 +427,7 @@ auth-home/<agent>/       isolated login home for each agent
 homes/<session>/         one isolated /home/dev per session
 project-memory/<hash>/   per-project memory pooled across sessions (claude only)
 CLAUDE.md                global rules mounted into every session, for every agent
+log-work.md              worklog procedure, when you write one
 build/                   image build context
 ```
 
@@ -418,8 +458,8 @@ fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
 Agents, integrations and sessions are completed from live data: the first two
 come from `agent-capsule --agent list` and `agent-capsule --with list`, the third
 from the session homes that exist. `--with` completes one element at a time after
-each comma and drops what you have already picked, and `anydoc` disappears once
-`--agent codex` or `--agent opencode` is on the line.
+each comma and drops what you have already picked, and `anydoc` and `worklog`
+disappear once `--agent codex` or `--agent opencode` is on the line.
 
 ## Command help
 
