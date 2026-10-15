@@ -64,6 +64,7 @@
                     findutils
                     gawk
                     git
+                    gnugrep
                   ]
                 )
               }
