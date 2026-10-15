@@ -1763,6 +1763,35 @@ assert_contains "$PODMAN_LOG" 'CALL=build'
 CAPSULE_HOME="$other_capsule_home" run_capsule --shell --session second-home "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 
+# A profile is another AGENT_CAPSULE_HOME. Two of them on one project keep their login,
+# sessions and project memory apart, and still share the image.
+new_case profiles-side-by-side
+main_home="$CAPSULE_HOME"
+work_home="$CASE_DIR/work-capsule"
+mkdir -p "$work_home/auth-home/claude/.claude"
+printf 'work-token\n' > "$work_home/auth-home/claude/.claude/.credentials.json"
+ANTHROPIC_API_KEY=main-key run_capsule --shell "$ROOT_DIR"
+cp "$PODMAN_LOG" "$CASE_DIR/main.log"
+main_keys="$(mount_source /run/agent-capsule/keys)"
+CAPSULE_HOME="$work_home" ANTHROPIC_API_KEY=work-key run_capsule --shell "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+for state in homes/ project-memory/ auth-home/claude/.claude/.credentials.json; do
+  assert_contains "$PODMAN_LOG" "ARG=$work_home/$state"
+done
+assert_not_contains "$PODMAN_LOG" "ARG=$main_home/"
+assert_not_contains "$CASE_DIR/main.log" "ARG=$work_home/"
+[[ "$(mount_source /run/agent-capsule/keys)" != "$main_keys" ]] || fail "both profiles used one keys dir"
+main_name="$(awk '$0 == "ARG=--name" { getline; print }' "$CASE_DIR/main.log")"
+work_name="$(awk '$0 == "ARG=--name" { getline; print }' "$PODMAN_LOG")"
+[[ -n "$main_name" && "$main_name" != "$work_name" ]] || fail "both profiles used container name $main_name"
+
+# A profile can point its rules back at the main folder's file.
+new_case profile-shared-rules
+main_home="$CAPSULE_HOME"
+run_capsule --shell --session rules-main "$ROOT_DIR"
+CAPSULE_HOME="$CASE_DIR/work-capsule" AGENT_CAPSULE_SHARED_RULES="$main_home/CLAUDE.md" \
+  run_capsule --shell --session rules-work "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "ARG=$main_home/CLAUDE.md:/home/dev/.claude/CLAUDE.md:ro"
 
 # Floating distro tags keep both toolchains on their latest upstream release.
 assert_contains "$SCRIPT" "NODE_TAG=\"\${AGENT_CAPSULE_NODE_TAG:-trixie-slim}\""
