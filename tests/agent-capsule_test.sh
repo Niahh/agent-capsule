@@ -356,6 +356,59 @@ for agent_and_skills_dir in \
   assert_contains "$PODMAN_LOG" "ARG=AGENT_CAPSULE_SKILLS_DIR=$skills_dir"
 done
 
+# Your own skills reach every agent, one read-only mount each, onto a mount point made
+# host side. A folder without SKILL.md is not a skill, and a name the rule refuses is skipped.
+new_case user-skills
+user_skills="$CAPSULE_HOME/skills"
+mkdir -p "$user_skills/my-skill" "$user_skills/no-skill-md" "$user_skills/bad name"
+touch "$user_skills/my-skill/SKILL.md" "$user_skills/bad name/SKILL.md"
+for agent_and_skills_dir in 'claude|.claude/skills' 'codex|.codex/skills' 'opencode|.config/opencode/skills'; do
+  IFS='|' read -r agent skills_dir <<<"$agent_and_skills_dir"
+  run_capsule --agent "$agent" --shell --session "skills-$agent" "$ROOT_DIR"
+  assert_contains "$PODMAN_LOG" "ARG=$user_skills/my-skill:/home/dev/$skills_dir/my-skill:ro"
+  [[ -d "$CAPSULE_HOME/homes/skills-$agent/$skills_dir/my-skill" ]] || fail "no mount point for my-skill"
+  assert_not_contains "$PODMAN_LOG" 'no-skill-md'
+  assert_not_contains "$PODMAN_LOG" 'bad name'
+  assert_contains "$OUTPUT" '>> Skills  : my-skill'
+  assert_contains "$OUTPUT" "skipping 'bad name'"
+done
+
+# Claude loads your plugins from their own folder; the other agents have no such flag.
+new_case user-plugins
+user_plugins="$CAPSULE_HOME/plugins/claude"
+mkdir -p "$user_plugins/my-plugin/.claude-plugin" "$user_plugins/not-a-plugin"
+printf '{"name":"my-plugin"}\n' > "$user_plugins/my-plugin/.claude-plugin/plugin.json"
+run_capsule --session plugins-claude "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "ARG=$user_plugins/my-plugin:/opt/agent-capsule/user-plugins/my-plugin:ro"
+assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/agent-capsule/user-plugins/my-plugin
+assert_not_contains "$PODMAN_LOG" 'not-a-plugin'
+run_capsule --shell --session plugins-claude "$ROOT_DIR"
+assert_contains "$OUTPUT" \
+  '>> Plugins : my-plugin (start claude with: --plugin-dir /opt/agent-capsule/user-plugins/my-plugin)'
+run_capsule --agent codex --session plugins-codex "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'user-plugins'
+
+# A login gets neither.
+new_case user-extras-not-for-login
+mkdir -p "$CAPSULE_HOME/skills/my-skill" "$CAPSULE_HOME/plugins/claude/my-plugin/.claude-plugin"
+touch "$CAPSULE_HOME/skills/my-skill/SKILL.md" "$CAPSULE_HOME/plugins/claude/my-plugin/.claude-plugin/plugin.json"
+run_capsule --auth-login --shell
+assert_not_contains "$PODMAN_LOG" '/skills/my-skill'
+assert_not_contains "$PODMAN_LOG" 'user-plugins'
+
+# A skill named like a bundled one already linked in the session would land on that
+# link, so the launch stops and says which folder to rename.
+new_case user-skill-name-taken
+taken_home="$CAPSULE_HOME/homes/taken"
+mkdir -p "$CAPSULE_HOME/skills/explain-diff-html" "$taken_home/.claude/skills"
+touch "$CAPSULE_HOME/skills/explain-diff-html/SKILL.md"
+printf 'claude\n' > "$taken_home/.agent"
+ln -s /opt/agent-capsule/skills/explain-diff/explain-diff-html "$taken_home/.claude/skills/explain-diff-html"
+run_capsule_fails --shell --session taken "$ROOT_DIR"
+assert_contains "$OUTPUT" \
+  "Your skill explain-diff-html has the name of a bundled skill: rename $CAPSULE_HOME/skills/explain-diff-html."
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
+
 new_case rules-mode-kept
 rules_file="$CASE_DIR/rules.md"
 touch "$rules_file"
@@ -1634,6 +1687,17 @@ AGENT_CAPSULE_PRUNE=0 run_capsule --shell --session prune-disabled "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_not_contains "$PODMAN_LOG" 'CALL=rmi'
 assert_not_contains "$OUTPUT" '>> Pruned'
+
+# Pruning covers session homes only: your skills and plugins stay, however old.
+new_case prune-keeps-user-extras
+make_session_home idle-home 40
+mkdir -p "$CAPSULE_HOME/skills/my-skill" "$CAPSULE_HOME/plugins/claude/my-plugin"
+touch "$CAPSULE_HOME/skills/my-skill/SKILL.md"
+find "$CAPSULE_HOME/skills" "$CAPSULE_HOME/plugins" -exec touch -t "$(days_ago_stamp 40)" {} +
+run_capsule --prune-sessions --yes
+[[ ! -e "$CAPSULE_HOME/homes/idle-home" ]] || fail "the idle home survived"
+[[ -f "$CAPSULE_HOME/skills/my-skill/SKILL.md" && -d "$CAPSULE_HOME/plugins/claude/my-plugin" ]] ||
+  fail "prune removed your skills or plugins"
 
 # Removing caches rewrites directory times, which must not make an idle home look used.
 new_case prune-dir-times-ignored
