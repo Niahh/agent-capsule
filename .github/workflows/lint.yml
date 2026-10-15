@@ -27,10 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: |
-          shellcheck agent-capsule entrypoint.sh scripts/check-shell-completion \
-            tests/agent-capsule_test.sh tests/worklog_test.sh tests/install_test.sh \
-            completions/agent-capsule.bash
+      - run: make shellcheck
 
   hadolint:
     runs-on: ubuntu-latest

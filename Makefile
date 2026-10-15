@@ -6,10 +6,15 @@ SHAREDIR = $(PREFIX)/share/agent-capsule
 BASHCOMPDIR = $(PREFIX)/share/bash-completion/completions
 ZSHCOMPDIR = $(PREFIX)/share/zsh/site-functions
 
-.PHONY: help test install uninstall
+# CI, the flake checks and CONTRIBUTING.md all lint through these targets, so this is the one list.
+SHELL_FILES = agent-capsule entrypoint.sh scripts/check-shell-completion tests/agent-capsule_test.sh \
+  tests/worklog_test.sh tests/install_test.sh completions/agent-capsule.bash
+
+.PHONY: help test lint shellcheck hadolint install uninstall
 
 help:
 	@echo "test         Run launcher, worklog, and install tests"
+	@echo "lint         Run shellcheck and hadolint"
 	@echo "install      Install agent-capsule, its container files, and completions"
 	@echo "uninstall    Remove the installed script, container files, and completions"
 
@@ -17,6 +22,14 @@ test:
 	@bash tests/agent-capsule_test.sh
 	@bash tests/worklog_test.sh
 	@bash tests/install_test.sh
+
+lint: shellcheck hadolint
+
+shellcheck:
+	shellcheck $(SHELL_FILES)
+
+hadolint:
+	hadolint --config .hadolint.yaml Dockerfile
 
 install:
 	@install -d "$(BINDIR)" "$(SHAREDIR)/plugins" "$(BASHCOMPDIR)" "$(ZSHCOMPDIR)"
