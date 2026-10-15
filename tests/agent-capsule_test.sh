@@ -294,6 +294,30 @@ mount_source() {
   sed -n "s|^ARG=\(.*\):$1\(:.*\)\{0,1\}\$|\1|p" "$PODMAN_LOG"
 }
 
+# Copies the image build files into the case, where it may edit them. Nix store
+# sources are read-only, so the copies are made writable.
+copy_build_context() {
+  mkdir -p "$CASE_DIR/plugins"
+  cp "$ROOT_DIR/Dockerfile" "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/"
+  cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
+  chmod -R u+w "$CASE_DIR/entrypoint.sh" "$CASE_DIR/plugins/worklog"
+}
+
+# Launches with the copied build files: the first builds, the second reuses the
+# image, and after FILE is edited the third builds again.
+assert_edit_rebuilds() { # file launcher-args...
+  local file="$1"
+  shift
+
+  AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule "$@"
+  assert_contains "$PODMAN_LOG" 'CALL=build'
+  AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule "$@"
+  assert_not_contains "$PODMAN_LOG" 'CALL=build'
+  printf '\n' >> "$file"
+  AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule "$@"
+  assert_contains "$PODMAN_LOG" 'CALL=build'
+}
+
 new_case
 for agent_and_skills_dir in \
   'claude|/home/dev/.claude/skills' \
@@ -1073,21 +1097,9 @@ done
 
 # Editing the entrypoint must invalidate the image, or a fix to it never ships.
 new_case
-entrypoint_copy="$CASE_DIR/entrypoint.sh"
-cp "$ROOT_DIR/entrypoint.sh" "$entrypoint_copy"
-# Nix store sources are read-only, but this case intentionally mutates its copy.
-chmod u+w "$entrypoint_copy"
-dockerfile_copy="$CASE_DIR/Dockerfile"
-cp "$ROOT_DIR/Dockerfile" "$dockerfile_copy"
-mkdir -p "$CASE_DIR/plugins"
-cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
-AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
-AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
-assert_not_contains "$PODMAN_LOG" 'CALL=build'
-printf '\n' >> "$entrypoint_copy"
-AGENT_CAPSULE_DOCKERFILE="$dockerfile_copy" run_capsule --shell --session entrypoint-hash "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
+copy_build_context
+assert_edit_rebuilds "$CASE_DIR/entrypoint.sh" --shell --session entrypoint-hash "$ROOT_DIR"
+
 new_case
 vault_dir="$CASE_DIR/vault"
 mkdir -p "$vault_dir"
@@ -1176,21 +1188,10 @@ assert_contains "$OUTPUT" ">> Extras  : dropping 'worklog' (unsupported by agent
 # The plugin ships in the image, so editing it has to invalidate the image.
 new_case
 vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir" "$CASE_DIR/plugins"
-cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
-cp "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/entrypoint.sh"
-cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
-chmod -R u+w "$CASE_DIR/plugins/worklog"
-AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
-  run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
-AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
-  run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
-assert_not_contains "$PODMAN_LOG" 'CALL=build'
-printf '\n' >> "$CASE_DIR/plugins/worklog/procedure.md"
-AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
-  run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
+mkdir -p "$vault_dir"
+copy_build_context
+assert_edit_rebuilds "$CASE_DIR/plugins/worklog/procedure.md" \
+  --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
 
 # Unselected, the plugin is inert, so editing it rebuilds nothing.
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
@@ -1203,10 +1204,7 @@ assert_not_contains "$PODMAN_LOG" 'CALL=build'
 
 # Nix store sources are read-only, and a copy of them must still be replaceable.
 new_case
-mkdir -p "$CASE_DIR/plugins"
-cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
-cp "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/entrypoint.sh"
-cp -R "$ROOT_DIR/plugins/worklog" "$CASE_DIR/plugins/worklog"
+copy_build_context
 chmod -R a-w "$CASE_DIR/plugins/worklog"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --build --shell --session worklog-readonly "$ROOT_DIR"
@@ -1216,8 +1214,8 @@ AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
 [[ -w "$CAPSULE_HOME/build/context/plugins/worklog/procedure.md" ]] || fail "the context copy is read-only"
 
 new_case
-cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
-cp "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/entrypoint.sh"
+copy_build_context
+rm -rf "$CASE_DIR/plugins"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule_fails --shell --session worklog-noplugin "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Container plugin not found:'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
