@@ -36,9 +36,9 @@ _agent_capsule_extras() {
   done
 
   extras=(${(f)"$(agent-capsule --with list 2>/dev/null)"})
-  # anydoc and worklog are Claude Code plugins; the launcher rejects them for other agents.
-  [[ -n $agent && $agent != claude ]] && extras=(${extras:#(anydoc|worklog)})
-  extras+=(none)
+  # worklog is a Claude Code plugin; the launcher rejects it for other agents.
+  [[ -n $agent && $agent != claude ]] && extras=(${extras:#worklog})
+  extras+=(none list)
 
   # Comma-separated and repeatable, so complete one element at a time.
   _values -s , 'integration' $extras
