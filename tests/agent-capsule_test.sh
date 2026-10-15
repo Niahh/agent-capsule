@@ -289,6 +289,11 @@ run_capsule_fails() {
   if run_capsule "$@"; then fail "the launcher unexpectedly succeeded: $*"; fi
 }
 
+# Prints the host side of the mount whose container side is $1.
+mount_source() {
+  sed -n "s|^ARG=\(.*\):$1\(:.*\)\{0,1\}\$|\1|p" "$PODMAN_LOG"
+}
+
 new_case
 for agent_and_skills_dir in \
   'claude|/home/dev/.claude/skills' \
@@ -625,7 +630,7 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITHUB=1'
 assert_not_contains "$PODMAN_LOG" 'gho_secret123'
 assert_not_contains "$OUTPUT" 'plain text'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token'
-gh_token_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/gh\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+gh_token_dir="$(mount_source /run/agent-capsule/gh)"
 [[ "$gh_token_dir" == "$XDG_DIR/"* ]] || fail "token dir is outside the runtime dir: $gh_token_dir"
 [[ "$(<"$gh_token_dir/token")" == gho_secret123 ]] || fail "token file does not hold the host token"
 [[ "$(file_mode "$gh_token_dir")" == 700 ]] || fail "token dir is not private"
@@ -661,14 +666,20 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_plain GH_CONFIG_DIR="$CASE_DIR/gh-co
 assert_contains "$OUTPUT" 'plain text'
 assert_not_contains "$OUTPUT" 'gho_plain'
 
-# Token dirs of finished launches are removed. A live launch keeps its own.
-new_case
-runtime_root="$XDG_DIR/agent-capsule-$UID"
-mkdir -p "$runtime_root/gh-999999999" "$runtime_root/gh-$$"
-touch "$runtime_root/gh-999999999/token" "$runtime_root/gh-$$/token"
-run_capsule --shell --session gh-sweep "$ROOT_DIR"
-[[ ! -e "$runtime_root/gh-999999999" ]] || fail "a finished launch's token dir survived"
-[[ -e "$runtime_root/gh-$$/token" ]] || fail "a live launch's token dir was removed"
+# Handoff dirs of finished launches are removed, never a live one's. gh and key dirs
+# outlive a launch only when it died before its entrypoint ran; glab and CA dirs last
+# the whole session, because glab and TLS clients read them until it ends.
+for kind_and_file in gh:token keys:ANTHROPIC_API_KEY glab:config.yml ca:extra.pem; do
+  kind="${kind_and_file%%:*}"
+  file="${kind_and_file#*:}"
+  new_case
+  runtime_root="$XDG_DIR/agent-capsule-$UID"
+  mkdir -p "$runtime_root/$kind-999999999" "$runtime_root/$kind-$$"
+  touch "$runtime_root/$kind-999999999/$file" "$runtime_root/$kind-$$/$file"
+  run_capsule --shell --session "$kind-sweep" "$ROOT_DIR"
+  [[ ! -e "$runtime_root/$kind-999999999" ]] || fail "a finished launch's $kind dir survived"
+  [[ -e "$runtime_root/$kind-$$/$file" ]] || fail "a live launch's $kind dir was removed"
+done
 
 # The entrypoint moves the token into GH_TOKEN and deletes the file before the
 # command starts.
@@ -715,7 +726,7 @@ AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" run_capsule --ca --shell --session c
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca'
 assert_not_contains "$PODMAN_LOG" 'MIIBcapsuleRoot'
 assert_contains "$OUTPUT" '2 certificates'
-ca_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/ca\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+ca_dir="$(mount_source /run/agent-capsule/ca)"
 [[ "$ca_dir" == "$XDG_DIR/"* ]] || fail "CA dir is outside the runtime dir: $ca_dir"
 expected_ca="$(printf -- '%s\n' '-----BEGIN CERTIFICATE-----' MIIBcapsuleRootOne \
   '-----END CERTIFICATE-----' '-----BEGIN CERTIFICATE-----' MIIBcapsuleRootTwo \
@@ -734,15 +745,6 @@ for bad_ca in "$CASE_DIR/missing.pem" "$CASE_DIR/key-only.pem"; do
   assert_not_contains "$PODMAN_LOG" 'CALL='
 done
 
-# The entrypoint points TLS clients at the CA, so its dir lives as long as the
-# session. The next launch removes those of finished launches, never a live one's.
-new_case
-runtime_root="$XDG_DIR/agent-capsule-$UID"
-mkdir -p "$runtime_root/ca-999999999" "$runtime_root/ca-$$"
-touch "$runtime_root/ca-999999999/extra.pem" "$runtime_root/ca-$$/extra.pem"
-run_capsule --shell --session ca-sweep "$ROOT_DIR"
-[[ ! -e "$runtime_root/ca-999999999" ]] || fail "a finished launch's CA dir survived"
-[[ -e "$runtime_root/ca-$$/extra.pem" ]] || fail "a live launch's CA dir was removed"
 
 # The entrypoint adds the CA to what the capsule already trusts. git and Node read
 # neither SSL_CERT_FILE nor each other's variable, so each gets its own.
@@ -790,7 +792,7 @@ assert_not_contains "$OUTPUT" 'plain text'
 assert_contains "$PODMAN_LOG" 'ARG=GLAB_CONFIG_DIR=/run/agent-capsule/glab'
 assert_not_contains "$PODMAN_LOG" 'GITLAB_TOKEN'
 assert_contains "$PODMAN_LOG" 'ARG=GITLAB_HOST=gitlab.com'
-glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+glab_dir="$(mount_source /run/agent-capsule/glab)"
 [[ "$glab_dir" == "$XDG_DIR/"* ]] || fail "glab dir is outside the runtime dir: $glab_dir"
 expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token: 'glpat-secret123'")"
 [[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
@@ -805,7 +807,7 @@ PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_HOST=gitlab.corp.example FAKE_GLAB_TOKEN=g
   AGENT_CAPSULE_GITLAB_HOST=gitlab.corp.example \
   run_capsule --with gitlab --shell --session glab-corp "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=GITLAB_HOST=gitlab.corp.example'
-glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+glab_dir="$(mount_source /run/agent-capsule/glab)"
 expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.corp.example:' "        token: 'glpat-corp'")"
 [[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
   fail "the glab config does not bind the token to the instance: $(<"$glab_dir/config.yml")"
@@ -892,20 +894,11 @@ assert_contains "$OUTPUT" 'personal access token'
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
 GITLAB_TOKEN=glpat-from-env PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-stored \
   run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
-glab_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/glab\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+glab_dir="$(mount_source /run/agent-capsule/glab)"
 expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token: 'glpat-stored'")"
 [[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
   fail "the host's GITLAB_TOKEN replaced the stored login: $(<"$glab_dir/config.yml")"
 
-# glab reads its config for the whole session, so the next launch removes the dirs
-# of finished sessions, never a live one's.
-new_case
-runtime_root="$XDG_DIR/agent-capsule-$UID"
-mkdir -p "$runtime_root/glab-999999999" "$runtime_root/glab-$$"
-touch "$runtime_root/glab-999999999/config.yml" "$runtime_root/glab-$$/config.yml"
-run_capsule --shell --session glab-sweep "$ROOT_DIR"
-[[ ! -e "$runtime_root/glab-999999999" ]] || fail "a finished session's glab dir survived"
-[[ -e "$runtime_root/glab-$$/config.yml" ]] || fail "a live session's glab dir was removed"
 
 # Every capsule runs without capabilities or privilege escalation, within limits,
 # and --offline takes the network away.
@@ -988,7 +981,7 @@ assert_not_contains "$PODMAN_LOG" 'ARG=OPENAI_API_KEY'
 assert_not_contains "$PODMAN_LOG" 'anthropic-secret'
 assert_not_contains "$PODMAN_LOG" 'openai-secret'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys'
-keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+keys_dir="$(mount_source /run/agent-capsule/keys)"
 [[ "$keys_dir" == "$XDG_DIR/"* ]] || fail "keys dir is outside the runtime dir: $keys_dir"
 [[ "$(<"$keys_dir/ANTHROPIC_API_KEY")" == anthropic-secret ]] || fail "the Anthropic key was not handed over"
 [[ "$(<"$keys_dir/OPENAI_API_KEY")" == openai-secret ]] || fail "the OpenAI key was not handed over"
@@ -997,7 +990,7 @@ keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "
 # Each agent gets only its own provider's key, and no key means no handoff at all.
 ANTHROPIC_API_KEY=anthropic-secret OPENAI_API_KEY=openai-secret \
   run_capsule --agent claude --shell --session claude-env "$ROOT_DIR"
-keys_dir="$(sed -n 's|^ARG=\(.*\):/run/agent-capsule/keys\(:.*\)\{0,1\}$|\1|p' "$PODMAN_LOG")"
+keys_dir="$(mount_source /run/agent-capsule/keys)"
 [[ -f "$keys_dir/ANTHROPIC_API_KEY" && ! -e "$keys_dir/OPENAI_API_KEY" ]] || fail "claude got the wrong keys"
 run_capsule --agent claude --shell --session claude-env "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
@@ -1012,14 +1005,6 @@ AGENT_CAPSULE_KEYS_DIR="$CASE_DIR/keys" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
   > "$OUTPUT"
 [[ "$(<"$OUTPUT")" == sk-entry ]] || fail "entrypoint did not export ANTHROPIC_API_KEY"
 
-# Key dirs of launches that died before their entrypoint ran are removed, never a live one's.
-new_case
-runtime_root="$XDG_DIR/agent-capsule-$UID"
-mkdir -p "$runtime_root/keys-999999999" "$runtime_root/keys-$$"
-touch "$runtime_root/keys-999999999/ANTHROPIC_API_KEY" "$runtime_root/keys-$$/ANTHROPIC_API_KEY"
-run_capsule --shell --session keys-sweep "$ROOT_DIR"
-[[ ! -e "$runtime_root/keys-999999999" ]] || fail "a finished launch's keys dir survived"
-[[ -e "$runtime_root/keys-$$/ANTHROPIC_API_KEY" ]] || fail "a live launch's keys dir was removed"
 
 new_case
 run_capsule_fails --agent codex --with anydoc --session unsupported-extra "$ROOT_DIR"
