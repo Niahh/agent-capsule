@@ -406,15 +406,13 @@ assert_contains "$OUTPUT" '--versions'
 assert_contains "$OUTPUT" '--shared-rules PATH'
 assert_contains "$OUTPUT" '--prune-sessions[=DAYS]'
 assert_contains "$OUTPUT" 'explain-diff'
+assert_contains "$OUTPUT" 'worklog'
+assert_contains "$OUTPUT" 'AGENT_CAPSULE_TOOLS'
 assert_contains "$OUTPUT" 'kubernetes'
 assert_contains "$OUTPUT" 'talos'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --version
 assert_contains "$OUTPUT" "agent-capsule $LAUNCHER_VERSION"
-
-new_case help-lists-worklog
-run_capsule --help
-assert_contains "$OUTPUT" 'worklog'
 
 # A config file left over from 0.2 is inert: never read, never an error.
 new_case leftover-0.2-config
