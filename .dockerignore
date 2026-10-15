@@ -1,5 +1,3 @@
 *
-!Dockerfile
 !entrypoint.sh
 !plugins/worklog
-!plugins/worklog/**
