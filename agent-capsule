@@ -13,9 +13,9 @@
 #   --keep-id              run with the host UID and GID inside
 #   --with TOOLS           activate integrations, or use list or none
 #   -m, --mount SPEC       mount SRC[:DEST][:ro], repeatable
-#   --ca                   trust the private CAs in AGENT_CAPSULE_CA_CERTS
-#   --vault[=PATH]         mount the configured or given vault (default /vault)
-#   --no-vault             disable the vault and mcpvault for this run
+#   --ca                   add ca to this run's integrations
+#   --vault[=PATH]         add vault to this run's integrations, from PATH if given
+#   --no-vault             leave vault and worklog out of this run
 #   --shared-rules PATH    select the global rules file
 #   --shared-rules-rw      mount the global rules file read-write
 #   --no-shared-rules      disable the global rules file
@@ -31,9 +31,10 @@
 #   -h, --help             show this help
 #
 # Integrations, turned on per run with --with or AGENT_CAPSULE_WITH:
-#   superpowers, explain-diff, mcpvault, anydoc, worklog, github, gitlab
-#   mcpvault requires --vault, and worklog requires mcpvault.
-#   anydoc and worklog are available only with claude.
+#   superpowers, explain-diff, anydoc, vault, worklog, ca, github, gitlab
+#   vault mounts AGENT_CAPSULE_VAULT at /vault and serves it over MCP (mcpvault).
+#   worklog requires vault. anydoc and worklog are available only with claude.
+#   ca trusts the private CAs in AGENT_CAPSULE_CA_CERTS.
 #   github lends gh the host's gh login, and needs the gh tool.
 #   gitlab lends glab the host's glab login for AGENT_CAPSULE_GITLAB_HOST, and needs the glab tool.
 #
@@ -149,7 +150,7 @@ selected_version() {
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
-KNOWN_EXTRAS=(anydoc explain-diff github gitlab mcpvault superpowers worklog)
+KNOWN_EXTRAS=(anydoc ca explain-diff github gitlab superpowers vault worklog)
 
 # CLIs built into the image, chosen once per user rather than per run: a change to
 # the list rebuilds the image, and --with never does.
@@ -598,9 +599,10 @@ SESSION_NAME="${AGENT_CAPSULE_SESSION:-}"
 DISABLE_SHARED_RULES=0
 SHARED_RULES_EXPLICIT=0
 SESSION_EXPLICIT=0
-MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
-NO_VAULT=0
-MOUNT_CA=0
+# --vault, --vault=PATH and --no-vault add or remove vault once the list is read; the
+# last one wins. --ca adds ca the same way.
+VAULT_SHORTCUT=""
+CA_SHORTCUT=0
 MOUNT_SPECS=()
 PRUNE_TARGET=""
 PRUNE_DAYS=30
@@ -640,7 +642,7 @@ while [[ "${1:-}" == -* ]]; do
       shift
       ;;
     --ca)
-      MOUNT_CA=1
+      CA_SHORTCUT=1
       shift
       ;;
     --auth-login)
@@ -720,13 +722,11 @@ while [[ "${1:-}" == -* ]]; do
       # Bare form only: a space-separated optional path would be ambiguous with
       # the positional PROJECT_DIR (--vault ~/code/app must keep meaning
       # "default vault, project app"). Overrides use --vault=PATH.
-      MOUNT_VAULT=1
-      NO_VAULT=0
+      VAULT_SHORTCUT=on
       shift
       ;;
     --no-vault)
-      MOUNT_VAULT=0
-      NO_VAULT=1
+      VAULT_SHORTCUT=off
       shift
       ;;
     --vault=*)
@@ -735,8 +735,7 @@ while [[ "${1:-}" == -* ]]; do
         exit 1
       }
       VAULT_DIR="${1#--vault=}"
-      MOUNT_VAULT=1
-      NO_VAULT=0
+      VAULT_SHORTCUT=on
       shift
       ;;
     --prune-caches | --prune-caches=* | --prune-sessions | --prune-sessions=*)
@@ -926,29 +925,6 @@ else
   exit 1
 fi
 
-# A key stored in the same PEM must not reach the capsule. Windows exports use CRLF.
-CA_PEM=""
-if [[ "$MOUNT_CA" == "1" ]]; then
-  if [[ -z "$CA_CERTS" ]]; then
-    echo "--ca needs AGENT_CAPSULE_CA_CERTS, the PEM file of the CAs to trust." >&2
-    exit 1
-  fi
-  if [[ ! -f "$CA_CERTS" || ! -r "$CA_CERTS" ]]; then
-    echo "AGENT_CAPSULE_CA_CERTS is not a readable file: $CA_CERTS" >&2
-    exit 1
-  fi
-  CA_PEM="$(awk '
-    { sub(/\r$/, "") }
-    /^-----BEGIN CERTIFICATE-----/ { keep = 1 }
-    keep { print }
-    /^-----END CERTIFICATE-----/ { keep = 0 }
-  ' "$CA_CERTS")"
-  if [[ -z "$CA_PEM" ]]; then
-    echo "AGENT_CAPSULE_CA_CERTS holds no PEM certificate: $CA_CERTS" >&2
-    exit 1
-  fi
-fi
-
 # podman build moves the tag, leaving the image it replaced behind untagged.
 # Two things keep this safe: only images this tool labelled are candidates, so
 # podman's own intermediate layers are untouched, and only untagged ones are, so
@@ -1071,11 +1047,32 @@ if [[ "$SELECT_NONE" == "1" ]]; then
   done
 fi
 
+# The shortcut flags edit the list, never replace it: --with github --vault selects both.
+case "$VAULT_SHORTCUT" in
+  on) REQUESTED_EXTRAS+=(vault) ;;
+  off)
+    kept_extras=()
+    for req in "${REQUESTED_EXTRAS[@]}"; do
+      case "$req" in
+        vault) ;;
+        worklog) echo ">> Worklog : disabled for this run (--no-vault)" >&2 ;;
+        *) kept_extras+=("$req") ;;
+      esac
+    done
+    REQUESTED_EXTRAS=("${kept_extras[@]}")
+    ;;
+esac
+[[ "$CA_SHORTCUT" == "0" ]] || REQUESTED_EXTRAS+=(ca)
+
 # Authentication uses a dedicated home, without integrations, the vault or project memory.
+# A private CA stays, since the login may have to reach a server behind it.
 if [[ "$AUTH_LOGIN" == "1" ]]; then
-  REQUESTED_EXTRAS=()
+  auth_extras=()
+  for req in "${REQUESTED_EXTRAS[@]}"; do
+    [[ "$req" != ca ]] || auth_extras+=(ca)
+  done
+  REQUESTED_EXTRAS=("${auth_extras[@]}")
   SHARED_MEMORY_ENABLED=0
-  MOUNT_VAULT=0
 fi
 
 # Emit in canonical order. Agent-specific integrations never activate under an
@@ -1096,6 +1093,11 @@ for extra in "${KNOWN_EXTRAS[@]}"; do
     break
   done
 done
+
+# 0.3 mounted the vault from this variable; vault in the list does that now.
+if [[ -n "${AGENT_CAPSULE_MOUNT_VAULT:-}" ]]; then
+  echo ">> Vault   : AGENT_CAPSULE_MOUNT_VAULT is no longer read; add vault to AGENT_CAPSULE_WITH." >&2
+fi
 
 # The tool list is read like --with: case folded, comma separated, canonical order.
 TOOLS=""
@@ -1126,6 +1128,29 @@ for forge_and_tool in github:gh gitlab:glab; do
     exit 1
   fi
 done
+
+# A key stored in the same PEM must not reach the capsule. Windows exports use CRLF.
+CA_PEM=""
+if has_extra ca; then
+  if [[ -z "$CA_CERTS" ]]; then
+    echo "ca needs AGENT_CAPSULE_CA_CERTS, the PEM file of the CAs to trust." >&2
+    exit 1
+  fi
+  if [[ ! -f "$CA_CERTS" || ! -r "$CA_CERTS" ]]; then
+    echo "AGENT_CAPSULE_CA_CERTS is not a readable file: $CA_CERTS" >&2
+    exit 1
+  fi
+  CA_PEM="$(awk '
+    { sub(/\r$/, "") }
+    /^-----BEGIN CERTIFICATE-----/ { keep = 1 }
+    keep { print }
+    /^-----END CERTIFICATE-----/ { keep = 0 }
+  ' "$CA_CERTS")"
+  if [[ -z "$CA_PEM" ]]; then
+    echo "AGENT_CAPSULE_CA_CERTS holds no PEM certificate: $CA_CERTS" >&2
+    exit 1
+  fi
+fi
 
 # The host ends up in git config keys and URLs.
 if has_extra gitlab && [[ ! "$GITLAB_INSTANCE" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
@@ -1254,9 +1279,9 @@ else
 fi
 PROJECT_MEMORY_DIR="$STATE_DIR/project-memory/$PROJECT_MEMORY_HASH"
 
-if [[ "$MOUNT_VAULT" == "1" ]]; then
+if has_extra vault; then
   if [[ -z "$VAULT_DIR" ]]; then
-    echo "No vault configured. Use --vault=PATH or set AGENT_CAPSULE_VAULT." >&2
+    echo "--with vault needs a vault: set AGENT_CAPSULE_VAULT, or use --vault=PATH." >&2
     exit 1
   fi
 
@@ -1270,39 +1295,15 @@ fi
 CONTAINER_SUFFIX="${SESSION_NAME:0:48}"
 
 # ----------------------------------------------------------------------------
-# mcpvault
-# ----------------------------------------------------------------------------
-# The MCP server reads the vault straight off the filesystem, so it is useless
-# without the vault mount. Registering it against a missing directory would only
-# fail later, opaquely, at the first tool call.
-MCPVAULT_ENABLED=0
-
-# --no-vault keeps a configured integration overridable for one run.
-if has_extra mcpvault; then
-  if [[ "$NO_VAULT" == "1" ]]; then
-    echo ">> MCP     : mcpvault disabled for this run (--no-vault)" >&2
-  elif [[ "$MOUNT_VAULT" != "1" ]]; then
-    echo "--with mcpvault needs the vault mounted." >&2
-    echo "Add --vault, or export AGENT_CAPSULE_MOUNT_VAULT=1." >&2
-    exit 1
-  else
-    MCPVAULT_ENABLED=1
-  fi
-fi
-
-# ----------------------------------------------------------------------------
 # worklog
 # ----------------------------------------------------------------------------
-# The session logs through the mcpvault tools, so worklog needs mcpvault.
+# The session logs through the vault's MCP tools, so worklog needs the vault.
 WORKLOG_ENABLED=0
 WORKLOG_PROCEDURE_SRC=""
 
 if has_extra worklog; then
-  if [[ "$NO_VAULT" == "1" ]]; then
-    echo ">> Worklog : disabled for this run (--no-vault)" >&2
-  elif [[ "$MCPVAULT_ENABLED" != "1" ]]; then
-    echo "--with worklog needs mcpvault." >&2
-    echo "Add mcpvault to --with or AGENT_CAPSULE_WITH." >&2
+  if ! has_extra vault; then
+    echo "--with worklog needs the vault: add vault to --with, or use --vault." >&2
     exit 1
   else
     # Logging a vault edit would trigger another log, so a project in the vault is left alone.
@@ -1391,7 +1392,7 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
 fi
 
 # Rewritten on every run: the vault destination can change between invocations.
-if [[ "$MCPVAULT_ENABLED" == "1" && "$AGENT_MCP_MODE" == "flag" ]]; then
+if has_extra vault && [[ "$AGENT_MCP_MODE" == "flag" ]]; then
   cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
 {
   "mcpServers": {
@@ -1547,7 +1548,7 @@ release_build_lock
 # Not --strict-mcp-config: a project's own .mcp.json must keep working alongside
 # the servers the capsule generates.
 MCP_ARGS=()
-if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+if has_extra vault; then
   case "$AGENT_MCP_MODE" in
     flag) MCP_ARGS=(--mcp-config "$CONTAINER_MCP_CONFIG") ;;
     override)
@@ -1581,7 +1582,7 @@ if [[ "$AGENT" == "opencode" ]]; then
   if has_extra superpowers; then
     OPENCODE_CONFIG_ITEMS+=('"plugin":["/opt/superpowers/source"]')
   fi
-  if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+  if has_extra vault; then
     OPENCODE_CONFIG_ITEMS+=(
       "\"mcp\":{\"obsidian\":{\"type\":\"local\",\"command\":[\"mcpvault\",\"$VAULT_DEST\"]}}"
     )
@@ -1715,7 +1716,7 @@ fi
 # ----------------------------------------------------------------------------
 # Obsidian vault mount (--vault)
 # ----------------------------------------------------------------------------
-if [[ "$MOUNT_VAULT" == "1" ]]; then
+if has_extra vault; then
   RESOLVED_VAULT="$(cd -P "$VAULT_DIR" 2>/dev/null && pwd)" || {
     echo "Vault not found: $VAULT_DIR" >&2
     echo "Create it or set AGENT_CAPSULE_VAULT to your vault's path." >&2
@@ -2009,11 +2010,11 @@ elif [[ "$AGENT" != "claude" && "$AUTH_LOGIN" != "1" ]]; then
   echo ">> ProjMem : not supported by $AGENT"
 fi
 
-if [[ "$MOUNT_VAULT" == "1" ]]; then
+if has_extra vault; then
   echo ">> Vault   : $RESOLVED_VAULT -> $VAULT_DEST (read-write)"
 fi
 
-if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
+if has_extra vault; then
   if [[ "$AGENT_MCP_MODE" == "flag" ]]; then
     if [[ "$SHELL_MODE" == "1" ]]; then
       echo ">> MCP     : mcpvault -> $VAULT_DEST (start it with: $AGENT_BIN --mcp-config $CONTAINER_MCP_CONFIG)"
