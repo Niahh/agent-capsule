@@ -33,7 +33,7 @@
 # Integrations, turned on per run with --with or AGENT_CAPSULE_WITH:
 #   superpowers, explain-diff, anydoc, vault, worklog, ca, github, gitlab
 #   vault mounts AGENT_CAPSULE_VAULT at /vault and serves it over MCP (mcpvault).
-#   worklog requires vault. anydoc and worklog are available only with claude.
+#   worklog requires vault and is available only with claude.
 #   ca trusts the private CAs in AGENT_CAPSULE_CA_CERTS.
 #   github lends gh the host's gh login, and needs the gh tool.
 #   gitlab lends glab the host's glab login for AGENT_CAPSULE_GITLAB_HOST, and needs the glab tool.
@@ -123,7 +123,6 @@ CODEX_VERSION="${AGENT_CAPSULE_CODEX_VERSION:-}"
 OPENCODE_VERSION="${AGENT_CAPSULE_OPENCODE_VERSION:-}"
 ANYDOC_VERSION="${AGENT_CAPSULE_ANYDOC_VERSION:-}"
 MCPVAULT_VERSION="${AGENT_CAPSULE_MCPVAULT_VERSION:-}"
-SKILLS_VERSION="${AGENT_CAPSULE_SKILLS_VERSION:-}"
 SUPERPOWERS_VERSION="${AGENT_CAPSULE_SUPERPOWERS_VERSION:-}"
 GOLANGCI_LINT_VERSION="${AGENT_CAPSULE_GOLANGCI_LINT_VERSION:-}"
 KUBECTL_VERSION="${AGENT_CAPSULE_KUBECTL_VERSION:-}"
@@ -770,7 +769,6 @@ codex $(selected_version "$CODEX_VERSION")
 opencode $(selected_version "$OPENCODE_VERSION")
 anydoc $(selected_version "$ANYDOC_VERSION")
 mcpvault $(selected_version "$MCPVAULT_VERSION")
-skills $(selected_version "$SKILLS_VERSION")
 superpowers $(selected_version "$SUPERPOWERS_VERSION")
 golangci-lint $(selected_version "$GOLANGCI_LINT_VERSION")
 kubectl $(selected_version "$KUBECTL_VERSION")
@@ -877,8 +875,7 @@ for package_version in \
   "$CODEX_VERSION" \
   "$OPENCODE_VERSION" \
   "$ANYDOC_VERSION" \
-  "$MCPVAULT_VERSION" \
-  "$SKILLS_VERSION"; do
+  "$MCPVAULT_VERSION"; do
   [[ -n "$package_version" ]] || continue
   if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
     echo "Invalid pinned package version: $package_version" >&2
@@ -1081,8 +1078,8 @@ fi
 for extra in "${KNOWN_EXTRAS[@]}"; do
   for req in "${REQUESTED_EXTRAS[@]}"; do
     [[ "$req" == "$extra" ]] || continue
-    # anydoc and worklog are Claude Code plugins and useless to the other agents.
-    if [[ "$extra" != "anydoc" && "$extra" != "worklog" || "$AGENT" == "claude" ]]; then
+    # worklog is a Claude Code plugin, useless to the other agents.
+    if [[ "$extra" != "worklog" || "$AGENT" == "claude" ]]; then
       EXTRAS="${EXTRAS:+$EXTRAS,}$extra"
     elif [[ "$WITH_EXPLICIT" == "1" ]]; then
       echo "Extra '$extra' is not available with --agent $AGENT." >&2
@@ -1431,7 +1428,7 @@ WORKLOG_HASH="$(sha256_dir "$WORKLOG_PLUGIN_SRC")"
 # hash. --with is not in it: it never changes what is installed.
 HASH="$(printf '%s\n' \
   "$NODE_TAG" "$GO_TAG" "$AGENT" "$TOOLS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
-  "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
+  "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" "$KUBECTL_VERSION" "$HELM_VERSION" \
   "$TALOSCTL_VERSION" "$GH_VERSION" "$GLAB_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" \
   "$WORKLOG_HASH" | sha256_stream)"
@@ -1521,7 +1518,6 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
     --build-arg "ANYDOC_VERSION=$ANYDOC_VERSION" \
     --build-arg "MCPVAULT_VERSION=$MCPVAULT_VERSION" \
-    --build-arg "SKILLS_VERSION=$SKILLS_VERSION" \
     --build-arg "SUPERPOWERS_VERSION=$SUPERPOWERS_VERSION" \
     --build-arg "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
     --build-arg "KUBECTL_VERSION=$KUBECTL_VERSION" \
@@ -1564,9 +1560,6 @@ INTEGRATION_ARGS=()
 if [[ "$AGENT" == "claude" ]]; then
   if has_extra superpowers; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/superpowers/source)
-  fi
-  if has_extra anydoc; then
-    INTEGRATION_ARGS+=(--plugin-dir /opt/anydoc/plugin)
   fi
   if [[ "$WORKLOG_ENABLED" == "1" ]]; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/worklog/plugin)

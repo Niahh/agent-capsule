@@ -33,27 +33,36 @@ if [[ -n "${AGENT_CAPSULE_CA_DIR:-}" && -f "$AGENT_CAPSULE_CA_DIR/extra.pem" ]];
   export NODE_EXTRA_CA_CERTS="$AGENT_CAPSULE_CA_DIR/extra.pem"
 fi
 
+# Bundled skills sit at /opt/agent-capsule/skills/<integration>/<skill>/. Those of the
+# selected integrations are linked into the agent's skills dir, the others unlinked.
 skills_dir="${AGENT_CAPSULE_SKILLS_DIR:-}"
 if [[ -n "$skills_dir" ]]; then
-  skill="$skills_dir/explain-diff-html"
-  marker="$skills_dir/.explain-diff-html-capsule-managed"
+  for source in /opt/agent-capsule/skills/*/*/; do
+    [[ -d "$source" ]] || continue
+    source="${source%/}"
+    integration="${source%/*}"
+    integration="${integration##*/}"
+    name="${source##*/}"
+    skill="$skills_dir/$name"
+    marker="$skills_dir/.$name-capsule-managed"
 
-  case ",${AGENT_CAPSULE_WITH:-}," in
-    *,explain-diff,*)
-      mkdir -p "$skills_dir"
-      if [[ (-e "$skill" || -L "$skill") && ! -e "$marker" ]]; then
-        echo "explain-diff-html already exists and is not capsule-managed: $skill" >&2
-        exit 1
-      fi
-      ln -sfn /opt/explain-diff-html "$skill"
-      touch "$marker"
-      ;;
-    *)
-      if [[ -e "$marker" ]]; then
-        rm -f "$skill" "$marker"
-      fi
-      ;;
-  esac
+    case ",${AGENT_CAPSULE_WITH:-}," in
+      *",$integration,"*)
+        mkdir -p "$skills_dir"
+        if [[ (-e "$skill" || -L "$skill") && ! -e "$marker" ]]; then
+          echo "$name already exists and is not capsule-managed: $skill" >&2
+          exit 1
+        fi
+        ln -sfn "$source" "$skill"
+        touch "$marker"
+        ;;
+      *)
+        if [[ -e "$marker" ]]; then
+          rm -f "$skill" "$marker"
+        fi
+        ;;
+    esac
+  done
 fi
 
 # Codex has no invocation-only local plugin flag, so its plugin list is state

@@ -39,28 +39,24 @@ RUN if [ -n "$GOLANGCI_LINT_VERSION" ]; then \
 
 # Extensions are in every image and stay inert until --with turns them on, so --with
 # never rebuilds. Files that become agent state stay under /opt because /home/dev is
-# bind-mounted from the host session home at runtime.
+# bind-mounted from the host session home at runtime. Bundled skills live under
+# /opt/agent-capsule/skills/<integration>/<skill>/, and the entrypoint links those of
+# the selected integrations into the agent's skills dir.
 ARG ANYDOC_VERSION=""
-ARG SKILLS_VERSION=""
 RUN npm install -g "@firecrawl/anydoc@${ANYDOC_VERSION:-latest}" \
-    && anydoc_root="$(npm root -g)/@firecrawl/anydoc" \
-    && anydoc_installed="$(node -p "require('$anydoc_root/package.json').version")" \
-    && anydoc_ref="https://github.com/firecrawl/anydoc/tree/v$anydoc_installed" \
-    && HOME=/opt/anydoc npx -y "skills@${SKILLS_VERSION:-latest}" \
-      add "$anydoc_ref" -g -a claude-code -y \
-    && rm -rf /opt/anydoc/.npm /opt/anydoc/.agents \
-    && mkdir -p /opt/anydoc/plugin/.claude-plugin \
-    && cp -a /opt/anydoc/.claude/skills /opt/anydoc/plugin/skills \
-    && printf '%s\n' \
-      "{\"name\":\"anydoc\",\"version\":\"$anydoc_installed\",\"description\":\"Convert documents to Markdown\"}" \
-      > /opt/anydoc/plugin/.claude-plugin/plugin.json \
+    && anydoc_installed="$(node -p "require('$(npm root -g)/@firecrawl/anydoc/package.json').version")" \
+    && anydoc_raw="https://raw.githubusercontent.com/firecrawl/anydoc/v$anydoc_installed" \
+    && skill_dir=/opt/agent-capsule/skills/anydoc/convert-documents-to-markdown \
+    && mkdir -p "$skill_dir" \
+    && curl -sSfL "$anydoc_raw/skills/convert-documents-to-markdown/SKILL.md" -o "$skill_dir/SKILL.md" \
     && npm cache clean --force
 
 # Pinned to a gist revision, so image rebuilds are reproducible.
-RUN mkdir -p /opt/explain-diff-html \
+RUN skill_dir=/opt/agent-capsule/skills/explain-diff/explain-diff-html \
+    && mkdir -p "$skill_dir" \
     && explain_diff_url='https://gist.githubusercontent.com/geoffreylitt/a29df1b5f9865506e8952488eac3d524/raw/' \
     && explain_diff_url="${explain_diff_url}e4982a26bc8975dd45eeb96ad8c68f2f25fc42c7/explain-diff-html.md" \
-    && curl -sSfL "$explain_diff_url" -o /opt/explain-diff-html/SKILL.md
+    && curl -sSfL "$explain_diff_url" -o "$skill_dir/SKILL.md"
 
 ARG MCPVAULT_VERSION=""
 RUN npm install -g "@bitbonsai/mcpvault@${MCPVAULT_VERSION:-latest}" \

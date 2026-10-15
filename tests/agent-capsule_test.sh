@@ -1107,11 +1107,11 @@ run_capsule --agent claude --with superpowers,anydoc \
   --session claude-integrations "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" claude --plugin-dir
 assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/superpowers/source
-assert_contains "$PODMAN_LOG" 'ARG=/opt/anydoc/plugin'
+# anydoc is a skill now, linked by the entrypoint, not a plugin.
+assert_not_contains "$PODMAN_LOG" '/opt/anydoc'
 
 run_capsule --agent claude --with none --session claude-no-integrations "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/superpowers/source'
-assert_not_contains "$PODMAN_LOG" 'ARG=/opt/anydoc/plugin'
 
 new_case removed-hunkdiff
 run_capsule_fails --with hunkdiff --session removed-hunkdiff "$ROOT_DIR"
@@ -1151,9 +1151,12 @@ AGENT_CAPSULE_KEYS_DIR="$CASE_DIR/keys" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
   > "$OUTPUT"
 [[ "$(<"$OUTPUT")" == sk-entry ]] || fail "entrypoint did not export ANTHROPIC_API_KEY"
 
-new_case extra-unsupported-by-agent
-run_capsule_fails --agent codex --with anydoc --session unsupported-extra "$ROOT_DIR"
-assert_contains "$OUTPUT" "Extra 'anydoc' is not available with --agent codex"
+# anydoc is a plain skill, so every agent can use it.
+new_case anydoc-for-every-agent
+for agent in codex opencode; do
+  run_capsule --agent "$agent" --with anydoc --shell --session "anydoc-$agent" "$ROOT_DIR"
+  assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WITH=anydoc'
+done
 
 new_case with-empty
 run_capsule_fails --with= --shell --session empty-extra "$ROOT_DIR"
@@ -1751,11 +1754,10 @@ assert_contains "$SCRIPT" "GO_TAG=\"\${AGENT_CAPSULE_GO_TAG:-trixie}\""
 assert_contains "$DOCKERFILE" 'ARG NODE_TAG=trixie-slim'
 assert_contains "$DOCKERFILE" 'ARG GO_TAG=trixie'
 assert_contains "$DOCKERFILE" 'SUPERPOWERS_VERSION:-latest'
-assert_contains "$DOCKERFILE" "tree/v\$anydoc_installed"
+assert_contains "$DOCKERFILE" "firecrawl/anydoc/v\$anydoc_installed"
 for version_variable in \
   ANYDOC_VERSION \
   MCPVAULT_VERSION \
-  SKILLS_VERSION \
   CLAUDE_CODE_VERSION \
   CODEX_VERSION \
   OPENCODE_VERSION; do
