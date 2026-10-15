@@ -110,6 +110,10 @@ mkdir -p "$GH_FAKE_BIN"
 printf '#!%s\n' "$BASH_BIN" > "$GH_FAKE_BIN/gh"
 cat >> "$GH_FAKE_BIN/gh" <<'GH'
 printf '%s\n' "$*" >> "$GH_LOG"
+# Like the real gh, an account it holds no login for has no token.
+if [[ "${1:-} ${2:-}" == "auth token" && " $* " == *" --user "* && " $* " != *" --user ${FAKE_GH_USER:-} "* ]]; then
+  exit 1
+fi
 if [[ "${1:-} ${2:-}" == "auth token" && -n "${FAKE_GH_TOKEN:-}" ]]; then
   printf '%s\n' "$FAKE_GH_TOKEN"
   exit 0
@@ -779,6 +783,24 @@ assert_contains "$OUTPUT" 'gh auth login'
 assert_contains "$PODMAN_LOG" 'CALL=run'
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
 
+# AGENT_CAPSULE_GH_USER picks the host account, so a profile can hand over its own.
+new_case github-account
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_alice FAKE_GH_USER=alice AGENT_CAPSULE_GH_USER=alice \
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-account "$ROOT_DIR"
+assert_contains "$GH_LOG" 'auth token --hostname github.com --user alice'
+[[ "$(<"$(mount_source /run/agent-capsule/keys)/GH_TOKEN")" == gho_alice ]] || fail "alice's token was not handed over"
+assert_contains "$OUTPUT" '>> GitHub  : host gh login for alice'
+# Unset, gh answers for its active account.
+: > "$GH_LOG"
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_active \
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-account "$ROOT_DIR"
+assert_not_contains "$GH_LOG" '--user'
+assert_contains "$GH_LOG" 'auth token --hostname github.com'
+# An account the host gh holds no login for hands nothing over, and says how to log in.
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_alice FAKE_GH_USER=alice AGENT_CAPSULE_GH_USER=bob \
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-account "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> GitHub  : no gh login for bob on the host.'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
 
 # A host gh without a keyring keeps its token in plain text, which defeats the point.
 new_case github-plain-text-token
