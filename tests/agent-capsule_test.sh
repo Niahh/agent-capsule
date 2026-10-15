@@ -399,33 +399,6 @@ run_capsule --agent opencode --shell --session opencode-state \
   --with mcpvault --vault="$vault_dir" --no-vault "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'obsidian'
 
-# The agent runs as the host UID under --keep-id, so the image files must not inherit a private umask.
-new_case worklog-umask
-(umask 077; run_capsule --shell --session worklog-umask "$ROOT_DIR")
-plugin_mode="$(file_mode "$CAPSULE_HOME/build/context/plugins/worklog/hooks/worklog.mjs")"
-[[ "${plugin_mode: -1}" -ge 4 ]] || fail "plugin file is not world-readable: $plugin_mode"
-
-# The project is the vault itself, inside it, or a sibling whose name only starts like the vault's.
-new_case worklog-in-vault
-vault_dir="$CASE_DIR/notes"
-mkdir -p "$vault_dir/sub" "$CASE_DIR/notes2"
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir"
-assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
-assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
-assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir/sub"
-assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
-assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$CASE_DIR/notes2"
-assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
-
-# A shell does not load the plugin, so the banner says how to.
-new_case worklog-shell-hint
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-shell "$ROOT_DIR"
-assert_contains "$OUTPUT" '(start claude with: --plugin-dir /opt/worklog/plugin)'
-
 new_case help-and-version
 run_capsule --help
 assert_contains "$OUTPUT" 'Usage:'
@@ -438,6 +411,10 @@ assert_contains "$OUTPUT" 'talos'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --version
 assert_contains "$OUTPUT" "agent-capsule $LAUNCHER_VERSION"
+
+new_case help-lists-worklog
+run_capsule --help
+assert_contains "$OUTPUT" 'worklog'
 
 # A config file left over from 0.2 is inert: never read, never an error.
 new_case leftover-0.2-config
@@ -528,6 +505,20 @@ AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=weekly run_capsule_fails --shell "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Invalid AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS: weekly'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
+# The image age limit is a decimal count of days, whatever leading zeros it has.
+for age_and_refresh in 08:yes 010:no 00:no; do
+  new_case image-age-digits
+  PODMAN_BUILD_EPOCH="$(($(date +%s) - 9 * 86400))" run_capsule --shell --session age-digits "$ROOT_DIR"
+  AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS="${age_and_refresh%%:*}" \
+    run_capsule --shell --session age-digits "$ROOT_DIR"
+  if [[ "${age_and_refresh#*:}" == yes ]]; then
+    assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+  else
+    assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
+  fi
+  assert_not_contains "$OUTPUT" 'value too great'
+done
+
 new_case package-pin-prerelease
 AGENT_CAPSULE_CLAUDE_CODE_VERSION=1.2.3-beta.1+build.7 run_capsule --versions
 assert_contains "$OUTPUT" 'claude-code 1.2.3-beta.1+build.7'
@@ -596,6 +587,36 @@ run_capsule --agent codex --auth-login -- --with-api-key
 assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/auth-home/codex:/home/dev"
 assert_not_contains "$PODMAN_LOG" "$CAPSULE_HOME/auth-home/claude:/home/dev"
 assert_not_contains "$PODMAN_LOG" "$CAPSULE_HOME/auth-home/opencode:/home/dev"
+
+new_case codex-device-login
+run_capsule --agent codex --auth-login
+assert_arg_after "$PODMAN_LOG" codex login
+assert_arg_after "$PODMAN_LOG" login --device-auth
+
+new_case opencode-login-args
+run_capsule --agent opencode --auth-login -- provider
+assert_arg_after "$PODMAN_LOG" opencode auth
+assert_arg_after "$PODMAN_LOG" auth login
+assert_arg_after "$PODMAN_LOG" login provider
+
+new_case auth-login-no-extras
+AGENT_CAPSULE_WITH=superpowers run_capsule --agent opencode --auth-login
+assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
+assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
+assert_not_contains "$PODMAN_LOG" '/opt/superpowers/source'
+assert_contains "$OUTPUT" '>> Extras  : none'
+
+# --auth-login only needs the agent CLI, so any image of that agent will do: rebuilding
+# without the integrations would only make the next normal run rebuild them.
+new_case auth-login-reuses-image
+run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
+run_capsule --auth-login --shell
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
+run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+run_capsule --agent codex --auth-login --shell
+assert_contains "$PODMAN_LOG" 'CALL=build'
 
 # One tag, rebuilt whenever the selection changes: the image carries only the
 # agent and integrations this run asked for.
@@ -1003,24 +1024,6 @@ new_case removed-hunkdiff
 run_capsule_fails --with hunkdiff --session removed-hunkdiff "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Unknown extra tool: hunkdiff'
 
-new_case codex-device-login
-run_capsule --agent codex --auth-login
-assert_arg_after "$PODMAN_LOG" codex login
-assert_arg_after "$PODMAN_LOG" login --device-auth
-
-new_case opencode-login-args
-run_capsule --agent opencode --auth-login -- provider
-assert_arg_after "$PODMAN_LOG" opencode auth
-assert_arg_after "$PODMAN_LOG" auth login
-assert_arg_after "$PODMAN_LOG" login provider
-
-new_case auth-login-no-extras
-AGENT_CAPSULE_WITH=superpowers run_capsule --agent opencode --auth-login
-assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
-assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
-assert_not_contains "$PODMAN_LOG" '/opt/superpowers/source'
-assert_contains "$OUTPUT" '>> Extras  : none'
-
 # API keys cross over like the gh token, as files under the runtime dir: podman would
 # store `-e NAME` values in the container config on disk.
 new_case api-key-handoff
@@ -1246,9 +1249,32 @@ AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule_fails --shell --sess
 assert_contains "$OUTPUT" 'Container plugin not found:'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
-new_case help-lists-worklog
-run_capsule --help
-assert_contains "$OUTPUT" 'worklog'
+# The agent runs as the host UID under --keep-id, so the image files must not inherit a private umask.
+new_case worklog-umask
+(umask 077; run_capsule --shell --session worklog-umask "$ROOT_DIR")
+plugin_mode="$(file_mode "$CAPSULE_HOME/build/context/plugins/worklog/hooks/worklog.mjs")"
+[[ "${plugin_mode: -1}" -ge 4 ]] || fail "plugin file is not world-readable: $plugin_mode"
+
+# The project is the vault itself, inside it, or a sibling whose name only starts like the vault's.
+new_case worklog-in-vault
+vault_dir="$CASE_DIR/notes"
+mkdir -p "$vault_dir/sub" "$CASE_DIR/notes2"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir"
+assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
+assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
+assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir/sub"
+assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
+assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$CASE_DIR/notes2"
+assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
+
+# A shell does not load the plugin, so the banner says how to.
+new_case worklog-shell-hint
+vault_dir="$CASE_DIR/vault"
+mkdir -p "$vault_dir"
+run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-shell "$ROOT_DIR"
+assert_contains "$OUTPUT" '(start claude with: --plugin-dir /opt/worklog/plugin)'
 
 new_case forced-build
 run_capsule --build --shell --session forced-build "$ROOT_DIR"
@@ -1304,38 +1330,12 @@ env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p 
 [[ ! -s "$OUTPUT" ]] || fail "status reached stdout: $(head -n 3 "$OUTPUT")"
 assert_contains "$CASE_DIR/stderr" '>> Project :'
 
-# --auth-login only needs the agent CLI, so any image of that agent will do: rebuilding
-# without the integrations would only make the next normal run rebuild them.
-new_case auth-login-reuses-image
-run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
-run_capsule --auth-login --shell
-assert_not_contains "$PODMAN_LOG" 'CALL=build'
-assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
-run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
-assert_not_contains "$PODMAN_LOG" 'CALL=build'
-run_capsule --agent codex --auth-login --shell
-assert_contains "$PODMAN_LOG" 'CALL=build'
-
 # The run starts the image this launch checked under the build lock, not the tag:
 # another launch with a different selection can move the tag right after the lock.
 new_case run-checked-image-id
 run_capsule --session image-id "$ROOT_DIR" -- --version
 image_id="id-$(awk -F '\t' 'END { print $2 }' "$PODMAN_IMAGE_STATE")"
 assert_arg_after "$PODMAN_LOG" "$image_id" claude
-
-# The image age limit is a decimal count of days, whatever leading zeros it has.
-for age_and_refresh in 08:yes 010:no 00:no; do
-  new_case image-age-digits
-  PODMAN_BUILD_EPOCH="$(($(date +%s) - 9 * 86400))" run_capsule --shell --session age-digits "$ROOT_DIR"
-  AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS="${age_and_refresh%%:*}" \
-    run_capsule --shell --session age-digits "$ROOT_DIR"
-  if [[ "${age_and_refresh#*:}" == yes ]]; then
-    assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
-  else
-    assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
-  fi
-  assert_not_contains "$OUTPUT" 'value too great'
-done
 
 # A configured rules file that does not exist is a typo, not a file to create.
 new_case rules-path-typo
