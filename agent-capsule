@@ -1133,12 +1133,12 @@ if has_extra gitlab && [[ ! "$GITLAB_INSTANCE" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-
   exit 1
 fi
 
-# One tag for every selection: the io.agent-capsule.bundle label decides whether
-# what it points at matches what this run asked for.
+# One tag per agent, so switching agents rebuilds nothing. The io.agent-capsule.bundle
+# label says whether the image still matches; a tagged AGENT_CAPSULE_IMAGE is shared.
 if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
   IMAGE_REF="$IMAGE_NAME"
 else
-  IMAGE_REF="$IMAGE_NAME:latest"
+  IMAGE_REF="$IMAGE_NAME:$AGENT"
 fi
 
 # Resolve physically (-P): a repo reached via a symlink and via its real path

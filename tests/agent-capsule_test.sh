@@ -485,14 +485,28 @@ assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
 assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
 assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.refreshed-at='
 
-# Selection and freshness are independent. A stale image must refresh even when
-# the requested agent also changes its bundle hash.
-new_case stale-image-new-agent
-PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-selection "$ROOT_DIR"
-run_capsule --agent codex --shell --session stale-selection-codex "$ROOT_DIR"
+# The tool list and freshness are independent. A stale image must refresh even when
+# a new tool list also changes its bundle hash.
+new_case stale-image-new-tools
+PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-tools "$ROOT_DIR"
+AGENT_CAPSULE_TOOLS=gh run_capsule --shell --session stale-tools "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
 assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+
+# Each agent has its own tag, so switching back and forth rebuilds nothing.
+new_case image-per-agent
+run_capsule --agent claude --shell --session tag-claude "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" -t agent-capsule-dev:claude
+run_capsule --agent codex --shell --session tag-codex "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" -t agent-capsule-dev:codex
+run_capsule --agent claude --shell --session tag-claude "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+# A tagged AGENT_CAPSULE_IMAGE is one image that every agent shares.
+for agent in claude codex; do
+  AGENT_CAPSULE_IMAGE=foo:bar run_capsule --agent "$agent" --shell --session "tag-custom-$agent" "$ROOT_DIR"
+  assert_arg_after "$PODMAN_LOG" -t foo:bar
+done
 
 new_case image-age-disabled
 PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session age-disabled "$ROOT_DIR"
