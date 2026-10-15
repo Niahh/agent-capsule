@@ -162,6 +162,7 @@ including image name, base tags, resource limits, paths, and volume options.
 - [Integrations](docs/integrations.md): Superpowers, explain-diff, anydoc, the Obsidian vault, the work
   log, Kubernetes and Talos, GitHub, GitLab, private CAs.
 - [Agents](docs/agents.md): logins, API keys, and how Codex and opencode differ from Claude Code.
+- [Profiles](docs/profiles.md): a second login for the same agent, side by side.
 - [Shell completion](docs/shell-completion.md): bash and zsh setup.
 - [macOS](docs/macos.md): the Podman machine volumes.
 - [Upgrading](docs/upgrading.md): from 0.2 and from 0.1.
