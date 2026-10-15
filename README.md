@@ -76,8 +76,8 @@ agent-capsule --agent opencode .    # run opencode instead of Claude Code
 agent-capsule --session fix-auth ~/code/myapp   # named session for parallel agents
 agent-capsule --with superpowers .              # activate bundled development skills
 agent-capsule --with explain-diff .             # explain a change as interactive HTML
-agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
-agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # log significant work
+agent-capsule --vault="$HOME/Notes" .                 # Obsidian vault over MCP
+agent-capsule --with worklog --vault="$HOME/Notes" .  # log significant work
 export AGENT_CAPSULE_TOOLS=gh,glab,kubernetes,talos   # CLIs in your image: gh, glab, kubectl, helm, talosctl
 agent-capsule --with github .                   # gh with the host gh login, git over HTTPS
 agent-capsule --with gitlab .                   # glab with the host glab login, git over HTTPS
@@ -116,11 +116,11 @@ Integrations are turned on per run with `--with`, or by default with
 | `superpowers` | Superpowers development skills | all | [Superpowers](docs/integrations.md#superpowers) |
 | `explain-diff` | explains a change as interactive HTML | all | [explain-diff](docs/integrations.md#explain-diff) |
 | `anydoc` | converts documents to Markdown | claude | [Agents](docs/agents.md) |
-| `mcpvault` | the Obsidian vault over MCP | all | [Vault](docs/integrations.md#obsidian-vault-over-mcp) |
-| `worklog` | logs significant work in the vault | claude | [Work log](docs/integrations.md#work-log-in-obsidian) |
+| `vault` | mounts the Obsidian vault, served over MCP | all | [Vault](docs/integrations.md#obsidian-vault-over-mcp) |
+| `worklog` | logs work in the vault; needs `vault` | claude | [Work log](docs/integrations.md#work-log-in-obsidian) |
 | `github` | lends gh the host's login, git over HTTPS; needs `gh` | all | [GitHub](docs/integrations.md#github) |
 | `gitlab` | lends glab the host's login, git over HTTPS; needs `glab` | all | [GitLab](docs/integrations.md#gitlab) |
-| `--ca` (flag) | trusts the CAs in `AGENT_CAPSULE_CA_CERTS` | all | [Private CA](docs/integrations.md#private-ca) |
+| `ca` | trusts the CAs in `AGENT_CAPSULE_CA_CERTS` | all | [Private CA](docs/integrations.md#private-ca) |
 
 ## Flags at a glance
 
@@ -133,10 +133,9 @@ Integrations are turned on per run with `--with`, or by default with
 - `--with TOOL[,TOOL]`: activate integrations; `list` prints them and `none` clears
   the selection.
 - `-m, --mount SRC[:DEST][:ro]`: add a file or directory bind mount; repeat as needed.
-- `--ca`: trust the private CAs in `AGENT_CAPSULE_CA_CERTS` for this run.
-- `--vault[=PATH]`: mount the configured vault read-write, or select one with
-  `=PATH`.
-- `--no-vault`: disable the vault and mcpvault for one run.
+- `--ca`: add `ca` to this run's integrations.
+- `--vault[=PATH]`: add `vault` to this run's integrations, from `PATH` if given.
+- `--no-vault`: leave `vault` and `worklog` out of this run.
 - `--shared-memory-ro`: mount Claude project memory read-only.
 - `--no-shared-memory`: disable Claude project memory.
 - `--shared-rules PATH`: select the global rules file.

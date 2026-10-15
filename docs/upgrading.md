@@ -8,6 +8,10 @@
   `AGENT_CAPSULE_TOOLS`.
 - Each agent has its own image tag, `agent-capsule-dev:<agent>`. Remove the old one with
   `podman rmi agent-capsule-dev:latest`.
+- `vault` and `ca` are integrations. Replace `AGENT_CAPSULE_MOUNT_VAULT=1` and
+  `mcpvault` with `vault` in `AGENT_CAPSULE_WITH`: `mcpvault` fails as unknown, and the
+  variable only prints a notice. `--vault`, `--no-vault` and `--ca` still work for one
+  run, and now add to the list instead of replacing it.
 
 ## Upgrading from 0.2
 

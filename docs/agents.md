@@ -25,7 +25,7 @@ configuration files are left untouched.
 
 Codex also has no shared Claude memory. Its `--auth-login` defaults to device-code
 authentication because its browser callback stays inside the container. Custom login
-arguments after `--` replace that default, and mcpvault uses Codex configuration
+arguments after `--` replace that default, and the vault's MCP server uses Codex configuration
 overrides.
 
 Status lines and build output go to stderr, and a TTY is allocated only when stdin

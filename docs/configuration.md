@@ -7,15 +7,15 @@ tools and integrations you always want, export them from `~/.bashrc` or `~/.zshr
 
 ```sh
 export AGENT_CAPSULE_TOOLS=gh,kubernetes
-export AGENT_CAPSULE_WITH=superpowers,mcpvault
-export AGENT_CAPSULE_MOUNT_VAULT=1
+export AGENT_CAPSULE_WITH=superpowers,vault
 export AGENT_CAPSULE_VAULT="$HOME/Documents/Obsidian/MyVault"
 export AGENT_CAPSULE_KEEPID=1
 ```
 
 Precedence is command-line flag > environment > built-in default. A command-line
 `--with` replaces the exported list instead of adding to it, `--with none` selects
-nothing, and `--no-vault` skips the vault for a single run.
+nothing. `--vault`, `--no-vault` and `--ca` add or remove one integration without
+replacing the list.
 
 A one-off run does not need an export: `AGENT_CAPSULE_AGENT=codex agent-capsule .`
 works, because the launcher reads the variable from its own environment.
@@ -67,12 +67,11 @@ Shared state and mounts:
 - `AGENT_CAPSULE_SHARED_MEMORY_READONLY=0`: set to `1` for read-only shared memory.
 - `AGENT_CAPSULE_SHARE_AUTH=1`: set to `0` to stop sharing the selected credentials
   file across sessions.
-- `AGENT_CAPSULE_VAULT=`: default host vault directory.
+- `AGENT_CAPSULE_VAULT=`: the host vault directory that `vault` mounts.
 - `AGENT_CAPSULE_VAULT_DEST=/vault`: vault path inside the container.
-- `AGENT_CAPSULE_MOUNT_VAULT=0`: set to `1` to mount the configured vault by default.
 - `AGENT_CAPSULE_VOLOPT=`: explicit Podman volume option, normally detected from
   SELinux support.
-- `AGENT_CAPSULE_CA_CERTS=`: PEM file of private CAs that `--ca` trusts inside the
+- `AGENT_CAPSULE_CA_CERTS=`: PEM file of private CAs that `ca` trusts inside the
   capsule. See [Private CA](integrations.md#private-ca).
 - `AGENT_CAPSULE_GITLAB_HOST=gitlab.com`: the GitLab instance `--with gitlab` reaches.
 

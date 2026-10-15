@@ -15,32 +15,31 @@ HTML explanation to `/tmp`.
 
 ## Obsidian vault over MCP
 
-`--vault` mounts your Obsidian vault at `/vault` by default. Adding
-`--with mcpvault` registers the bundled
-[mcpvault](https://github.com/bitbonsai/mcpvault) as the MCP server
-`obsidian`, so the selected agent searches and edits notes through tools rather than
-raw file reads.
+The `vault` integration mounts your Obsidian vault at `/vault` and registers the bundled
+[mcpvault](https://github.com/bitbonsai/mcpvault) as the MCP server `obsidian`, so the
+selected agent searches and edits notes through tools rather than raw file reads.
 
-mcpvault requires the vault path to be chosen explicitly, since the server gets
-read-write access to everything under it:
+The vault path is chosen explicitly, since the server gets read-write access to
+everything under it. For one run, `--vault=PATH` names it and turns the vault on:
 
 ```sh
-agent-capsule --with mcpvault --vault="$HOME/Work" .   # for one run
+agent-capsule --vault="$HOME/Work" .
 ```
 
 Or export it once from your shell profile, after which plain `agent-capsule .`
 does it all with no flags:
 
 ```sh
-export AGENT_CAPSULE_WITH=mcpvault
-export AGENT_CAPSULE_MOUNT_VAULT=1
+export AGENT_CAPSULE_WITH=vault
 export AGENT_CAPSULE_VAULT="$HOME/Documents/Obsidian/MyVault"
 ```
 
 Notes:
 
-- Only the `=` form takes a path: a bare `--vault` requires `AGENT_CAPSULE_VAULT`,
-  and `--vault ~/dir` reads `~/dir` as the project. The shell does not expand `~`
+- `--vault` and `--vault=PATH` add `vault` to the run, and `--no-vault` takes it out,
+  without replacing the rest of the list. Only the `=` form takes a path: a bare
+  `--vault` requires `AGENT_CAPSULE_VAULT`, and `--vault ~/dir` reads `~/dir` as the
+  project. The shell does not expand `~`
   after `=`, so write `--vault="$HOME/Work"`.
 - The generated config goes to the session home and reaches Claude Code through
   `--mcp-config`, so a project's own `.mcp.json` still loads. OpenCode receives the
@@ -49,14 +48,14 @@ Notes:
 
 ## Work log in Obsidian
 
-`--with mcpvault,worklog` makes Claude Code write up significant work in your vault.
+`--with worklog` makes Claude Code write up significant work in your vault.
 After each turn that changes files in a git repository, the session gets one extra turn
 to update the note that documents the work and to tick an entry in today's note.
-It needs `mcpvault`, and so a vault, and it is available only with claude.
+It needs `vault`, and it is available only with claude.
 
 ```sh
-agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # for one run
-export AGENT_CAPSULE_WITH=mcpvault,worklog                      # or by default
+agent-capsule --with worklog --vault="$HOME/Notes" .   # for one run
+export AGENT_CAPSULE_WITH=vault,worklog                 # or by default
 ```
 
 The built-in procedure learns your vault's conventions from its README or index notes.
@@ -160,7 +159,7 @@ agent-capsule --with gitlab .
   remotes are on another host, `glab` refuses to run.
 - Remotes on the instance go over HTTPS with `glab` as the credential helper, set per
   run like the GitHub ones.
-- A private CA for self-hosted resources is trusted with `--ca`: see [Private CA](#private-ca).
+- A private CA for self-hosted resources is trusted with `ca`: see [Private CA](#private-ca).
 - Without `gitlab`, the session gets no token and no git rewrite. The `glab` tool alone is
   logged out.
 - When the host login is handed over, `glab` settings changed inside the capsule last
@@ -176,7 +175,8 @@ when no keyring is available.
 ## Private CA
 
 To reach self-hosted resources whose certificates come from a private CA, name the CA
-in PEM form and pass `--ca` to the runs that need it:
+in PEM form and turn on the `ca` integration for the runs that need it, with `--ca` for
+one run or `ca` in `AGENT_CAPSULE_WITH` for every run:
 
 ```sh
 export AGENT_CAPSULE_CA_CERTS=/usr/local/share/ca-certificates/corp-root.crt
@@ -184,7 +184,8 @@ agent-capsule --ca .
 ```
 
 - The variable alone mounts nothing, so it is safe to export from a shell profile.
-  Only a run started with `--ca` gets the certificates, and only it trusts the CA.
+  Only a run with `ca` gets the certificates, and only it trusts the CA. A login with
+  `--auth-login` keeps `ca`, since it may have to reach a server behind the CA.
 - The file can hold several certificates. Only the certificate blocks cross over, so
   a private key kept in the same file stays on the host.
 - The certificates are copied to `$XDG_RUNTIME_DIR`, which is in memory, and mounted
