@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Claude Code hook: after a turn that changed files, asks the session to log its work in the Obsidian vault.
-// "snapshot" runs on UserPromptSubmit, "check" on Stop, "procedure" prints the procedure for /log-work.
+// "snapshot" runs on UserPromptSubmit, "check" on Stop, "procedure" prints the procedure for /worklog:log-work.
 import { execFileSync } from 'node:child_process';
 import {
   copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync,
@@ -82,6 +82,7 @@ function blockReason(top, numstat, headMoved) {
   const listed = rows.slice(0, maxListed).map(([added, deleted, path]) =>
     added === '-' ? `- ${path} (binary)` : `- ${path} (+${added} -${deleted})`);
   if (rows.length > maxListed) listed.push(`- and ${rows.length - maxListed} more`);
+  // date(1) knows the ISO week year and number (%G-W%V); JavaScript dates do not.
   const today = execFileSync('date', ['+%A %F, ISO week %G-W%V'], { encoding: 'utf8' }).trim();
   return [
     `Stop hook: automatic work log. Today is ${today}.`,
