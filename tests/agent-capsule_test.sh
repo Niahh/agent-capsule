@@ -194,8 +194,12 @@ make_session_home() { # name days-idle
 
 pass_count=0
 
+# exit skips the ERR trap, so the call stack is printed here.
 fail() {
+  local frame=0
+
   echo "FAIL: $*" >&2
+  while caller "$frame" >&2; do frame=$((frame + 1)); done
   exit 1
 }
 
