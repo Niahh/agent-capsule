@@ -13,6 +13,15 @@ The `explain-diff` integration activates Geoffrey Litt's
 for Claude Code, Codex, and OpenCode. The skill writes a self-contained interactive
 HTML explanation to `/tmp`.
 
+## anydoc
+
+The `anydoc` integration links the
+[document conversion skill](https://github.com/firecrawl/anydoc/tree/main/skills/convert-documents-to-markdown)
+of firecrawl's anydoc into the agent's skills dir, for every agent. It converts Word,
+PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV and PDF files to Markdown. The image
+also holds the `anydoc` CLI, but the skill calls `npx -y @firecrawl/anydoc`, which
+fetches its own copy on first use, so the skill needs the network.
+
 ## Obsidian vault over MCP
 
 The `vault` integration mounts your Obsidian vault at `/vault` and registers the bundled

@@ -58,6 +58,6 @@ unfunction _agent_capsule _agent_capsule_sessions \
 Agents, integrations and sessions are completed from live data: the first two
 come from `agent-capsule --agent list` and `agent-capsule --with list`, the third
 from the session homes that exist. `--with` completes one element at a time after
-each comma and drops what you have already picked, and `anydoc` and `worklog`
-disappear once `--agent codex` or `--agent opencode` is on the line.
+each comma and drops what you have already picked, and `worklog` disappears once
+`--agent codex` or `--agent opencode` is on the line.
 

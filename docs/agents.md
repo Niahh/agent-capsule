@@ -19,8 +19,8 @@ Their values are not placed in the Podman command line.
 
 Differences under opencode: per-project memory is unavailable (it is a Claude Code
 mechanism), Superpowers and MCP servers use invocation-scoped configuration, and the
-claude-only `anydoc` and `worklog` integrations are rejected on the command line and
-dropped with a notice when they come from `AGENT_CAPSULE_WITH`. User-owned OpenCode
+claude-only `worklog` integration is rejected on the command line and dropped with a
+notice when it comes from `AGENT_CAPSULE_WITH`. User-owned OpenCode
 configuration files are left untouched.
 
 Codex also has no shared Claude memory. Its `--auth-login` defaults to device-code

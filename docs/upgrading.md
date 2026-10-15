@@ -12,6 +12,8 @@
   `mcpvault` with `vault` in `AGENT_CAPSULE_WITH`: `mcpvault` fails as unknown, and the
   variable only prints a notice. `--vault`, `--no-vault` and `--ca` still work for one
   run, and now add to the list instead of replacing it.
+- anydoc works with every agent: its skill is linked like explain-diff's instead of
+  being loaded as a Claude plugin. `AGENT_CAPSULE_SKILLS_VERSION` is no longer read.
 
 ## Upgrading from 0.2
 
