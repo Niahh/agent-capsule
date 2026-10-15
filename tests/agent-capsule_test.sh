@@ -1722,6 +1722,13 @@ mkdir -p "$CAPSULE_HOME/homes/work" "$CASE_DIR/vaultdir"
 [[ "$(complete_line "agent-capsule --mount=$CASE_DIR/mountf")" == "$CASE_DIR/mountfile" ]] ||
   fail "--mount= completion repeats the flag"
 
+# Flags come from --help. After a prune flag a flag still completes, its DAYS do not.
+new_case completion-flags
+[[ "$(complete_line 'agent-capsule --ve')" == "$(printf '%s\n' --version --versions)" ]] ||
+  fail "--ve does not complete to the version flags"
+[[ "$(complete_line 'agent-capsule --prune-caches --y')" == --yes ]] || fail "no flag completes after --prune-caches"
+[[ -z "$(complete_line 'agent-capsule --prune-caches=')" ]] || fail "--prune-caches= offers values"
+
 # With no --agent on the line the launcher runs AGENT_CAPSULE_AGENT, so --with filters on it.
 new_case completion-ambient-agent
 [[ -z "$(AGENT_CAPSULE_AGENT=codex complete_line 'agent-capsule --with wo')" ]] ||
