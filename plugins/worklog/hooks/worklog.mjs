@@ -42,9 +42,9 @@ function git(dir, args, env = {}) {
 
 // A throwaway index also captures untracked files and leaves the real index alone. Seeding it from the real one
 // spares git from rehashing unchanged files.
-function snapshot(top, objects) {
+function snapshot(top, store) {
   const dir = mkdtempSync(join(tmpdir(), 'worklog-'));
-  const env = { ...objects, GIT_INDEX_FILE: join(dir, 'index') };
+  const env = { GIT_OBJECT_DIRECTORY: store, GIT_INDEX_FILE: join(dir, 'index') };
   try {
     const index = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
     if (existsSync(index)) copyFileSync(index, env.GIT_INDEX_FILE);
@@ -123,7 +123,6 @@ const save = (state) => {
 // Snapshots write to a private object store that reads the repository's as an alternate, so the repository never
 // collects copies of the worktree.
 const alternate = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
-const objects = (store) => ({ GIT_OBJECT_DIRECTORY: store });
 const sessionObjects = join(objectsRoot, sessionId);
 const newStore = () => {
   mkdirSync(sessionObjects, { recursive: true });
@@ -138,7 +137,7 @@ if (mode === 'snapshot') {
   // A fresh store keeps the saved baseline readable if this snapshot fails.
   const store = newStore();
   const skip = String(input.prompt ?? '').includes('#no-doc');
-  save({ top, store, head: head(top), tree: snapshot(top, objects(store)), skip });
+  save({ top, store, head: head(top), tree: snapshot(top, store), skip });
   // A prompt replaces the baseline, so the objects of earlier snapshots are garbage.
   for (const name of readdirSync(sessionObjects)) {
     if (join(sessionObjects, name) !== store) rmSync(join(sessionObjects, name), { recursive: true, force: true });
@@ -160,13 +159,13 @@ if (mode === 'snapshot') {
   // per snapshot, or whose store was pruned, cannot be read and only gets replaced.
   const usable = base?.top === top && Boolean(base.store) && existsSync(base.store);
   const store = usable ? base.store : newStore();
-  const tree = snapshot(top, objects(store));
+  const tree = snapshot(top, store);
   const commit = head(top);
   // A turn can start without a prompt, when a background task ends: rebaseline so it does not see this work again.
   save({ top, store, head: commit, tree, skip: false });
   if (!input.stop_hook_active && usable && !base.skip) {
     const diff = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...noise];
-    const numstat = git(top, diff, objects(store));
+    const numstat = git(top, diff, { GIT_OBJECT_DIRECTORY: store });
     if (numstat) {
       process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat, base.head !== commit) }));
     }
