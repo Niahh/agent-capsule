@@ -213,8 +213,8 @@ load_agent_profile() {
       # flag: pass a generated file with --mcp-config.
       # override: use CLI settings. env: merge invocation-scoped config.
       AGENT_MCP_MODE="flag"
-      # API keys passed through by name only (values stay off the podman argv).
-      AGENT_ENV_PASS=(ANTHROPIC_API_KEY)
+      # API keys, handed over through the runtime dir like the gh token.
+      AGENT_SECRET_ENV=(ANTHROPIC_API_KEY)
       AGENT_AUTH_DEVICE_DEFAULT=0
       ;;
     codex)
@@ -225,7 +225,7 @@ load_agent_profile() {
       AGENT_RULES_REL=.codex/AGENTS.md
       AGENT_SKILLS_REL=.codex/skills
       AGENT_MCP_MODE="override"
-      AGENT_ENV_PASS=(OPENAI_API_KEY)
+      AGENT_SECRET_ENV=(OPENAI_API_KEY)
       AGENT_AUTH_DEVICE_DEFAULT=1
       ;;
     opencode)
@@ -238,7 +238,7 @@ load_agent_profile() {
       AGENT_RULES_REL=".config/opencode/AGENTS.md"
       AGENT_SKILLS_REL=".config/opencode/skills"
       AGENT_MCP_MODE="env"
-      AGENT_ENV_PASS=(ANTHROPIC_API_KEY OPENAI_API_KEY)
+      AGENT_SECRET_ENV=(ANTHROPIC_API_KEY OPENAI_API_KEY)
       AGENT_AUTH_DEVICE_DEFAULT=0
       ;;
     *)
@@ -805,9 +805,8 @@ exec 3>&1 1>&2
 load_agent_profile "$AGENT"
 AUTH_HOME_DIR="$AUTH_ROOT_DIR/$AGENT"
 
-# Superpowers documents these opt-outs. Passing them by name keeps their values
-# out of the podman command line, like the provider API keys above.
-AGENT_ENV_PASS+=(
+# Superpowers documents these opt-outs. They are not secret, so -e by name is enough.
+ENV_PASS=(
   SUPERPOWERS_DISABLE_TELEMETRY
   DISABLE_TELEMETRY
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
@@ -1586,8 +1585,7 @@ if [[ "$WORKLOG_ENABLED" == "1" ]]; then
   fi
 fi
 
-# Do not place the secret values directly in the podman command line.
-for key in "${AGENT_ENV_PASS[@]}"; do
+for key in "${ENV_PASS[@]}"; do
   if [[ -n "${!key:-}" ]]; then
     ENV_ARGS+=(-e "$key")
   fi
@@ -1732,10 +1730,10 @@ fi
 # ----------------------------------------------------------------------------
 # In-memory handoff
 # ----------------------------------------------------------------------------
-# gh token dirs of launches that died before their entrypoint ran, and the glab
-# and CA dirs of finished sessions. exec hands the launcher's PID to podman, so a
+# gh token and API key dirs of launches that died before their entrypoint ran, and the
+# glab and CA dirs of finished sessions. exec hands the launcher's PID to podman, so a
 # live session still holds the PID in its dir's name.
-for stale_dir in "$LOCK_ROOT"/gh-* "$LOCK_ROOT"/glab-* "$LOCK_ROOT"/ca-*; do
+for stale_dir in "$LOCK_ROOT"/gh-* "$LOCK_ROOT"/keys-* "$LOCK_ROOT"/glab-* "$LOCK_ROOT"/ca-*; do
   [[ -d "$stale_dir" ]] || continue
   stale_pid="${stale_dir##*-}"
   [[ "$stale_pid" =~ ^[0-9]+$ ]] || continue
@@ -1846,6 +1844,22 @@ fi
 if ((${#GIT_CONFIG_ARGS[@]} > 0)); then
   ENV_ARGS+=(-e "GIT_CONFIG_COUNT=$((${#GIT_CONFIG_ARGS[@]} / 4))" "${GIT_CONFIG_ARGS[@]}")
 fi
+
+# ----------------------------------------------------------------------------
+# API key handoff
+# ----------------------------------------------------------------------------
+# One file per key, read into the environment and deleted by the entrypoint. Never -e:
+# podman writes those values into the container config on disk.
+KEYS_DIR=""
+for key in "${AGENT_SECRET_ENV[@]}"; do
+  [[ -n "${!key:-}" ]] || continue
+  if [[ -z "$KEYS_DIR" ]]; then
+    handoff_dir keys
+    KEYS_DIR="$HANDOFF_DIR"
+    ENV_ARGS+=(-e AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys)
+  fi
+  (umask 077 && printf '%s' "${!key}" > "$KEYS_DIR/$key")
+done
 
 # ----------------------------------------------------------------------------
 # Private CA
