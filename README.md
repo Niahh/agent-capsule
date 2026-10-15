@@ -29,8 +29,9 @@ limits. Everything else on the host stays out of reach.
 - Shared knowledge: one global rules file (`~/.agent-capsule/CLAUDE.md`) is mounted
   into every session at the agent's expected path, and Claude's per-project memory
   is pooled across sessions and linked worktrees of the same repo.
-- Nothing you did not ask for: the image holds the agent `--agent` picked and the
-  integrations `--with` activated, and rebuilds when that selection changes.
+- Tools you list, extensions you turn on: each agent's image holds the CLIs you list
+  in `AGENT_CAPSULE_TOOLS`, and nobody gets one they did not list. Extensions sit in
+  every image, inert until `--with` turns them on, so `--with` never rebuilds.
 - Defaults you keep: exported `AGENT_CAPSULE_*` variables hold your usual add-ons
   so they are not retyped on every run.
 
@@ -54,11 +55,9 @@ nix profile install github:Niahh/agent-capsule  # or with Nix
 
 To update, pull the repository and run `make install` again.
 
-The image builds on first run and again whenever the selection changes, because it
-contains only the agent and integrations the run asked for. Switching back is
-usually seconds: the layers of a combination you have built before are cached, so
-only the first build of each is slow. Each rebuild also removes the untagged image
-it replaced, which `AGENT_CAPSULE_PRUNE=0` disables. Podman keeps layers that images
+Each agent gets its own image, tagged with the agent's name. It builds on first run
+and again when your tool list changes, never because of `--with`. Each rebuild also
+removes the untagged image it replaced, which `AGENT_CAPSULE_PRUNE=0` disables. Podman keeps layers that images
 share, and cannot remove an image a running container still uses. So the guarantee is
 one tagged runnable image, not one object in container storage.
 
@@ -79,7 +78,7 @@ agent-capsule --with superpowers .              # activate bundled development s
 agent-capsule --with explain-diff .             # explain a change as interactive HTML
 agent-capsule --with mcpvault --vault="$HOME/Notes" .  # Obsidian vault over MCP
 agent-capsule --with mcpvault,worklog --vault="$HOME/Notes" .   # log significant work
-agent-capsule --with kubernetes,talos .         # add kubectl, helm, and talosctl
+export AGENT_CAPSULE_TOOLS=gh,glab,kubernetes,talos   # CLIs in your image: gh, glab, kubectl, helm, talosctl
 agent-capsule --with github .                   # gh with the host gh login, git over HTTPS
 agent-capsule --with gitlab .                   # glab with the host glab login, git over HTTPS
 agent-capsule --ca .                            # trust a private CA to reach self-hosted resources
@@ -97,7 +96,20 @@ default, and `--agent list` prints the known agents.
 
 Logins, API keys and how the agents differ: [Agents](docs/agents.md).
 
-## Integrations
+## Tools and integrations
+
+Tools are CLIs built into the image, listed once in `AGENT_CAPSULE_TOOLS`. A change to
+the list rebuilds the image once.
+
+| Tool | What it installs | Details |
+|---|---|---|
+| `gh` | the GitHub CLI | [GitHub](docs/integrations.md#github) |
+| `glab` | the GitLab CLI | [GitLab](docs/integrations.md#gitlab) |
+| `kubernetes` | kubectl and helm | [Clusters](docs/integrations.md#kubernetes-and-talos) |
+| `talos` | talosctl | [Clusters](docs/integrations.md#kubernetes-and-talos) |
+
+Integrations are turned on per run with `--with`, or by default with
+`AGENT_CAPSULE_WITH`. They never rebuild the image.
 
 | Integration | What it does | Agents | Details |
 |---|---|---|---|
@@ -106,9 +118,8 @@ Logins, API keys and how the agents differ: [Agents](docs/agents.md).
 | `anydoc` | converts documents to Markdown | claude | [Agents](docs/agents.md) |
 | `mcpvault` | the Obsidian vault over MCP | all | [Vault](docs/integrations.md#obsidian-vault-over-mcp) |
 | `worklog` | logs significant work in the vault | claude | [Work log](docs/integrations.md#work-log-in-obsidian) |
-| `kubernetes`, `talos` | kubectl and helm, talosctl | all | [Clusters](docs/integrations.md#kubernetes-and-talos) |
-| `github` | gh with the host's login, git over HTTPS | all | [GitHub](docs/integrations.md#github) |
-| `gitlab` | glab with the host's login, git over HTTPS | all | [GitLab](docs/integrations.md#gitlab) |
+| `github` | lends gh the host's login, git over HTTPS; needs `gh` | all | [GitHub](docs/integrations.md#github) |
+| `gitlab` | lends glab the host's login, git over HTTPS; needs `glab` | all | [GitLab](docs/integrations.md#gitlab) |
 | `--ca` (flag) | trusts the CAs in `AGENT_CAPSULE_CA_CERTS` | all | [Private CA](docs/integrations.md#private-ca) |
 
 ## Flags at a glance

@@ -84,17 +84,17 @@ created. The startup banner shows which procedure is active.
 
 ## Kubernetes and Talos
 
-`--with kubernetes` installs `kubectl` and `helm`, and `--with talos` installs
-`talosctl`. Both work with every agent. Their configuration stays on the host until
-you mount it:
+The `kubernetes` tool installs `kubectl` and `helm`, and the `talos` tool installs
+`talosctl`. List them in `AGENT_CAPSULE_TOOLS`; the next launch rebuilds the image once.
+Both work with every agent. Their configuration stays on the host until you mount it:
 
 ```sh
-agent-capsule --with kubernetes,talos \
-  -m ~/.kube/config:/home/dev/.kube/config:ro \
+export AGENT_CAPSULE_TOOLS=kubernetes,talos
+agent-capsule -m ~/.kube/config:/home/dev/.kube/config:ro \
   -m ~/.talos/config:/home/dev/.talos/config:ro .
 ```
 
-To keep them in every session, add them to `AGENT_CAPSULE_WITH`, see
+To mount the configs in every session as well, see
 [Persistent defaults](configuration.md#persistent-defaults).
 
 The cluster must be reachable from the container, so these commands fail under
@@ -103,11 +103,12 @@ inside the image.
 
 ## GitHub
 
-`--with github` installs `gh` and lends it the host's `gh` login. Log in once on the
-host, where `gh` keeps the token in the system keyring:
+`--with github` lends `gh` the host's `gh` login, so it needs the `gh` tool in the image.
+Log in once on the host, where `gh` keeps the token in the system keyring:
 
 ```sh
 gh auth login --scopes workflow      # on the host
+export AGENT_CAPSULE_TOOLS=gh
 agent-capsule --with github .
 ```
 
@@ -122,7 +123,8 @@ agent-capsule --with github .
   HTTPS, with `gh` as the credential helper. This is set per run through
   `GIT_CONFIG_*` variables. The repository and the session home are not changed.
 - `workflow` lets pushes change `.github/workflows/`. GitHub rejects them without it.
-- Without `github`, the session gets no token, no `gh` and no git rewrite.
+- Without `github`, the session gets no token and no git rewrite. The `gh` tool alone is
+  logged out.
 
 The agent can read `GH_TOKEN`, and the token can reach every repository your account
 can. Protect the branches that matter. The launcher warns when the host `gh` stores
@@ -130,12 +132,14 @@ its token in plain text, which it does when no keyring is available.
 
 ## GitLab
 
-`--with gitlab` installs `glab` and lends it the host's `glab` login for one instance:
-`gitlab.com`, or the one `AGENT_CAPSULE_GITLAB_HOST` names. Log in once on the host
-with a personal access token that has the `api` and `write_repository` scopes:
+`--with gitlab` lends `glab` the host's `glab` login for one instance, so it needs the
+`glab` tool in the image. The instance is `gitlab.com`, or the one
+`AGENT_CAPSULE_GITLAB_HOST` names. Log in once on the host with a personal access token
+that has the `api` and `write_repository` scopes:
 
 ```sh
 glab auth login --hostname gitlab.example.com      # on the host, paste the token
+export AGENT_CAPSULE_TOOLS=glab
 export AGENT_CAPSULE_GITLAB_HOST=gitlab.example.com
 agent-capsule --with gitlab .
 ```
@@ -157,7 +161,8 @@ agent-capsule --with gitlab .
 - Remotes on the instance go over HTTPS with `glab` as the credential helper, set per
   run like the GitHub ones.
 - A private CA for self-hosted resources is trusted with `--ca`: see [Private CA](#private-ca).
-- Without `gitlab`, the session gets no token, no `glab` and no git rewrite.
+- Without `gitlab`, the session gets no token and no git rewrite. The `glab` tool alone is
+  logged out.
 - When the host login is handed over, `glab` settings changed inside the capsule last
   only for the session.
 - The image sets `GLAB_SEND_TELEMETRY=false`, so `glab` does not report each command

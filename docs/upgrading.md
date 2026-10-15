@@ -1,5 +1,14 @@
 # Upgrading
 
+## Upgrading from 0.3
+
+- `kubernetes` and `talos` are tools now, not integrations. Move them from
+  `AGENT_CAPSULE_WITH` to `AGENT_CAPSULE_TOOLS`; in `--with` they fail and say so.
+- `github` and `gitlab` need their CLI in the image: add `gh` or `glab` to
+  `AGENT_CAPSULE_TOOLS`.
+- Each agent has its own image tag, `agent-capsule-dev:<agent>`. Remove the old one with
+  `podman rmi agent-capsule-dev:latest`.
+
 ## Upgrading from 0.2
 
 - The config file is gone. `~/.agent-capsule/config` is no longer read, and
