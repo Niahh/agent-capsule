@@ -47,7 +47,7 @@ output="$(run_install "$(command -v bash)" bash-inactive)"
 assert_contains "$output" 'Bash completion is installed but is not active.'
 assert_contains "$output" 'source "'
 assert_contains "$output" '/share/bash-completion/completions/agent-capsule"'
-assert_contains "$output" 'README.md, section "Shell completion"'
+assert_contains "$output" 'See docs/shell-completion.md.'
 
 # A configured Bash session is recognized, so it does not receive repair steps.
 bash_active_root="$TEST_ROOT/bash-active"
@@ -76,7 +76,7 @@ output="$(run_install "$fake_zsh" zsh-inactive)"
 assert_contains "$output" 'Zsh completion is installed but is not active.'
 assert_contains "$output" 'fpath=('
 assert_contains "$output" 'autoload -Uz compinit && compinit'
-assert_contains "$output" 'README.md, section "Shell completion"'
+assert_contains "$output" 'See docs/shell-completion.md.'
 
 # The Zsh probe checks the autoload name registered from _agent-capsule.
 mkdir -p "$TEST_ROOT/active-zsh"

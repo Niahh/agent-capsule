@@ -43,4 +43,4 @@ case "${configured_shell##*/}" in
     ;;
 esac
 
-[ "$active" = 1 ] || echo 'See README.md, section "Shell completion".'
+[ "$active" = 1 ] || echo 'See docs/shell-completion.md.'
