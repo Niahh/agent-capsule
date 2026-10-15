@@ -26,7 +26,7 @@ unset leaked_variable
 
 # Host settings the launcher or the git calls below would otherwise read.
 unset CDPATH GH_CONFIG_DIR GLAB_CONFIG_DIR XDG_CONFIG_HOME GITLAB_TOKEN GITLAB_ACCESS_TOKEN OAUTH_TOKEN \
-  GLAB_IS_OAUTH2 ANTHROPIC_API_KEY OPENAI_API_KEY
+  GLAB_IS_OAUTH2 ANTHROPIC_API_KEY OPENAI_API_KEY XDG_RUNTIME_DIR
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 FAKE_BIN="$TEST_ROOT/bin"
@@ -40,6 +40,7 @@ printf 'CALL=%s\n' "${1:-}" >> "$PODMAN_LOG"
 previous=""
 bundle_hash=""
 refreshed_at=""
+selection=""
 image_ref=""
 for arg in "$@"; do
   printf 'ARG=%s\n' "$arg" >> "$PODMAN_LOG"
@@ -49,6 +50,9 @@ for arg in "$@"; do
   if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.refreshed-at=* ]]; then
     refreshed_at="${arg#*=}"
   fi
+  if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.selection=* ]]; then
+    selection="${arg#*=}"
+  fi
   if [[ "$previous" == "-t" ]]; then
     image_ref="$arg"
   fi
@@ -57,9 +61,15 @@ done
 
 if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
   for arg in "$@"; do image_ref="$arg"; done
+  # An ID derived from the bundle, so a test can tell which build a run starts.
+  if [[ " $* " == *" {{.Id}} "* ]]; then
+    awk -F '\t' -v image="$image_ref" '$1 == image { id = "id-" $2 } END { if (id != "") print id }' \
+      "$PODMAN_IMAGE_STATE"
+    exit 0
+  fi
   awk -F '\t' -v image="$image_ref" '
-    $1 == image { hash = $2; refreshed = $3 }
-    END { if (hash != "") print hash " " refreshed }
+    $1 == image { hash = $2; refreshed = $3; selection = $4 }
+    END { if (hash != "") print hash " " refreshed " " selection }
   ' "$PODMAN_IMAGE_STATE"
   exit 0
 fi
@@ -85,8 +95,8 @@ fi
 
 if [[ "${1:-}" == "build" && -n "$image_ref" && -n "$bundle_hash" ]]; then
   sleep "${PODMAN_BUILD_DELAY:-0}"
-  printf '%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
-    "${PODMAN_BUILD_EPOCH:-$refreshed_at}" >> "$PODMAN_IMAGE_STATE"
+  printf '%s\t%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
+    "${PODMAN_BUILD_EPOCH:-$refreshed_at}" "$selection" >> "$PODMAN_IMAGE_STATE"
 fi
 
 exit 0
@@ -519,7 +529,8 @@ for profile in \
   run_capsule --agent "$agent" --session "profile-$agent" "$ROOT_DIR" -- --version
   assert_contains "$PODMAN_LOG" "ARG=ai.agent=$agent"
   assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/CLAUDE.md:/home/dev/$rules_path:ro"
-  assert_arg_after "$PODMAN_LOG" agent-capsule-dev:latest "$command"
+  image_id="id-$(awk -F '\t' 'END { print $2 }' "$PODMAN_IMAGE_STATE")"
+  assert_arg_after "$PODMAN_LOG" "$image_id" "$command"
   assert_arg_after "$PODMAN_LOG" "$command" '--version'
 done
 
@@ -1292,7 +1303,8 @@ assert_not_contains "$PODMAN_LOG" 'general-secret'
 assert_not_contains "$PODMAN_LOG" 'traffic-secret'
 
 # Containers default to UTC; the host zone keeps dates and commit times aligned.
-for tz_value in Asia/Kathmandu :Asia/Kathmandu; do
+for tz_value in Asia/Kathmandu :Asia/Kathmandu /usr/share/zoneinfo/Asia/Kathmandu \
+  :/usr/share/zoneinfo/Asia/Kathmandu; do
   new_case
   TZ="$tz_value" run_capsule --shell --session tz-env "$ROOT_DIR"
   assert_arg_after "$PODMAN_LOG" -e 'TZ=Asia/Kathmandu'
@@ -1300,7 +1312,7 @@ done
 
 # Empty, or naming a file with a leading colon: fall back to the /etc/localtime link.
 localtime_target="$(readlink /etc/localtime 2>/dev/null || true)"
-for tz_value in '' ':/etc/localtime'; do
+for tz_value in '' ':/etc/localtime' '/etc/localtime'; do
   new_case
   TZ="$tz_value" run_capsule --shell --session tz-fallback "$ROOT_DIR"
   if [[ "$localtime_target" == *zoneinfo/* ]]; then
@@ -1309,6 +1321,95 @@ for tz_value in '' ':/etc/localtime'; do
     assert_not_contains "$PODMAN_LOG" 'ARG=TZ='
   fi
 done
+
+# An exported CDPATH makes cd print where it went, which would double every resolved path.
+new_case
+mkdir -p "$CASE_DIR/proj"
+(cd "$CASE_DIR" && CDPATH=".:/nonexistent" run_capsule --shell --session cdpath proj)
+assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
+
+# Status goes to stderr, so `agent-capsule . -- -p q > out` captures only the agent.
+new_case
+HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
+  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
+  "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p question > "$OUTPUT" 2> "$CASE_DIR/stderr"
+[[ ! -s "$OUTPUT" ]] || fail "status reached stdout: $(head -n 3 "$OUTPUT")"
+assert_contains "$CASE_DIR/stderr" '>> Project :'
+
+# --auth-login only needs the agent CLI, so any image of that agent will do: rebuilding
+# without the integrations would only make the next normal run rebuild them.
+new_case
+run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
+: > "$PODMAN_LOG"
+run_capsule --auth-login --shell
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
+: > "$PODMAN_LOG"
+run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+: > "$PODMAN_LOG"
+run_capsule --agent codex --auth-login --shell
+assert_contains "$PODMAN_LOG" 'CALL=build'
+
+# The run starts the image this launch checked under the build lock, not the tag:
+# another launch with a different selection can move the tag right after the lock.
+new_case
+run_capsule --session image-id "$ROOT_DIR" -- --version
+image_id="id-$(awk -F '\t' 'END { print $2 }' "$PODMAN_IMAGE_STATE")"
+assert_arg_after "$PODMAN_LOG" "$image_id" claude
+
+# The image age limit is a decimal count of days, whatever leading zeros it has.
+for age_and_refresh in 08:yes 010:no 00:no; do
+  new_case
+  PODMAN_BUILD_EPOCH="$(($(date +%s) - 9 * 86400))" run_capsule --shell --session age-digits "$ROOT_DIR"
+  : > "$PODMAN_LOG"
+  AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS="${age_and_refresh%%:*}" \
+    run_capsule --shell --session age-digits "$ROOT_DIR"
+  if [[ "${age_and_refresh#*:}" == yes ]]; then
+    assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+  else
+    assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
+  fi
+  assert_not_contains "$OUTPUT" 'value too great'
+done
+
+# A configured rules file that does not exist is a typo, not a file to create.
+new_case
+status=0
+AGENT_CAPSULE_SHARED_RULES="$CASE_DIR/typo/CLAUDE.md" \
+  run_capsule --shell --session rules-typo "$ROOT_DIR" || status=$?
+assert_status_fails "$status"
+assert_contains "$OUTPUT" "$CASE_DIR/typo/CLAUDE.md"
+[[ ! -e "$CASE_DIR/typo" ]] || fail "the mistyped rules path was created"
+
+# A lone dash is not a project: cd would read it as $OLDPWD.
+new_case
+status=0
+OLDPWD=/etc run_capsule --shell - || status=$?
+assert_status_fails "$status"
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# Handoff files are only in memory under XDG_RUNTIME_DIR; the status must not claim it otherwise.
+new_case
+printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n' > "$CASE_DIR/corp.pem"
+mkdir -p "$CASE_DIR/tmp"
+HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
+  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
+  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" TMPDIR="$CASE_DIR/tmp" AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" \
+  "$BASH_BIN" "$SCRIPT" --ca --shell --session on-disk "$ROOT_DIR" > "$OUTPUT" 2>&1
+assert_not_contains "$OUTPUT" 'kept in memory'
+assert_contains "$OUTPUT" "$CASE_DIR/tmp/agent-capsule-$UID"
+rm -rf "$CASE_DIR/tmp"
+
+# A project path too long to name a memory folder skips shared memory instead of failing.
+new_case
+long_project="$CASE_DIR/$(printf 'p%.0s' {1..130})/$(printf 'q%.0s' {1..130})"
+mkdir -p "$long_project"
+run_capsule --shell --session long-path "$long_project"
+assert_contains "$PODMAN_LOG" 'CALL=run'
+assert_not_contains "$PODMAN_LOG" '/home/dev/.claude/projects/'
+assert_contains "$OUTPUT" 'project memory'
 
 new_case
 portable_bin="$CASE_DIR/portable-bin"
@@ -1421,8 +1522,7 @@ timeout 2 env \
 [[ "$status" == "0" ]] || fail "stale image lock was not reclaimed"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
-# A directory lock belongs to an older launcher and has no owner metadata. It
-# must be preserved because that launcher may still be building.
+# A directory at the lock path is reported and left alone, never waited on.
 new_case
 legacy_lock_root="$TEST_ROOT/xdg/agent-capsule-$UID"
 mkdir -p "$legacy_lock_root/image.lock"
@@ -1438,7 +1538,7 @@ timeout 2 env \
   "$BASH_BIN" "$SCRIPT" --shell --session legacy-lock "$ROOT_DIR" > "$OUTPUT" 2>&1 || status=$?
 assert_status_fails "$status"
 [[ -d "$legacy_lock_root/image.lock" ]] || fail "legacy image lock was removed"
-assert_contains "$OUTPUT" 'legacy directory lock'
+assert_contains "$OUTPUT" 'Not a lock file'
 rmdir "$legacy_lock_root/image.lock"
 
 # Shell completion asks the launcher for these two lists, so the contract is
@@ -1526,6 +1626,13 @@ AGENT_CAPSULE_PRUNE=0 run_capsule --shell --session prune-disabled "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_not_contains "$PODMAN_LOG" 'CALL=rmi'
 assert_not_contains "$OUTPUT" '>> Pruned'
+
+# Removing caches rewrites directory times, which must not make an idle home look used.
+new_case
+make_session_home idle-home 40
+run_capsule --prune-caches --yes
+run_capsule --prune-sessions
+assert_contains "$OUTPUT" 'idle-home'
 
 # Without --yes, prune only reports. Homes with nothing to free are not listed.
 new_case
