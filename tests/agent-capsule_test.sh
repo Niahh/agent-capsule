@@ -1193,7 +1193,7 @@ assert_not_contains "$PODMAN_LOG" '--mcp-config'
 # is no longer read, and says so.
 new_case mcpvault-and-mount-vault-gone
 run_capsule_fails --with mcpvault --shell --session mcpvault-gone "$ROOT_DIR"
-assert_contains "$OUTPUT" 'Unknown extra tool: mcpvault'
+assert_contains "$OUTPUT" 'Unknown integration: mcpvault'
 AGENT_CAPSULE_MOUNT_VAULT=1 AGENT_CAPSULE_VAULT="$VAULT_DIR" run_capsule --shell --session mount-vault "$ROOT_DIR"
 assert_contains "$OUTPUT" 'AGENT_CAPSULE_MOUNT_VAULT is no longer read; add vault to AGENT_CAPSULE_WITH.'
 assert_not_contains "$PODMAN_LOG" ':/vault'
@@ -1211,7 +1211,7 @@ assert_not_contains "$PODMAN_LOG" 'ARG=/opt/superpowers/source'
 
 new_case removed-hunkdiff
 run_capsule_fails --with hunkdiff --session removed-hunkdiff "$ROOT_DIR"
-assert_contains "$OUTPUT" 'Unknown extra tool: hunkdiff'
+assert_contains "$OUTPUT" 'Unknown integration: hunkdiff'
 
 # API keys cross over like the gh token, as files under the runtime dir: podman would
 # store `-e NAME` values in the container config on disk.
@@ -1256,7 +1256,7 @@ done
 
 new_case with-empty
 run_capsule_fails --with= --shell --session empty-extra "$ROOT_DIR"
-assert_contains "$OUTPUT" '--with requires a tool list'
+assert_contains "$OUTPUT" '--with requires a list of integrations'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case file-mount

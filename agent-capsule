@@ -11,7 +11,7 @@
 #   --shell                start bash instead of the agent
 #   --offline              disable container networking
 #   --keep-id              run with the host UID and GID inside
-#   --with TOOLS           activate integrations, or use list or none
+#   --with LIST            turn integrations on for this run, or use list or none
 #   -m, --mount SPEC       mount SRC[:DEST][:ro], repeatable
 #   --ca                   add ca to this run's integrations
 #   --vault[=PATH]         add vault to this run's integrations, from PATH if given
@@ -711,7 +711,7 @@ while [[ "${1:-}" == -* ]]; do
       ;;
     --with)
       [[ -n "${2:-}" ]] || {
-        echo "--with requires a tool list (or 'list'/'none'). Known: ${KNOWN_EXTRAS[*]}" >&2
+        echo "--with requires a list of integrations (or 'list'/'none'). Known: ${KNOWN_EXTRAS[*]}" >&2
         exit 1
       }
       [[ "$2" == "list" ]] && {
@@ -1020,7 +1020,7 @@ for req in "${REQUESTED_EXTRAS[@]}"; do
         fi
       done
       [[ "$known" == "1" ]] || {
-        echo "Unknown extra tool: $req (known: ${KNOWN_EXTRAS[*]})" >&2
+        echo "Unknown integration: $req (known: ${KNOWN_EXTRAS[*]})" >&2
         exit 1
       }
       ;;
@@ -1032,7 +1032,7 @@ done
 if [[ "$SELECT_NONE" == "1" ]]; then
   for req in "${REQUESTED_EXTRAS[@]}"; do
     [[ "$req" == "none" ]] || {
-      echo "--with none cannot be combined with other tools (got: $req)" >&2
+      echo "--with none cannot be combined with other integrations (got: $req)" >&2
       exit 1
     }
   done
