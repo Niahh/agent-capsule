@@ -1447,7 +1447,7 @@ chmod 700 "$LOCK_ROOT"
 acquire_build_lock "$LOCK_ROOT/image.lock"
 
 # The refresh label records the last pull plus no-cache build. Image creation
-# time cannot represent that: cached selection builds create a new image without
+# time cannot represent that: a cached build after a tool list change makes a new image without
 # refreshing upstream tools, and Podman exposes .Created as an ISO 8601 string.
 image_labels='{{ index .Labels "io.agent-capsule.bundle" }} {{ index .Labels "io.agent-capsule.refreshed-at" }}'
 image_labels+=' {{ index .Labels "io.agent-capsule.agent" }}'
@@ -1537,7 +1537,7 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
   prune_superseded_images
 fi
 # Run this image, not the tag: once the lock is released, a launch with another
-# selection can move the tag before podman run starts.
+# tool list can move the tag before podman run starts.
 IMAGE_ID="$(podman image inspect --format '{{.Id}}' "$IMAGE_REF")"
 release_build_lock
 
