@@ -9,7 +9,8 @@ DOCKERFILE="$ROOT_DIR/Dockerfile"
 # The script owns its version; asserting a literal here breaks on every bump.
 LAUNCHER_VERSION="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$SCRIPT")"
 TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+# Session fixtures carry a read-only Go module cache, which plain rm -rf cannot remove.
+trap 'chmod -R u+w "$TEST_ROOT" 2>/dev/null; rm -rf "$TEST_ROOT"' EXIT
 
 # The suite is commonly run from inside a capsule, where AGENT_CAPSULE_* and
 # HERDR_* are exported. They would reach the script under test and change what
@@ -62,6 +63,12 @@ if [[ "${1:-}" == "images" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "ps" ]]; then
+  [[ "${PODMAN_PS_FAIL:-0}" == "1" ]] && exit 125
+  [[ -f "${PODMAN_RUNNING:-}" ]] && cat "$PODMAN_RUNNING"
+  exit 0
+fi
+
 if [[ "${1:-}" == "rmi" ]]; then
   if [[ -f "${PODMAN_DANGLING:-}" ]]; then
     grep -vxF "${2:-}" "$PODMAN_DANGLING" > "$PODMAN_DANGLING.tmp" || true
@@ -88,6 +95,31 @@ fi
 
 file_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
+file_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+}
+
+days_ago_stamp() {
+  date -d "-$1 days" +%Y%m%d%H%M 2>/dev/null || date -v "-$1d" +%Y%m%d%H%M
+}
+
+# A claude session home last used DAYS ago, holding both rebuildable caches and
+# state that pruning caches must keep.
+make_session_home() { # name days-idle
+  local home="$CAPSULE_HOME/homes/$1"
+
+  mkdir -p "$home/.claude/projects/p" "$home/.cache/go-build" "$home/.npm/_cacache" \
+    "$home/go/pkg/mod/example.com/m@v1" "$home/go/bin"
+  printf 'claude\n' > "$home/.agent"
+  printf '{}\n' > "$home/.claude.json"
+  printf 'x\n' | tee "$home/.claude/projects/p/s.jsonl" "$home/.cache/go-build/o" \
+    "$home/.npm/_cacache/o" "$home/go/pkg/mod/example.com/m@v1/go.mod" \
+    "$home/go/bin/tool" > /dev/null
+  # Go leaves its module cache read-only.
+  chmod -R a-w "$home/go/pkg/mod"
+  find "$home" -exec touch -t "$(days_ago_stamp "$2")" {} +
 }
 
 pass_count=0
@@ -250,6 +282,7 @@ run_capsule --help
 assert_contains "$OUTPUT" 'Usage:'
 assert_contains "$OUTPUT" '--versions'
 assert_contains "$OUTPUT" '--shared-rules PATH'
+assert_contains "$OUTPUT" '--prune-sessions[=DAYS]'
 assert_contains "$OUTPUT" 'explain-diff'
 assert_contains "$OUTPUT" 'kubernetes'
 assert_contains "$OUTPUT" 'talos'
@@ -1084,6 +1117,125 @@ AGENT_CAPSULE_PRUNE=0 run_capsule --shell --session prune-disabled "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_not_contains "$PODMAN_LOG" 'CALL=rmi'
 assert_not_contains "$OUTPUT" '>> Pruned'
+
+# Without --yes, prune only reports. Homes with nothing to free are not listed.
+new_case
+make_session_home idle-home 40
+make_session_home recent-home 1
+mkdir -p "$CAPSULE_HOME/homes/no-caches"
+printf 'claude\n' > "$CAPSULE_HOME/homes/no-caches/.agent"
+find "$CAPSULE_HOME/homes/no-caches" -maxdepth 1 -exec touch -t "$(days_ago_stamp 40)" {} +
+run_capsule --prune-caches
+assert_contains "$OUTPUT" 'idle-home'
+assert_not_contains "$OUTPUT" 'recent-home'
+assert_not_contains "$OUTPUT" 'no-caches'
+[[ -d "$CAPSULE_HOME/homes/idle-home/.cache" ]] || fail "dry run removed caches"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+assert_not_contains "$PODMAN_LOG" 'CALL=run'
+
+# Pruning caches keeps what does not rebuild itself: transcripts, settings and
+# tools the session installed.
+run_capsule --prune-caches --yes
+idle_home="$CAPSULE_HOME/homes/idle-home"
+for removed in .cache .npm go/pkg; do
+  [[ ! -e "$idle_home/$removed" ]] || fail "$removed survived --prune-caches"
+done
+for kept in .agent .claude.json .claude/projects/p/s.jsonl go/bin/tool; do
+  [[ -e "$idle_home/$kept" ]] || fail "--prune-caches removed $kept"
+done
+[[ -d "$CAPSULE_HOME/homes/recent-home/.cache" ]] || fail "--prune-caches touched a recent home"
+
+# Whole homes go, except recent, running and symlinked ones. State outside homes/
+# is never a candidate.
+new_case
+make_session_home idle-home 40
+make_session_home recent-home 1
+make_session_home running-home 40
+outside_home="$CASE_DIR/outside-home"
+mkdir -p "$outside_home"
+printf 'claude\n' > "$outside_home/.agent"
+find "$outside_home" -maxdepth 1 -exec touch -t "$(days_ago_stamp 40)" {} +
+ln -s "$outside_home" "$CAPSULE_HOME/homes/linked-home"
+touch -h -t "$(days_ago_stamp 40)" "$CAPSULE_HOME/homes/linked-home"
+mkdir -p "$CAPSULE_HOME/auth-home/claude" "$CAPSULE_HOME/project-memory/abc"
+touch "$CAPSULE_HOME/auth-home/claude/.credentials.json" "$CAPSULE_HOME/project-memory/abc/MEMORY.md"
+printf '%s\n' running-home > "$CASE_DIR/running"
+PODMAN_RUNNING="$CASE_DIR/running" run_capsule --prune-sessions --yes
+[[ ! -e "$CAPSULE_HOME/homes/idle-home" ]] || fail "idle home survived --prune-sessions"
+for kept in homes/recent-home homes/running-home homes/linked-home \
+  auth-home/claude/.credentials.json project-memory/abc/MEMORY.md; do
+  [[ -e "$CAPSULE_HOME/$kept" ]] || fail "--prune-sessions removed $kept"
+done
+[[ -f "$outside_home/.agent" ]] || fail "--prune-sessions followed a symlinked home"
+
+# Homes from before the marker refresh still count as used when the agent wrote
+# to them recently.
+new_case
+make_session_home legacy-home 40
+touch "$CAPSULE_HOME/homes/legacy-home/.claude.json"
+run_capsule --prune-sessions
+assert_not_contains "$OUTPUT" 'legacy-home'
+
+# Codex and OpenCode write only below the top level, and that still counts as use.
+new_case
+make_session_home deep-write 40
+touch "$CAPSULE_HOME/homes/deep-write/.claude/projects/p/s.jsonl"
+run_capsule --prune-sessions
+assert_not_contains "$OUTPUT" 'deep-write'
+
+# A symlinked go/ must not lead --prune-caches out of the home.
+new_case
+make_session_home linked-go 40
+linked_go_home="$CAPSULE_HOME/homes/linked-go"
+outside_go="$CASE_DIR/outside-go"
+mkdir -p "$outside_go/pkg"
+touch "$outside_go/pkg/keep"
+chmod -R u+w "$linked_go_home/go"
+rm -rf "$linked_go_home/go"
+ln -s "$outside_go" "$linked_go_home/go"
+find "$linked_go_home" -maxdepth 1 -exec touch -h -t "$(days_ago_stamp 40)" {} +
+run_capsule --prune-caches --yes
+[[ -e "$outside_go/pkg/keep" ]] || fail "--prune-caches followed a symlinked go/"
+[[ ! -e "$linked_go_home/.cache" ]] || fail "--prune-caches skipped the rest of a home with a symlinked go/"
+
+new_case
+make_session_home ten-days 10
+run_capsule --prune-sessions
+assert_not_contains "$OUTPUT" 'ten-days'
+run_capsule --prune-sessions=7
+assert_contains "$OUTPUT" 'ten-days'
+[[ -d "$CAPSULE_HOME/homes/ten-days" ]] || fail "dry run removed a home"
+
+# Without podman's answer nothing proves a home is not in use, so prune stops.
+new_case
+make_session_home idle-home 40
+set +e
+PODMAN_PS_FAIL=1 run_capsule --prune-sessions --yes
+status=$?
+set -e
+assert_status_fails "$status"
+[[ -d "$CAPSULE_HOME/homes/idle-home" ]] || fail "prune removed a home without checking podman"
+
+new_case
+for prune_args in '--prune-caches=soon' '--prune-sessions=-1' '--yes' \
+  '--prune-caches --prune-sessions' '--prune-sessions=100000' \
+  '--prune-sessions --session x' '--prune-sessions .' '--prune-sessions --'; do
+  set +e
+  # shellcheck disable=SC2086
+  run_capsule $prune_args
+  status=$?
+  set -e
+  assert_status_fails "$status"
+  assert_not_contains "$OUTPUT" 'Unknown option'
+done
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# Every launch records last use on the session marker.
+new_case
+make_session_home relaunched 40
+run_capsule --shell --session relaunched "$ROOT_DIR"
+(($(date +%s) - $(file_mtime "$CAPSULE_HOME/homes/relaunched/.agent") < 3600)) ||
+  fail "launch did not refresh the session marker"
 
 # The image lives in podman's store, not under AGENT_CAPSULE_HOME, so a second
 # capsule home reuses it rather than building its own.

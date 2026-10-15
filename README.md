@@ -263,6 +263,9 @@ overrides.
 - `--shared-rules-rw`: mount the global rules file read-write.
 - `--no-shared-rules`: disable the global rules file.
 - `--build`: pull the base image and rebuild without the layer cache.
+- `--prune-caches[=DAYS]`: list caches of sessions idle 30+ days, or `DAYS`.
+- `--prune-sessions[=DAYS]`: list whole sessions idle 30+ days, or `DAYS`.
+- `--yes`: remove what the prune flag lists.
 - `--version`: print the launcher version.
 - `--versions`: print each configured tool pin, or `latest` when unpinned.
 
@@ -438,6 +441,27 @@ Linked Git worktrees keep the same absolute working-directory path inside and ou
 the container. The repository's common Git directory is mounted at its host path when
 it is outside the selected worktree. `/workspace` remains a second project mount for
 existing scripts, but worktree commands should run from the default working directory.
+
+### Pruning idle sessions
+
+Session homes are never removed automatically, and each one keeps its own Go and npm
+caches. Prune the ones you no longer use:
+
+```sh
+agent-capsule --prune-caches              # list caches of sessions idle 30+ days
+agent-capsule --prune-caches=7 --yes      # remove them, threshold 7 days
+agent-capsule --prune-sessions --yes      # remove whole idle session homes
+```
+
+- Without `--yes`, nothing is removed.
+- `--prune-caches` removes `.cache`, `.npm` and `go/pkg`. Transcripts, settings and
+  `go/bin` stay, so the session can still be resumed.
+- `--prune-sessions` removes the whole `homes/<session>/`.
+- A session is idle when nothing in its home changed in that many days.
+- The prune flags cover every session, so they take no `--session` or project path.
+- Sessions with a running container are skipped. If `podman ps` fails, nothing is
+  removed.
+- `auth-home/`, `project-memory/` and the rules file are never touched.
 
 ## Shell completion
 
