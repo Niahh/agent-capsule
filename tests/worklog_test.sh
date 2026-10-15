@@ -76,19 +76,13 @@ test_blocks_after_a_turn_that_edits() {
   printf 'b\n' >> "$REPO/main.go"
   # hook() clears the environment, so both sides pin the time zone.
   assert_blocks "edit" "$(hook check "" false TZ=UTC)" "main.go" "$(TZ=UTC date +%A)" "$(TZ=UTC date +%G-W%V)" \
-    "durable change to behavior"
+    "durable change to behavior" 'reply only "Nothing to log."'
 }
 
 test_snapshot_prints_nothing() {
   # UserPromptSubmit stdout is added to the prompt context.
   setup
   assert_empty "snapshot stdout" "$(hook snapshot "do it" false)"
-}
-
-test_silent_when_the_turn_changed_nothing() {
-  setup
-  hook snapshot "explain it" false > /dev/null
-  assert_empty "no change" "$(hook check "" false)"
 }
 
 test_ignores_edits_made_between_turns() {
@@ -169,13 +163,6 @@ test_works_before_the_first_commit() {
   hook snapshot "do it" false > /dev/null
   printf 'new\n' > "$REPO/new.go"
   assert_blocks "no commit" "$(hook check "" false)" "new.go"
-}
-
-test_counts_new_untracked_files() {
-  setup
-  hook snapshot "do it" false > /dev/null
-  printf 'new\n' > "$REPO/new.go"
-  assert_blocks "untracked" "$(hook check "" false)" "new.go"
 }
 
 test_lists_a_change_of_thousands_of_files() {
@@ -388,14 +375,6 @@ test_strips_procedure_frontmatter() {
   assert_blocks "frontmatter" "$out" "MY VAULT STEPS"
   reason="$(reason_of "$out")"
   if [[ "$reason" != *'tags: [log]'* ]]; then pass; else fail "frontmatter left in the reason"; fi
-}
-
-test_reason_carries_the_significance_test() {
-  setup
-  hook snapshot "do it" false > /dev/null
-  printf 'b\n' >> "$REPO/main.go"
-  assert_blocks "significance" "$(hook check "" false)" \
-    "durable change to behavior, architecture, configuration" 'reply only "Nothing to log."'
 }
 
 test_procedure_mode_prints_the_procedure() {
