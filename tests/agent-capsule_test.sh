@@ -241,11 +241,6 @@ assert_arg_after() {
   ' "$file" || fail "$3 does not follow $2 in $file"
 }
 
-assert_status_fails() {
-  local status="$1"
-  [[ "$status" -ne 0 ]] || fail "command unexpectedly succeeded"
-}
-
 new_case() {
   CASE_DIR="$TEST_ROOT/case-$pass_count"
   CAPSULE_HOME="$CASE_DIR/capsule"
@@ -266,20 +261,26 @@ new_case() {
   ((pass_count += 1))
 }
 
-run_capsule() {
-  local run_output="${RUN_OUTPUT:-$OUTPUT}"
+# Sets CAPSULE_ENV, the launcher's environment in the current case. Built at call
+# time, so a case can override CAPSULE_HOME or PATH for one launch.
+capsule_env() {
+  CAPSULE_ENV=(
+    # An empty volume option, or an SELinux host would add :z to every mount.
+    AGENT_CAPSULE_VOLOPT=''
+    HOME="$HOST_HOME"
+    PATH="$FAKE_BIN:$PATH"
+    PODMAN_LOG="$PODMAN_LOG"
+    PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE"
+    PODMAN_DANGLING="${PODMAN_DANGLING:-}"
+    AGENT_CAPSULE_HOME="$CAPSULE_HOME"
+    AGENT_CAPSULE_DOCKERFILE="${AGENT_CAPSULE_DOCKERFILE:-$DOCKERFILE}"
+    XDG_RUNTIME_DIR="$XDG_DIR"
+  )
+}
 
-  # An empty volume option, or an SELinux host would add :z to every mount.
-  AGENT_CAPSULE_VOLOPT='' \
-    HOME="$HOST_HOME" \
-    PATH="$FAKE_BIN:$PATH" \
-    PODMAN_LOG="$PODMAN_LOG" \
-    PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
-    PODMAN_DANGLING="${PODMAN_DANGLING:-}" \
-    AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-    AGENT_CAPSULE_DOCKERFILE="${AGENT_CAPSULE_DOCKERFILE:-$DOCKERFILE}" \
-    XDG_RUNTIME_DIR="$XDG_DIR" \
-    "$BASH_BIN" "$SCRIPT" "$@" > "$run_output" 2>&1
+run_capsule() {
+  capsule_env
+  env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" "$@" > "${RUN_OUTPUT:-$OUTPUT}" 2>&1
 }
 
 run_capsule_fails() {
@@ -1325,10 +1326,8 @@ assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
 
 # Status goes to stderr, so `agent-capsule . -- -p q > out` captures only the agent.
 new_case
-HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
-  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" XDG_RUNTIME_DIR="$XDG_DIR" \
-  "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p question > "$OUTPUT" 2> "$CASE_DIR/stderr"
+capsule_env
+env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p question > "$OUTPUT" 2> "$CASE_DIR/stderr"
 [[ ! -s "$OUTPUT" ]] || fail "status reached stdout: $(head -n 3 "$OUTPUT")"
 assert_contains "$CASE_DIR/stderr" '>> Project :'
 
@@ -1385,9 +1384,13 @@ assert_not_contains "$PODMAN_LOG" 'CALL='
 new_case
 printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n' > "$CASE_DIR/corp.pem"
 mkdir -p "$CASE_DIR/tmp"
-HOME="$HOST_HOME" PATH="$FAKE_BIN:$PATH" PODMAN_LOG="$PODMAN_LOG" \
-  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" TMPDIR="$CASE_DIR/tmp" AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" \
+# No XDG_RUNTIME_DIR, as on macOS, so the handoff files go under TMPDIR.
+capsule_env
+on_disk_env=()
+for entry in "${CAPSULE_ENV[@]}"; do
+  [[ "$entry" == XDG_RUNTIME_DIR=* ]] || on_disk_env+=("$entry")
+done
+env "${on_disk_env[@]}" TMPDIR="$CASE_DIR/tmp" AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" \
   "$BASH_BIN" "$SCRIPT" --ca --shell --session on-disk "$ROOT_DIR" > "$OUTPUT" 2>&1
 assert_not_contains "$OUTPUT" 'kept in memory'
 assert_contains "$OUTPUT" "$CASE_DIR/tmp/agent-capsule-$UID"
@@ -1409,13 +1412,8 @@ command -v shasum >/dev/null || fail "this case needs shasum, the fallback it ch
 for tool in bash awk tr mkdir chmod touch cp cat date dirname basename shasum rm sleep; do
   ln -s "$(command -v "$tool")" "$portable_bin/$tool"
 done
-HOME="$HOST_HOME" \
-  PATH="$portable_bin:$FAKE_BIN" \
-  PODMAN_LOG="$PODMAN_LOG" \
-  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
-  AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
-  XDG_RUNTIME_DIR="$XDG_DIR" \
+capsule_env
+env "${CAPSULE_ENV[@]}" PATH="$portable_bin:$FAKE_BIN" \
   "$BASH_BIN" "$SCRIPT" --shell --session shasum-fallback "$ROOT_DIR" > "$OUTPUT" 2>&1
 assert_contains "$PODMAN_LOG" 'CALL=run'
 [[ "$(file_mode "$CAPSULE_HOME/CLAUDE.md")" == "600" ]] || fail "default rules mode is not private"
@@ -1496,34 +1494,20 @@ new_case
 stale_lock_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$stale_lock_root"
 printf '%s\n' 999999999 > "$stale_lock_root/image.lock"
-status=0
-timeout 2 env \
-  HOME="$HOST_HOME" \
-  PATH="$FAKE_BIN:$PATH" \
-  PODMAN_LOG="$PODMAN_LOG" \
-  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
-  AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
-  XDG_RUNTIME_DIR="$XDG_DIR" \
-  "$BASH_BIN" "$SCRIPT" --shell --session stale-lock "$ROOT_DIR" > "$OUTPUT" 2>&1 || status=$?
-[[ "$status" == "0" ]] || fail "stale image lock was not reclaimed"
+capsule_env
+timeout 2 env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" --shell --session stale-lock "$ROOT_DIR" \
+  > "$OUTPUT" 2>&1 || fail "stale image lock was not reclaimed"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
 # A directory at the lock path is reported and left alone, never waited on.
 new_case
 legacy_lock_root="$XDG_DIR/agent-capsule-$UID"
 mkdir -p "$legacy_lock_root/image.lock"
-status=0
-timeout 2 env \
-  HOME="$HOST_HOME" \
-  PATH="$FAKE_BIN:$PATH" \
-  PODMAN_LOG="$PODMAN_LOG" \
-  PODMAN_IMAGE_STATE="$PODMAN_IMAGE_STATE" \
-  AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-  AGENT_CAPSULE_DOCKERFILE="$DOCKERFILE" \
-  XDG_RUNTIME_DIR="$XDG_DIR" \
-  "$BASH_BIN" "$SCRIPT" --shell --session legacy-lock "$ROOT_DIR" > "$OUTPUT" 2>&1 || status=$?
-assert_status_fails "$status"
+capsule_env
+if timeout 2 env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" --shell --session legacy-lock "$ROOT_DIR" \
+  > "$OUTPUT" 2>&1; then
+  fail "a directory at the lock path did not stop the launch"
+fi
 [[ -d "$legacy_lock_root/image.lock" ]] || fail "legacy image lock was removed"
 assert_contains "$OUTPUT" 'Not a lock file'
 
@@ -1571,10 +1555,10 @@ mkdir -p "$nopodman_bin"
 for tool in bash awk tr cat; do
   ln -s "$(command -v "$tool")" "$nopodman_bin/$tool"
 done
+capsule_env
 for subcommand in '--agent list' '--with list'; do
   # shellcheck disable=SC2086
-  HOME="$HOST_HOME" PATH="$nopodman_bin" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-    "$BASH_BIN" "$SCRIPT" $subcommand > "$OUTPUT" 2>&1 ||
+  env "${CAPSULE_ENV[@]}" PATH="$nopodman_bin" "$BASH_BIN" "$SCRIPT" $subcommand > "$OUTPUT" 2>&1 ||
     fail "$subcommand failed with no podman on PATH"
   [[ -s "$OUTPUT" ]] || fail "$subcommand printed nothing"
 done
