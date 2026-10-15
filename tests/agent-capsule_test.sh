@@ -204,7 +204,7 @@ fail() {
 }
 
 # Otherwise an unexpected non-zero exit ends the suite silently, and the EXIT trap
-# deletes the output that explains it. Expected failures use `|| status=$?`.
+# deletes the output that explains it. Expected failures use run_capsule_fails.
 on_error() { # status line command
   local frame=1
 
@@ -279,6 +279,10 @@ run_capsule() {
     AGENT_CAPSULE_DOCKERFILE="${AGENT_CAPSULE_DOCKERFILE:-$DOCKERFILE}" \
     XDG_RUNTIME_DIR="$TEST_ROOT/xdg" \
     "$BASH_BIN" "$SCRIPT" "$@" > "$run_output" 2>&1
+}
+
+run_capsule_fails() {
+  if run_capsule "$@"; then fail "the launcher unexpectedly succeeded: $*"; fi
 }
 
 new_case
@@ -474,9 +478,7 @@ AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=0 \
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 
 new_case
-status=0
-AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=weekly run_capsule --shell "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=weekly run_capsule_fails --shell "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Invalid AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS: weekly'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
@@ -489,17 +491,13 @@ AGENT_CAPSULE_SUPERPOWERS_VERSION=v1.2.3-beta.1+build.7 run_capsule --versions
 assert_contains "$OUTPUT" 'superpowers v1.2.3-beta.1+build.7'
 
 new_case
-status=0
-AGENT_CAPSULE_CLAUDE_CODE_VERSION=invalid run_capsule --shell "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+AGENT_CAPSULE_CLAUDE_CODE_VERSION=invalid run_capsule_fails --shell "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Invalid pinned package version: invalid'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # Cluster CLI releases are tagged with a leading v, which the download URLs need.
 new_case
-status=0
-AGENT_CAPSULE_KUBECTL_VERSION=1.37.1 run_capsule --shell "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+AGENT_CAPSULE_KUBECTL_VERSION=1.37.1 run_capsule_fails --shell "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Invalid pinned tagged version: 1.37.1'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
@@ -510,16 +508,12 @@ AGENT_CAPSULE_SESSION=configured-session run_capsule --auth-login
 assert_contains "$OUTPUT" '>> Session : _auth'
 
 new_case
-status=0
-run_capsule --auth-login --session explicit-session || status=$?
-assert_status_fails "$status"
+run_capsule_fails --auth-login --session explicit-session
 assert_contains "$OUTPUT" '--auth-login uses its own session'
 
 for agent in claude codex opencode; do
   new_case
-  status=0
-  run_capsule --agent "$agent" --auth-login --offline || status=$?
-  assert_status_fails "$status"
+  run_capsule_fails --agent "$agent" --auth-login --offline
   assert_contains "$OUTPUT" '--auth-login cannot be combined with --offline'
 done
 
@@ -543,9 +537,7 @@ new_case
 legacy_credential="$CAPSULE_HOME/auth-home/.claude/.credentials.json"
 mkdir -p "$(dirname "$legacy_credential")"
 printf '%s\n' token > "$legacy_credential"
-status=0
-run_capsule --shell --session legacy-auth-home "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --shell --session legacy-auth-home "$ROOT_DIR"
 assert_contains "$OUTPUT" "Authentication state from agent-capsule 0.1: $CAPSULE_HOME/auth-home/.claude"
 [[ "$(<"$legacy_credential")" == token ]] || fail "0.1 credential changed"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
@@ -724,9 +716,7 @@ done
 
 # --ca without a file to trust stops the launch before podman runs.
 new_case
-status=0
-run_capsule --ca --shell --session ca-unset "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --ca --shell --session ca-unset "$ROOT_DIR"
 assert_contains "$OUTPUT" 'AGENT_CAPSULE_CA_CERTS'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
@@ -757,9 +747,7 @@ new_case
 printf -- '-----BEGIN PRIVATE KEY-----\nMIGHcapsuleSecretKey\n-----END PRIVATE KEY-----\n' \
   > "$CASE_DIR/key-only.pem"
 for bad_ca in "$CASE_DIR/missing.pem" "$CASE_DIR/key-only.pem"; do
-  status=0
-  AGENT_CAPSULE_CA_CERTS="$bad_ca" run_capsule --ca --shell --session ca-bad "$ROOT_DIR" || status=$?
-  assert_status_fails "$status"
+  AGENT_CAPSULE_CA_CERTS="$bad_ca" run_capsule_fails --ca --shell --session ca-bad "$ROOT_DIR"
   assert_contains "$OUTPUT" "$bad_ca"
   assert_not_contains "$PODMAN_LOG" 'CALL='
 done
@@ -898,10 +886,8 @@ assert_not_contains "$OUTPUT" 'glpat-plain'
 new_case
 for bad_host in https://gitlab.corp.example gitlab.corp.example:8443 gitlab.corp.example/sub \
   -gitlab.corp.example; do
-  status=0
   PATH="$GLAB_FAKE_BIN:$PATH" AGENT_CAPSULE_GITLAB_HOST="$bad_host" \
-    run_capsule --with gitlab --shell --session glab-bad-host "$ROOT_DIR" || status=$?
-  assert_status_fails "$status"
+    run_capsule_fails --with gitlab --shell --session glab-bad-host "$ROOT_DIR"
   assert_contains "$OUTPUT" "$bad_host"
   assert_not_contains "$PODMAN_LOG" 'CALL='
 done
@@ -998,9 +984,7 @@ assert_not_contains "$PODMAN_LOG" 'ARG=/opt/superpowers/source'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/anydoc/plugin'
 
 new_case
-status=0
-run_capsule --with hunkdiff --session removed-hunkdiff "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --with hunkdiff --session removed-hunkdiff "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Unknown extra tool: hunkdiff'
 
 new_case
@@ -1068,15 +1052,11 @@ run_capsule --shell --session keys-sweep "$ROOT_DIR"
 rm -rf "$runtime_root/keys-$$"
 
 new_case
-status=0
-run_capsule --agent codex --with anydoc --session unsupported-extra "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --agent codex --with anydoc --session unsupported-extra "$ROOT_DIR"
 assert_contains "$OUTPUT" "Extra 'anydoc' is not available with --agent codex"
 
 new_case
-status=0
-run_capsule --with= --shell --session empty-extra "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --with= --shell --session empty-extra "$ROOT_DIR"
 assert_contains "$OUTPUT" '--with requires a tool list'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -1087,9 +1067,7 @@ run_capsule --shell --session file-mount --mount "$mount_file:/etc/tool.conf:ro"
 assert_contains "$PODMAN_LOG" "ARG=$mount_file:/etc/tool.conf:ro"
 
 new_case
-status=0
-run_capsule --shell --session missing-vault --vault "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --shell --session missing-vault --vault "$ROOT_DIR"
 assert_contains "$OUTPUT" 'No vault configured. Use --vault=PATH or set AGENT_CAPSULE_VAULT.'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -1103,32 +1081,24 @@ assert_contains "$PODMAN_LOG" "ARG=$vault_dir:/vault"
 new_case
 vault_dir="$CASE_DIR/vault"
 mkdir -p "$vault_dir"
-status=0
 AGENT_CAPSULE_VAULT_DEST=relative \
-  run_capsule --shell --session invalid-vault-destination --vault="$vault_dir" "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+  run_capsule_fails --shell --session invalid-vault-destination --vault="$vault_dir" "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Invalid vault destination: relative'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
 long_session="$(printf 'a%.0s' {1..121})"
-status=0
-run_capsule --shell --session "$long_session" "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --shell --session "$long_session" "$ROOT_DIR"
 assert_contains "$OUTPUT" 'not starting with a dot'
 
 new_case
-status=0
-run_capsule --shell --session 'fix/auth' "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --shell --session 'fix/auth' "$ROOT_DIR"
 assert_contains "$OUTPUT" "Invalid session name: 'fix/auth'."
 [[ ! -e "$CAPSULE_HOME/homes/fixauth" ]] || fail "invalid session name was normalized"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
-status=0
-run_capsule --shell --session= "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --shell --session= "$ROOT_DIR"
 assert_contains "$OUTPUT" '--session requires a name.'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -1140,9 +1110,7 @@ assert_contains "$OUTPUT" '>> Session : dotfiles-'
 
 for invalid_session in . ..; do
   new_case
-  status=0
-  run_capsule --shell --session "$invalid_session" "$ROOT_DIR" || status=$?
-  assert_status_fails "$status"
+  run_capsule_fails --shell --session "$invalid_session" "$ROOT_DIR"
   assert_contains "$OUTPUT" "Invalid session name: '$invalid_session'"
   assert_not_contains "$PODMAN_LOG" 'CALL=run'
 done
@@ -1197,10 +1165,8 @@ assert_contains "$OUTPUT" ">> Worklog : $CASE_DIR/mine.md -> /etc/agent-capsule/
 new_case
 vault_dir="$CASE_DIR/vault"
 mkdir -p "$vault_dir"
-status=0
 AGENT_CAPSULE_WORKLOG_PROCEDURE="$CASE_DIR/missing.md" \
-  run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-missing "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+  run_capsule_fails --with mcpvault,worklog --vault="$vault_dir" --session worklog-missing "$ROOT_DIR"
 assert_contains "$OUTPUT" "File not found: $CASE_DIR/missing.md"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -1216,18 +1182,14 @@ assert_contains "$OUTPUT" ">> Worklog : $CAPSULE_HOME/log-work.md -> /etc/agent-
 # A broken one fails loudly instead of falling back to the built-in procedure.
 rm "$CASE_DIR/notes/log-work.md"
 : > "$PODMAN_LOG"
-status=0
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR"
 assert_contains "$OUTPUT" "File not found: $CAPSULE_HOME/log-work.md"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 new_case
 vault_dir="$CASE_DIR/vault"
 mkdir -p "$vault_dir"
-status=0
-run_capsule --with worklog --vault="$vault_dir" --session worklog-no-mcp "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --with worklog --vault="$vault_dir" --session worklog-no-mcp "$ROOT_DIR"
 assert_contains "$OUTPUT" '--with worklog needs mcpvault.'
 assert_contains "$OUTPUT" 'Add mcpvault to --with or AGENT_CAPSULE_WITH.'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
@@ -1235,10 +1197,8 @@ assert_not_contains "$PODMAN_LOG" 'CALL=run'
 new_case
 vault_dir="$CASE_DIR/vault"
 mkdir -p "$vault_dir"
-status=0
 AGENT_CAPSULE_WITH=mcpvault \
-  run_capsule --with worklog --vault="$vault_dir" --session worklog-flag-only "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+  run_capsule_fails --with worklog --vault="$vault_dir" --session worklog-flag-only "$ROOT_DIR"
 assert_contains "$OUTPUT" '--with worklog needs mcpvault.'
 assert_contains "$OUTPUT" 'Add mcpvault to --with or AGENT_CAPSULE_WITH.'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
@@ -1252,9 +1212,7 @@ assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
 new_case
 vault_dir="$CASE_DIR/vault"
 mkdir -p "$vault_dir"
-status=0
-run_capsule --agent codex --with mcpvault,worklog --vault="$vault_dir" --session worklog-codex "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --agent codex --with mcpvault,worklog --vault="$vault_dir" --session worklog-codex "$ROOT_DIR"
 assert_contains "$OUTPUT" "Extra 'worklog' is not available with --agent codex"
 
 new_case
@@ -1313,9 +1271,7 @@ AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
 new_case
 cp "$ROOT_DIR/Dockerfile" "$CASE_DIR/Dockerfile"
 cp "$ROOT_DIR/entrypoint.sh" "$CASE_DIR/entrypoint.sh"
-status=0
-AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule --shell --session worklog-noplugin "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" run_capsule_fails --shell --session worklog-noplugin "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Container plugin not found:'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -1418,18 +1374,14 @@ done
 
 # A configured rules file that does not exist is a typo, not a file to create.
 new_case
-status=0
 AGENT_CAPSULE_SHARED_RULES="$CASE_DIR/typo/CLAUDE.md" \
-  run_capsule --shell --session rules-typo "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+  run_capsule_fails --shell --session rules-typo "$ROOT_DIR"
 assert_contains "$OUTPUT" "$CASE_DIR/typo/CLAUDE.md"
 [[ ! -e "$CASE_DIR/typo" ]] || fail "the mistyped rules path was created"
 
 # A lone dash is not a project: cd would read it as $OLDPWD.
 new_case
-status=0
-OLDPWD=/etc run_capsule --shell - || status=$?
-assert_status_fails "$status"
+OLDPWD=/etc run_capsule_fails --shell -
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # Handoff files are only in memory under XDG_RUNTIME_DIR; the status must not claim it otherwise.
@@ -1475,9 +1427,7 @@ new_case
 codex_home="$CAPSULE_HOME/homes/codex-owned"
 mkdir -p "$codex_home/.codex"
 printf '%s\n' codex > "$codex_home/.agent"
-status=0
-run_capsule --shell --session codex-owned "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --shell --session codex-owned "$ROOT_DIR"
 assert_contains "$OUTPUT" "was created by agent 'codex'"
 
 new_case
@@ -1485,9 +1435,7 @@ HERDR_AGENT=codex run_capsule --shell --session herdr-divergence "$ROOT_DIR"
 assert_contains "$OUTPUT" '>> Agent   : claude (HERDR_AGENT=codex)'
 
 new_case
-status=0
-run_capsule --shared-claude-md "$CASE_DIR/x.md" --shell --session removed-flag "$ROOT_DIR" || status=$?
-assert_status_fails "$status"
+run_capsule_fails --shared-claude-md "$CASE_DIR/x.md" --shell --session removed-flag "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Unknown option: --shared-claude-md'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -1767,19 +1715,15 @@ assert_contains "$OUTPUT" 'ten-days'
 # Without podman's answer nothing proves a home is not in use, so prune stops.
 new_case
 make_session_home idle-home 40
-status=0
-PODMAN_PS_FAIL=1 run_capsule --prune-sessions --yes || status=$?
-assert_status_fails "$status"
+PODMAN_PS_FAIL=1 run_capsule_fails --prune-sessions --yes
 [[ -d "$CAPSULE_HOME/homes/idle-home" ]] || fail "prune removed a home without checking podman"
 
 new_case
 for prune_args in '--prune-caches=soon' '--prune-sessions=-1' '--yes' \
   '--prune-caches --prune-sessions' '--prune-sessions=100000' \
   '--prune-sessions --session x' '--prune-sessions .' '--prune-sessions --'; do
-  status=0
   # shellcheck disable=SC2086
-  run_capsule $prune_args || status=$?
-  assert_status_fails "$status"
+  run_capsule_fails $prune_args
   assert_not_contains "$OUTPUT" 'Unknown option'
 done
 assert_not_contains "$PODMAN_LOG" 'CALL='
