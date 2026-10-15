@@ -356,6 +356,11 @@ chmod 0644 "$rules_file"
 run_capsule --shell --session rules-mode --shared-rules "$rules_file" "$ROOT_DIR"
 [[ "$(file_mode "$rules_file")" == "644" ]] || fail "shared rules mode changed"
 
+# The default rules file is created, and created private.
+new_case
+run_capsule --shell --session rules-default "$ROOT_DIR"
+[[ "$(file_mode "$CAPSULE_HOME/CLAUDE.md")" == "600" ]] || fail "default rules mode is not private"
+
 new_case
 vault_dir="$CASE_DIR/vault"
 config_dir="$CAPSULE_HOME/homes/opencode-state/.config/opencode"
@@ -1367,6 +1372,7 @@ assert_contains "$PODMAN_LOG" 'CALL=run'
 assert_not_contains "$PODMAN_LOG" '/home/dev/.claude/projects/'
 assert_contains "$OUTPUT" 'project memory'
 
+# Only the tools the launcher needs, with shasum and no sha256sum, as on macOS.
 new_case
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"
@@ -1378,7 +1384,6 @@ capsule_env
 env "${CAPSULE_ENV[@]}" PATH="$portable_bin:$FAKE_BIN" \
   "$BASH_BIN" "$SCRIPT" --shell --session shasum-fallback "$ROOT_DIR" > "$OUTPUT" 2>&1
 assert_contains "$PODMAN_LOG" 'CALL=run'
-[[ "$(file_mode "$CAPSULE_HOME/CLAUDE.md")" == "600" ]] || fail "default rules mode is not private"
 
 new_case
 codex_home="$CAPSULE_HOME/homes/codex-owned"
