@@ -38,8 +38,8 @@ jobs:
           dockerfile: Dockerfile
           config: .hadolint.yaml
 
-  # Every image now carries one agent and only the selected integrations, so
-  # each agent needs its own build. anydoc and worklog are claude-only, matching the launcher.
+  # Each image carries one agent, every extension and the tools a user lists, so each
+  # agent needs its own build. This one lists every tool.
   image-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -49,22 +49,14 @@ jobs:
         agent: [claude, codex, opencode]
     steps:
       - uses: actions/checkout@v7
-      - name: Build the ${{ matrix.agent }} image with every supported integration
+      - name: Build the ${{ matrix.agent }} image with every tool
         run: |
-          anydoc=0
-          worklog=0
-          if [ "${{ matrix.agent }}" = claude ]; then anydoc=1; worklog=1; fi
           docker build -t agent-capsule:test \
             --build-arg "AGENT=${{ matrix.agent }}" \
-            --build-arg "WITH_ANYDOC=$anydoc" \
-            --build-arg WITH_EXPLAIN_DIFF=1 \
-            --build-arg WITH_GITHUB=1 \
-            --build-arg WITH_GITLAB=1 \
-            --build-arg WITH_KUBERNETES=1 \
-            --build-arg WITH_MCPVAULT=1 \
-            --build-arg WITH_SUPERPOWERS=1 \
-            --build-arg WITH_TALOS=1 \
-            --build-arg "WITH_WORKLOG=$worklog" \
+            --build-arg TOOL_GH=1 \
+            --build-arg TOOL_GLAB=1 \
+            --build-arg TOOL_KUBERNETES=1 \
+            --build-arg TOOL_TALOS=1 \
             .
       - name: Only the selected agent is installed
         run: |
@@ -77,8 +69,10 @@ jobs:
               exit 1
             fi
           done
-      - name: Selected integrations are present
+      - name: Every extension is present
         run: |
+          docker run --rm agent-capsule:test bash -c 'command -v anydoc'
+          docker run --rm agent-capsule:test bash -c 'test -f /opt/anydoc/plugin/.claude-plugin/plugin.json'
           docker run --rm agent-capsule:test bash -c 'test -d /opt/superpowers/source'
           docker run --rm agent-capsule:test bash -c 'test -f /opt/explain-diff-html/SKILL.md'
           docker run --rm agent-capsule:test mcpvault --help
@@ -171,15 +165,22 @@ jobs:
                codex plugin list --json | tr -d "[:space:]" | grep -Fq "\"installed\":[]"'
           done
 
-  # The matrix enables every integration, so only a default build can show that
-  # optional CLIs stay out unless selected.
+  # The matrix lists every tool, so only a default build can show that tools stay out
+  # unless listed, while every extension is in.
   image-default:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - run: docker build -t agent-capsule:default .
-      - name: Unselected CLIs are absent
+      - name: Every extension is present
+        run: |
+          docker run --rm agent-capsule:default bash -c 'test -d /opt/superpowers/source'
+          docker run --rm agent-capsule:default bash -c 'test -f /opt/explain-diff-html/SKILL.md'
+          docker run --rm agent-capsule:default bash -c 'test -f /opt/worklog/plugin/.claude-plugin/plugin.json'
+          docker run --rm agent-capsule:default mcpvault --help
+          docker run --rm agent-capsule:default bash -c 'command -v anydoc'
+      - name: Unlisted tools are absent
         run: |
           # Otherwise a broken image would pass every absence check below.
           docker run --rm agent-capsule:default true
