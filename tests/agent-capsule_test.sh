@@ -816,7 +816,6 @@ for bad_ca in "$CASE_DIR/missing.pem" "$CASE_DIR/key-only.pem"; do
   assert_not_contains "$PODMAN_LOG" 'CALL='
 done
 
-
 # The entrypoint adds the CA to what the capsule already trusts. git and Node read
 # neither SSL_CERT_FILE nor each other's variable, so each gets its own.
 new_case entrypoint-ca-trust
@@ -970,7 +969,6 @@ expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token:
 [[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
   fail "the host's GITLAB_TOKEN replaced the stored login: $(<"$glab_dir/config.yml")"
 
-
 # Every capsule runs without capabilities or privilege escalation, within limits,
 # and --offline takes the network away.
 new_case hardening-and-offline
@@ -1058,7 +1056,6 @@ AGENT_CAPSULE_KEYS_DIR="$CASE_DIR/keys" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
   > "$OUTPUT"
 [[ "$(<"$OUTPUT")" == sk-entry ]] || fail "entrypoint did not export ANTHROPIC_API_KEY"
 
-
 new_case extra-unsupported-by-agent
 run_capsule_fails --agent codex --with anydoc --session unsupported-extra "$ROOT_DIR"
 assert_contains "$OUTPUT" "Extra 'anydoc' is not available with --agent codex"
@@ -1122,7 +1119,6 @@ for invalid_session in . ..; do
   assert_contains "$OUTPUT" "Invalid session name: '$invalid_session'"
   assert_not_contains "$PODMAN_LOG" 'CALL=run'
 done
-
 
 # Editing the entrypoint must invalidate the image, or a fix to it never ships.
 new_case entrypoint-in-bundle-hash
