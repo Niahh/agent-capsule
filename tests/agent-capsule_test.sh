@@ -568,7 +568,8 @@ assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
 : > "$PODMAN_LOG"
 run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
-selection_refreshed_at="$(awk -F '\t' 'NF == 3 { value = $3 } END { print value }' "$PODMAN_IMAGE_STATE")"
+selection_refreshed_at="$(awk -F '\t' 'END { print $3 }' "$PODMAN_IMAGE_STATE")"
+[[ -n "$selection_refreshed_at" ]] || fail "the stub recorded no refresh time"
 
 # Switching the agent changes what is installed, so it must rebuild.
 : > "$PODMAN_LOG"
