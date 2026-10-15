@@ -68,6 +68,15 @@ function head(top) {
   }
 }
 
+function pruneIdleSessions() {
+  const mtime = (path) => statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+  for (const name of new Set([...readdirSync(stateDir), ...readdirSync(objectsRoot)])) {
+    const paths = [join(stateDir, name), join(objectsRoot, name)];
+    if (paths.some((path) => mtime(path) > Date.now() - idleMs)) continue;
+    for (const path of paths) rmSync(path, { recursive: true, force: true });
+  }
+}
+
 function reason(top, numstat, headMoved) {
   const rows = numstat.split('\n').map((row) => row.split('\t'));
   const listed = rows.slice(0, maxListed).map(([added, deleted, path]) =>
@@ -142,12 +151,7 @@ if (mode === 'snapshot') {
   for (const name of readdirSync(sessionObjects)) {
     if (join(sessionObjects, name) !== store) rmSync(join(sessionObjects, name), { recursive: true, force: true });
   }
-  const mtime = (path) => statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0;
-  for (const name of new Set([...readdirSync(stateDir), ...readdirSync(objectsRoot)])) {
-    const paths = [join(stateDir, name), join(objectsRoot, name)];
-    if (paths.some((path) => mtime(path) > Date.now() - idleMs)) continue;
-    for (const path of paths) rmSync(path, { recursive: true, force: true });
-  }
+  pruneIdleSessions();
 } else {
   let base = null;
   try {
