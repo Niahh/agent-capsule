@@ -81,6 +81,34 @@ jobs:
           docker run --rm agent-capsule:test talosctl version --client
       - name: gh is installed
         run: docker run --rm agent-capsule:test gh --version
+      # Mounted the way the launcher does it, and as a non-root user like --keep-id.
+      - name: curl, git, and Node trust a mounted private CA
+        run: |
+          smoke_dir="$(mktemp -d)"
+          cd "$smoke_dir"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+            -subj '/CN=Capsule Smoke Root' -keyout ca.key -out ca.crt \
+            -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign'
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+            -subj '/CN=localhost' -keyout leaf.key -out leaf.csr
+          printf 'subjectAltName=DNS:localhost\n' > leaf.ext
+          openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 1 \
+            -extfile leaf.ext -out leaf.crt
+          mkdir ca
+          cp ca.crt ca/extra.pem
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$smoke_dir:/smoke:ro" -v "$smoke_dir/ca:/run/agent-capsule/ca" \
+            -e AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca \
+            agent-capsule:test bash -c '
+              set -e
+              openssl s_server -quiet -www -accept 8443 \
+                -cert /smoke/leaf.crt -key /smoke/leaf.key &
+              sleep 1
+              curl -sSf -o /dev/null https://localhost:8443/
+              git ls-remote https://localhost:8443/repo 2>&1 | grep -F "not valid"
+              node -e "require(\"https\").get(\"https://localhost:8443/\", () => process.exit(0))
+                .on(\"error\", e => { console.error(e.message); process.exit(1) })"
+            '
       - name: The explain-diff skill is linked and then removed again
         run: |
           skills_home="capsule-skills-smoke-${GITHUB_RUN_ID}-${{ matrix.agent }}"

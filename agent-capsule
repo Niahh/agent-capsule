@@ -13,6 +13,7 @@
 #   --keep-id              run with the host UID and GID inside
 #   --with TOOLS           activate integrations, or use list or none
 #   -m, --mount SPEC       mount SRC[:DEST][:ro], repeatable
+#   --ca                   trust the private CAs in AGENT_CAPSULE_CA_CERTS
 #   --vault[=PATH]         mount the configured or given vault (default /vault)
 #   --no-vault             disable the vault and mcpvault for this run
 #   --shared-rules PATH    select the global rules file
@@ -165,6 +166,9 @@ SHARE_AUTH="${AGENT_CAPSULE_SHARE_AUTH:-1}"
 # Obsidian vault. Mounted read-write at $VAULT_DEST when --vault is given.
 VAULT_DIR="${AGENT_CAPSULE_VAULT:-}"
 VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
+
+# PEM file of the private CAs that --ca makes the capsule trust. Set alone, it mounts nothing.
+CA_CERTS="${AGENT_CAPSULE_CA_CERTS:-}"
 
 # Claude receives capsule-generated MCP servers through a file in the session
 # home, which is bind-mounted at /home/dev, and the --mcp-config flag.
@@ -566,6 +570,7 @@ SHARED_RULES_EXPLICIT=0
 SESSION_EXPLICIT=0
 MOUNT_VAULT="${AGENT_CAPSULE_MOUNT_VAULT:-0}"
 NO_VAULT=0
+MOUNT_CA=0
 MOUNT_SPECS=()
 PRUNE_TARGET=""
 PRUNE_DAYS=30
@@ -602,6 +607,10 @@ while [[ "${1:-}" == -? || "${1:-}" == --* ]]; do
       ;;
     --offline)
       OFFLINE=1
+      shift
+      ;;
+    --ca)
+      MOUNT_CA=1
       shift
       ;;
     --auth-login)
@@ -878,6 +887,29 @@ elif command -v shasum >/dev/null 2>&1; then
 else
   echo "sha256sum or shasum is required but neither is installed or on PATH." >&2
   exit 1
+fi
+
+# A key stored in the same PEM must not reach the capsule. Windows exports use CRLF.
+CA_PEM=""
+if [[ "$MOUNT_CA" == "1" ]]; then
+  if [[ -z "$CA_CERTS" ]]; then
+    echo "--ca needs AGENT_CAPSULE_CA_CERTS, the PEM file of the CAs to trust." >&2
+    exit 1
+  fi
+  if [[ ! -f "$CA_CERTS" || ! -r "$CA_CERTS" ]]; then
+    echo "AGENT_CAPSULE_CA_CERTS is not a readable file: $CA_CERTS" >&2
+    exit 1
+  fi
+  CA_PEM="$(awk '
+    { sub(/\r$/, "") }
+    /^-----BEGIN CERTIFICATE-----/ { keep = 1 }
+    keep { print }
+    /^-----END CERTIFICATE-----/ { keep = 0 }
+  ' "$CA_CERTS")"
+  if [[ -z "$CA_PEM" ]]; then
+    echo "AGENT_CAPSULE_CA_CERTS holds no PEM certificate: $CA_CERTS" >&2
+    exit 1
+  fi
 fi
 
 # podman build moves the tag, leaving the image it replaced behind untagged.
@@ -1659,6 +1691,19 @@ if [[ "$SHARE_AUTH" == "1" && "$AUTH_LOGIN" != "1" ]]; then
 fi
 
 # ----------------------------------------------------------------------------
+# In-memory handoff
+# ----------------------------------------------------------------------------
+# Token dirs of launches that died before their entrypoint ran, and CA dirs of
+# finished sessions. exec hands the launcher's PID to podman, so a live session
+# still holds the PID in its dir's name.
+for stale_dir in "$LOCK_ROOT"/gh-* "$LOCK_ROOT"/ca-*; do
+  [[ -d "$stale_dir" ]] || continue
+  stale_pid="${stale_dir##*-}"
+  [[ "$stale_pid" =~ ^[0-9]+$ ]] || continue
+  kill -0 "$stale_pid" 2>/dev/null || rm -rf "$stale_dir"
+done
+
+# ----------------------------------------------------------------------------
 # GitHub token handoff
 # ----------------------------------------------------------------------------
 # The token stays in the host keyring and crosses over in a file in the RAM-backed
@@ -1666,15 +1711,6 @@ fi
 # podman writes those values into the container config on disk.
 GH_TOKEN_DIR=""
 GH_CONTAINER_TOKEN_DIR=/run/agent-capsule/gh
-
-# Leftovers of launches that died before their entrypoint ran. exec hands the
-# launcher's PID to podman, so a live session still holds the PID in its name.
-for stale_gh_dir in "$LOCK_ROOT"/gh-*; do
-  [[ -d "$stale_gh_dir" ]] || continue
-  stale_gh_pid="${stale_gh_dir##*/gh-}"
-  [[ "$stale_gh_pid" =~ ^[0-9]+$ ]] || continue
-  kill -0 "$stale_gh_pid" 2>/dev/null || rm -rf "$stale_gh_dir"
-done
 
 if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
   gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
@@ -1709,6 +1745,21 @@ if [[ ",$EXTRAS," == *,github,* && "$AUTH_LOGIN" != "1" ]]; then
     -e 'GIT_CONFIG_KEY_3=credential.https://github.com.helper'
     -e 'GIT_CONFIG_VALUE_3=!gh auth git-credential'
   )
+fi
+
+# ----------------------------------------------------------------------------
+# Private CA
+# ----------------------------------------------------------------------------
+# Mounted, never built in, so the image does not hold the certificates. The
+# entrypoint keeps the trust bundle next to them, so the dir lasts the session.
+CA_DIR=""
+if [[ -n "$CA_PEM" ]]; then
+  CA_DIR="$LOCK_ROOT/ca-$$"
+  rm -rf "$CA_DIR"
+  mkdir -m 700 "$CA_DIR"
+  (umask 077 && printf '%s\n' "$CA_PEM" > "$CA_DIR/extra.pem")
+  add_mount "$CA_DIR" /run/agent-capsule/ca
+  ENV_ARGS+=(-e AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca)
 fi
 
 # ----------------------------------------------------------------------------
@@ -1760,6 +1811,12 @@ if [[ "$SHARED_CRED_MOUNTED" == "1" ]]; then
 fi
 if [[ -n "$GH_TOKEN_DIR" ]]; then
   echo ">> GitHub  : host gh login, kept in memory in the capsule; git uses HTTPS"
+fi
+if [[ -n "$CA_DIR" ]]; then
+  ca_count="$(grep -c -- '-----BEGIN CERTIFICATE-----' "$CA_DIR/extra.pem")"
+  ca_noun=certificates
+  [[ "$ca_count" == 1 ]] && ca_noun=certificate
+  echo ">> CA      : $CA_CERTS ($ca_count $ca_noun, kept in memory)"
 fi
 # HERDR_AGENT can be pinned by the wrapper; when it diverges from --agent,
 # show both rather than misreport what actually runs.

@@ -55,6 +55,7 @@ _arguments -S \
   '--keep-id[run with the host UID and GID inside]' \
   '--with=[activate integrations]:integrations:_agent_capsule_extras' \
   '*'{-m,--mount=}'[mount SRC\[:DEST\]\[:ro\]]:mount spec:_files' \
+  '--ca[trust the private CAs in AGENT_CAPSULE_CA_CERTS]' \
   '--vault=-[mount the configured vault, or the directory given after =]::vault:_files -/' \
   '--no-vault[disable the vault and mcpvault for this run]' \
   '--shared-rules=[select the global rules file]:rules file:_files' \
