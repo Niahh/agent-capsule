@@ -318,6 +318,25 @@ assert_edit_rebuilds() { # file launcher-args...
   assert_contains "$PODMAN_LOG" 'CALL=build'
 }
 
+# Completion runs the launcher through PATH, as installed. Under Nix it is a wrapper.
+COMPLETION_BIN="$TEST_ROOT/completion-bin"
+mkdir -p "$COMPLETION_BIN"
+printf '#!%s\nexec %s %s "$@"\n' "$BASH_BIN" "$BASH_BIN" "$SCRIPT" > "$COMPLETION_BIN/agent-capsule"
+chmod +x "$COMPLETION_BIN/agent-capsule"
+
+# Runs CODE in a bash that sourced the bash completion, against the current case.
+in_completion() {
+  PATH="$COMPLETION_BIN:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" "$BASH_BIN" -c \
+    "source '$ROOT_DIR/completions/agent-capsule.bash'; $1"
+}
+
+# Prints the bash completion candidates for a line typed up to its end, one per line.
+# bash-completion is not loaded, so this runs the fallback word splitting.
+complete_line() {
+  # shellcheck disable=SC2016 # COMPREPLY expands in the completion shell.
+  COMP_LINE="$1" COMP_POINT="${#1}" in_completion '_agent_capsule; printf "%s\n" "${COMPREPLY[@]}"'
+}
+
 new_case
 for agent_and_skills_dir in \
   'claude|/home/dev/.claude/skills' \
@@ -1469,25 +1488,14 @@ assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # The completion script reads the extras from the launcher on PATH.
 new_case
-completion_bin="$CASE_DIR/completion-bin"
-mkdir -p "$completion_bin"
-printf '#!%s\nexec %s %s "$@"\n' "$BASH_BIN" "$BASH_BIN" "$SCRIPT" > "$completion_bin/agent-capsule"
-chmod +x "$completion_bin/agent-capsule"
-claude_extras="$(
-  PATH="$completion_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" "$BASH_BIN" -c \
-    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule_extras claude"
-)"
-codex_extras="$(
-  PATH="$completion_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" "$BASH_BIN" -c \
-    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule_extras codex"
-)"
-opencode_extras="$(
-  PATH="$completion_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" "$BASH_BIN" -c \
-    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule_extras opencode"
-)"
-grep -qx worklog <<<"$claude_extras" || fail "claude completion does not offer worklog"
-if grep -qx worklog <<<"$codex_extras"; then fail "codex completion offers worklog"; fi
-if grep -qx worklog <<<"$opencode_extras"; then fail "opencode completion offers worklog"; fi
+for agent in claude codex opencode; do
+  extras="$(in_completion "_agent_capsule_extras $agent")"
+  if [[ "$agent" == claude ]]; then
+    grep -qx worklog <<<"$extras" || fail "claude completion does not offer worklog"
+  elif grep -qx worklog <<<"$extras"; then
+    fail "$agent completion offers worklog"
+  fi
+done
 
 # Both must work with no podman on PATH at all: completion runs in shells that
 # have never launched a capsule.
@@ -1696,21 +1704,10 @@ assert_contains "$DOCKERFILE" 'ARG WITH_TALOS=0'
 assert_contains "$DOCKERFILE" 'ARG WITH_GITHUB=0'
 assert_contains "$DOCKERFILE" 'ARG WITH_GITLAB=0'
 
-# Prints the bash completion candidates for a line typed up to its end, one per line.
-# bash-completion is not loaded, so this runs the fallback word splitting.
-complete_line() {
-  PATH="$completion_line_bin:$PATH" HOME="$HOST_HOME" AGENT_CAPSULE_HOME="$CAPSULE_HOME" \
-    COMP_LINE="$1" COMP_POINT="${#1}" "$BASH_BIN" -c \
-    "source '$ROOT_DIR/completions/agent-capsule.bash'; _agent_capsule; printf '%s\n' \"\${COMPREPLY[@]}\""
-}
-
 # = is in COMP_WORDBREAKS, so readline replaces only the text after it: a candidate
 # that repeats --opt= ends up typed twice.
 new_case
-completion_line_bin="$CASE_DIR/completion-bin"
-mkdir -p "$completion_line_bin" "$CAPSULE_HOME/homes/work" "$CASE_DIR/vaultdir"
-printf '#!%s\nexec %s %s "$@"\n' "$BASH_BIN" "$BASH_BIN" "$SCRIPT" > "$completion_line_bin/agent-capsule"
-chmod +x "$completion_line_bin/agent-capsule"
+mkdir -p "$CAPSULE_HOME/homes/work" "$CASE_DIR/vaultdir"
 : > "$CASE_DIR/mountfile"
 [[ "$(complete_line 'agent-capsule --agent=co')" == codex ]] || fail "--agent= completion repeats the flag"
 [[ "$(complete_line 'agent-capsule --session=wo')" == work ]] || fail "--session= completion repeats the flag"
