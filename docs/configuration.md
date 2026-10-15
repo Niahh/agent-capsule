@@ -137,6 +137,8 @@ homes/<session>/         one isolated /home/dev per session
 project-memory/<hash>/   per-project memory pooled across sessions (claude only)
 CLAUDE.md                global rules mounted into every session, for every agent
 log-work.md              worklog procedure, when you write one
+skills/<name>/           your own skills, mounted into every session for every agent
+plugins/claude/<name>/   your own Claude Code plugins, loaded with --plugin-dir
 build/                   image build context
 ```
 

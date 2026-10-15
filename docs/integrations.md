@@ -208,3 +208,24 @@ agent-capsule --ca .
   changed, so this works as root and under `--keep-id`.
 - A client that reads none of these, or ships its own CA list, does not trust the CA.
 
+
+## Your own skills and plugins
+
+A folder under `~/.agent-capsule/skills/` that holds a `SKILL.md` reaches every agent, in
+every session, at the agent's skills path. A folder under `~/.agent-capsule/plugins/claude/`
+that holds `.claude-plugin/plugin.json` is a Claude Code plugin, which claude loads with
+`--plugin-dir`. Nothing else is needed, and the image does not rebuild.
+
+```sh
+cp -R ~/src/my-skill ~/.agent-capsule/skills/my-skill
+git clone https://example.com/my-plugin.git ~/.agent-capsule/plugins/claude/my-plugin
+```
+
+- Both are mounted read-only. Each skill gets its own mount, so skills made inside a
+  session and the agent's own stay visible next to yours.
+- Names may contain letters, digits, dots, underscores and hyphens, and may not begin
+  with a dot. Other folders are skipped with a notice.
+- A skill named like a bundled one stops the launch: rename yours.
+- `--auth-login` gets neither. The startup banner lists what was found, and in `--shell`
+  mode it shows the `--plugin-dir` flags to start claude with.
+- Each [profile](profiles.md) has its own folders. To share them, symlink them.
