@@ -1322,7 +1322,8 @@ assert_arg_after "$PODMAN_LOG" -w "$CASE_DIR/proj"
 # Status goes to stderr, so `agent-capsule . -- -p q > out` captures only the agent.
 new_case status-on-stderr
 capsule_env
-env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p question > "$OUTPUT" 2> "$CASE_DIR/stderr"
+env "${CAPSULE_ENV[@]}" "$BASH_BIN" "$SCRIPT" --session piped "$ROOT_DIR" -- -p question \
+  > "$OUTPUT" 2> "$CASE_DIR/stderr"
 [[ ! -s "$OUTPUT" ]] || fail "status reached stdout: $(head -n 3 "$OUTPUT")"
 assert_contains "$CASE_DIR/stderr" '>> Project :'
 
