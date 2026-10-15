@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 const vault = process.env.AGENT_CAPSULE_VAULT_DEST || '/vault';
 const stateDir = join(homedir(), '.claude', 'worklog');
 const objectsRoot = join(homedir(), '.cache', 'worklog');
-const noise = [
+const excludes = [
   '**/*.lock', '**/go.sum', '**/package-lock.json', '**/pnpm-lock.yaml', '**/vendor/**', '**/*.pb.go',
   '**/zz_generated*',
 ].map((glob) => `:(exclude,glob)${glob}`);
@@ -77,7 +77,7 @@ function pruneIdleSessions() {
   }
 }
 
-function reason(top, numstat, headMoved) {
+function blockReason(top, numstat, headMoved) {
   const rows = numstat.split('\n').map((row) => row.split('\t'));
   const listed = rows.slice(0, maxListed).map(([added, deleted, path]) =>
     added === '-' ? `- ${path} (binary)` : `- ${path} (+${added} -${deleted})`);
@@ -168,10 +168,11 @@ if (mode === 'snapshot') {
   // A turn can start without a prompt, when a background task ends: rebaseline so it does not see this work again.
   save({ top, store, head: commit, tree, skip: false });
   if (!input.stop_hook_active && usable && !base.skip) {
-    const diff = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...noise];
-    const numstat = git(top, diff, { GIT_OBJECT_DIRECTORY: store });
+    const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...excludes];
+    const numstat = git(top, diffArgs, { GIT_OBJECT_DIRECTORY: store });
     if (numstat) {
-      process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat, base.head !== commit) }));
+      const reason = blockReason(top, numstat, base.head !== commit);
+      process.stdout.write(JSON.stringify({ decision: 'block', reason }));
     }
   }
 }
