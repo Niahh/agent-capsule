@@ -277,6 +277,7 @@ test_keeps_the_baseline_when_a_snapshot_fails() {
   printf 'b\n' >> "$REPO/main.go"
   cp "$REPO/.git/index" "$WORK/case/index"
   printf 'corrupt' > "$REPO/.git/index"
+  # Not hook(): this snapshot is meant to fail, and hook() counts a failed exit as a test failure.
   printf '{"session_id":"%s","cwd":"%s","prompt":"next"}' "$SID" "$REPO" |
     env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_VAULT_DEST="$T_VAULT" node "$HOOK_JS" snapshot > /dev/null 2>&1
   cp "$WORK/case/index" "$REPO/.git/index"
@@ -381,7 +382,7 @@ test_procedure_mode_prints_the_procedure() {
   setup
   printf 'MY VAULT STEPS\n' > "$PROC"
   local out
-  out="$(env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_WORKLOG_PROCEDURE="$PROC" node "$HOOK_JS" procedure </dev/null)"
+  out="$(hook procedure "" false AGENT_CAPSULE_WORKLOG_PROCEDURE="$PROC")"
   if [[ "$out" == "MY VAULT STEPS" ]]; then pass; else fail "procedure mode printed: $out"; fi
 }
 
