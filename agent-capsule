@@ -266,6 +266,11 @@ require_cmd() {
   }
 }
 
+# EXTRAS is the canonical comma list of the integrations this run selected.
+has_extra() { # name
+  [[ ",$EXTRAS," == *",$1,"* ]]
+}
+
 ensure_minimal_gitconfig() {
   local target_home="$1"
   local gitconfig="$target_home/.gitconfig"
@@ -1077,7 +1082,7 @@ for extra in "${KNOWN_EXTRAS[@]}"; do
 done
 
 # The host ends up in git config keys and URLs.
-if [[ ",$EXTRAS," == *,gitlab,* && ! "$GITLAB_INSTANCE" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+if has_extra gitlab && [[ ! "$GITLAB_INSTANCE" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
   echo "Invalid AGENT_CAPSULE_GITLAB_HOST: $GITLAB_INSTANCE (a bare hostname, without scheme or port)." >&2
   exit 1
 fi
@@ -1227,7 +1232,7 @@ CONTAINER_SUFFIX="${SESSION_NAME:0:48}"
 MCPVAULT_ENABLED=0
 
 # --no-vault keeps a configured integration overridable for one run.
-if [[ ",$EXTRAS," == *,mcpvault,* ]]; then
+if has_extra mcpvault; then
   if [[ "$NO_VAULT" == "1" ]]; then
     echo ">> MCP     : mcpvault disabled for this run (--no-vault)" >&2
   elif [[ "$MOUNT_VAULT" != "1" ]]; then
@@ -1246,7 +1251,7 @@ fi
 WORKLOG_ENABLED=0
 WORKLOG_PROCEDURE_SRC=""
 
-if [[ ",$EXTRAS," == *,worklog,* ]]; then
+if has_extra worklog; then
   if [[ "$NO_VAULT" == "1" ]]; then
     echo ">> Worklog : disabled for this run (--no-vault)" >&2
   elif [[ "$MCPVAULT_ENABLED" != "1" ]]; then
@@ -1370,7 +1375,7 @@ WORKLOG_PLUGIN_SRC="$(dirname "$DOCKERFILE_SRC")/plugins/worklog"
   exit 1
 }
 WORKLOG_HASH=""
-if [[ ",$EXTRAS," == *,worklog,* ]]; then
+if has_extra worklog; then
   WORKLOG_HASH="$(sha256_dir "$WORKLOG_PLUGIN_SRC")"
 fi
 
@@ -1449,7 +1454,7 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
   BUILD_SELECTION_ARGS=(--build-arg "AGENT=$AGENT")
   for extra in "${KNOWN_EXTRAS[@]}"; do
     build_arg="WITH_$(printf '%s' "$extra" | tr 'a-z-' 'A-Z_')"
-    if [[ ",$EXTRAS," == *",$extra,"* ]]; then
+    if has_extra "$extra"; then
       BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=1")
     else
       BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=0")
@@ -1517,10 +1522,10 @@ fi
 
 INTEGRATION_ARGS=()
 if [[ "$AGENT" == "claude" ]]; then
-  if [[ ",$EXTRAS," == *,superpowers,* ]]; then
+  if has_extra superpowers; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/superpowers/source)
   fi
-  if [[ ",$EXTRAS," == *,anydoc,* ]]; then
+  if has_extra anydoc; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/anydoc/plugin)
   fi
   if [[ "$WORKLOG_ENABLED" == "1" ]]; then
@@ -1534,7 +1539,7 @@ fi
 OPENCODE_RUNTIME_CONFIG=""
 if [[ "$AGENT" == "opencode" ]]; then
   OPENCODE_CONFIG_ITEMS=()
-  if [[ ",$EXTRAS," == *,superpowers,* ]]; then
+  if has_extra superpowers; then
     OPENCODE_CONFIG_ITEMS+=('"plugin":["/opt/superpowers/source"]')
   fi
   if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
@@ -1778,7 +1783,7 @@ forge_over_https() { # host helper
 # on disk.
 GH_TOKEN_DIR=""
 
-if [[ ",$EXTRAS," == *,github,* ]]; then
+if has_extra github; then
   gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
   gh_token=""
   if ! command -v gh >/dev/null 2>&1; then
@@ -1808,7 +1813,7 @@ fi
 # capsule would rotate the host's refresh token and log the host out.
 GLAB_DIR=""
 
-if [[ ",$EXTRAS," == *,gitlab,* ]]; then
+if has_extra gitlab; then
   glab_config_file="${GLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/glab-cli}/config.yml"
   glab_login="glab auth login --hostname $GITLAB_INSTANCE"
   glab_token=""
