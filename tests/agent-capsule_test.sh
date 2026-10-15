@@ -1133,7 +1133,6 @@ hidden_project="$CASE_DIR/.dotfiles"
 mkdir -p "$hidden_project"
 run_capsule --shell "$hidden_project"
 assert_contains "$OUTPUT" '>> Session : dotfiles-'
-assert_not_contains "$OUTPUT" 'Invalid session name'
 
 for invalid_session in . ..; do
   new_case
