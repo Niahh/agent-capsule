@@ -155,8 +155,10 @@ test_flags_changes_brought_in_by_git() {
   assert_blocks "head moved" "$(hook check "" false)" "upstream.go" "HEAD moved during this turn"
   hook snapshot "do it" false > /dev/null
   printf 'b\n' >> "$REPO/main.go"
-  local reason
-  reason="$(reason_of "$(hook check "" false)")"
+  local out reason
+  out="$(hook check "" false)"
+  assert_blocks "after the move" "$out" "main.go"
+  reason="$(reason_of "$out")"
   if [[ "$reason" != *"HEAD moved"* ]]; then pass; else fail "HEAD reported as moved"; fi
 }
 
