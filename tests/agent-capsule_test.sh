@@ -489,45 +489,73 @@ assert_not_contains "$OUTPUT" 'accidentally-pasted-secret'
 assert_not_contains "$OUTPUT" '>> Config'
 assert_contains "$PODMAN_LOG" 'CALL=run'
 
-new_case versions-pinned-and-latest
-AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 AGENT_CAPSULE_CODEX_VERSION=6.5.4 run_capsule --versions
-assert_contains "$OUTPUT" 'claude-code 9.8.7'
-assert_contains "$OUTPUT" 'codex 6.5.4'
-# Everything without an override tracks the latest release at build time.
-assert_contains "$OUTPUT" 'opencode latest'
-assert_contains "$OUTPUT" 'superpowers latest'
-assert_contains "$OUTPUT" 'kubectl latest'
-assert_contains "$OUTPUT" 'helm latest'
-assert_contains "$OUTPUT" 'talosctl latest'
-assert_contains "$OUTPUT" 'gh latest'
-assert_contains "$OUTPUT" 'glab latest'
+# The launcher's pin table, read once, so each pin case covers every tool.
+mapfile -t PIN_ROWS < <(sed -n '/^PINS=(/,/^)/s/^  "\(.*\)"$/\1/p' "$SCRIPT")
+((${#PIN_ROWS[@]} > 0)) || fail "no pin table in the launcher"
+
+# --versions prints every pin in a fixed order, latest when unset. Checked byte for
+# byte, unpinned and with every pin set.
+new_case versions-output
+run_capsule --versions
+expected_versions="$(printf '%s\n' "agent-capsule $LAUNCHER_VERSION" 'claude-code latest' 'codex latest' \
+  'opencode latest' 'anydoc latest' 'mcpvault latest' 'superpowers latest' 'golangci-lint latest' \
+  'kubectl latest' 'helm latest' 'talosctl latest' 'gh latest' 'glab latest')"
+[[ "$(<"$OUTPUT")" == "$expected_versions" ]] || fail "unpinned --versions changed: $(<"$OUTPUT")"
+pin_env=()
+expected_versions="agent-capsule $LAUNCHER_VERSION"
+pin_index=0
+for row in "${PIN_ROWS[@]}"; do
+  read -r pin_tool pin_var pin_kind <<<"$row"
+  pin_index=$((pin_index + 1))
+  pin_value="1.0.$pin_index"
+  [[ "$pin_kind" != tag ]] || pin_value="v$pin_value"
+  pin_env+=("AGENT_CAPSULE_$pin_var=$pin_value")
+  expected_versions+=$'\n'"$pin_tool $pin_value"
+done
+(export "${pin_env[@]}" && run_capsule --versions)
+[[ "$(<"$OUTPUT")" == "$expected_versions" ]] || fail "pinned --versions changed: $(<"$OUTPUT")"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
-# An unset pin reaches the build as an empty arg, which the Dockerfile reads as
-# "latest"; an override carries its value through.
+# An unset pin reaches the build as an empty arg, which the Dockerfile reads as latest.
+# A pin carries its value through and is part of the bundle hash, or pinning a tool
+# after an unpinned build would keep the old image.
 new_case pins-reach-build-args
-run_capsule --shell --session unpinned-build "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION='
-assert_arg_after "$PODMAN_LOG" --build-arg 'SUPERPOWERS_VERSION='
-assert_arg_after "$PODMAN_LOG" --build-arg 'KUBECTL_VERSION='
-assert_arg_after "$PODMAN_LOG" --build-arg 'HELM_VERSION='
-assert_arg_after "$PODMAN_LOG" --build-arg 'TALOSCTL_VERSION='
-assert_arg_after "$PODMAN_LOG" --build-arg 'GH_VERSION='
-assert_arg_after "$PODMAN_LOG" --build-arg 'GLAB_VERSION='
-AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
-  run_capsule --shell --session pinned-build "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
-assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
-
-# Each CLI pin must be part of the bundle hash, or pinning it after an
-# unpinned build would keep the old image.
-new_case cli-pins-in-bundle-hash
-for cluster_pin in KUBECTL_VERSION=v1.2.3 HELM_VERSION=v4.5.6 TALOSCTL_VERSION=v7.8.9 \
-  GH_VERSION=v2.3.4 GLAB_VERSION=v1.2.3; do
-  run_capsule --shell --session cluster-pins "$ROOT_DIR"
-  (export "AGENT_CAPSULE_$cluster_pin" && run_capsule --shell --session cluster-pins "$ROOT_DIR")
+run_capsule --shell --session pins "$ROOT_DIR"
+for row in "${PIN_ROWS[@]}"; do
+  read -r _ pin_var _ <<<"$row"
+  assert_arg_after "$PODMAN_LOG" --build-arg "$pin_var="
+done
+for row in "${PIN_ROWS[@]}"; do
+  read -r _ pin_var pin_kind <<<"$row"
+  pin_value=1.2.3
+  [[ "$pin_kind" != tag ]] || pin_value=v1.2.3
+  (export "AGENT_CAPSULE_$pin_var=$pin_value" && run_capsule --shell --session pins "$ROOT_DIR")
   assert_contains "$PODMAN_LOG" 'CALL=build'
-  assert_arg_after "$PODMAN_LOG" --build-arg "$cluster_pin"
+  assert_arg_after "$PODMAN_LOG" --build-arg "$pin_var=$pin_value"
+done
+
+# The Dockerfile declares every pin after FROM: an undeclared build arg is dropped with
+# only a warning, so the pin would be ignored. npm installs fall back to latest.
+new_case dockerfile-defaults
+for row in "${PIN_ROWS[@]}"; do
+  read -r _ pin_var pin_kind <<<"$row"
+  awk -v arg="ARG $pin_var" '
+    /^FROM / { stage = 1; found = 0 }
+    stage && ($0 == arg || index($0, arg "=") == 1) { found = 1 }
+    END { exit !found }
+  ' "$DOCKERFILE" || fail "$pin_var is not declared after FROM"
+  [[ "$pin_kind" != semver ]] || assert_contains "$DOCKERFILE" "\${$pin_var:-latest}"
+done
+assert_contains "$DOCKERFILE" 'SUPERPOWERS_VERSION:-latest'
+assert_contains "$DOCKERFILE" "firecrawl/anydoc/v\$anydoc_installed"
+# Floating distro tags keep both toolchains on their latest upstream release.
+assert_contains "$SCRIPT" "NODE_TAG=\"\${AGENT_CAPSULE_NODE_TAG:-trixie-slim}\""
+assert_contains "$SCRIPT" "GO_TAG=\"\${AGENT_CAPSULE_GO_TAG:-trixie}\""
+assert_contains "$DOCKERFILE" 'ARG NODE_TAG=trixie-slim'
+assert_contains "$DOCKERFILE" 'ARG GO_TAG=trixie'
+# A bare `docker build .` must leave the optional CLIs out, like the launcher does.
+for tool_arg in TOOL_GH TOOL_GLAB TOOL_KUBERNETES TOOL_TALOS; do
+  assert_contains "$DOCKERFILE" "ARG $tool_arg=0"
 done
 
 # An image older than the age limit is refreshed without the layer cache, or an
@@ -1856,34 +1884,6 @@ run_capsule --shell --session rules-main "$ROOT_DIR"
 CAPSULE_HOME="$CASE_DIR/work-capsule" AGENT_CAPSULE_SHARED_RULES="$main_home/CLAUDE.md" \
   run_capsule --shell --session rules-work "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" "ARG=$main_home/CLAUDE.md:/home/dev/.claude/CLAUDE.md:ro"
-
-# Floating distro tags keep both toolchains on their latest upstream release.
-assert_contains "$SCRIPT" "NODE_TAG=\"\${AGENT_CAPSULE_NODE_TAG:-trixie-slim}\""
-assert_contains "$SCRIPT" "GO_TAG=\"\${AGENT_CAPSULE_GO_TAG:-trixie}\""
-assert_contains "$DOCKERFILE" 'ARG NODE_TAG=trixie-slim'
-assert_contains "$DOCKERFILE" 'ARG GO_TAG=trixie'
-assert_contains "$DOCKERFILE" 'SUPERPOWERS_VERSION:-latest'
-assert_contains "$DOCKERFILE" "firecrawl/anydoc/v\$anydoc_installed"
-for version_variable in \
-  ANYDOC_VERSION \
-  MCPVAULT_VERSION \
-  CLAUDE_CODE_VERSION \
-  CODEX_VERSION \
-  OPENCODE_VERSION; do
-  assert_contains "$DOCKERFILE" "\${$version_variable:-latest}"
-done
-# An undeclared build arg is dropped with only a warning, so a pin would be ignored.
-for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION GH_VERSION GLAB_VERSION; do
-  awk -v arg="ARG $version_variable" '
-    /^FROM / { stage = 1; found = 0 }
-    stage && ($0 == arg || index($0, arg "=") == 1) { found = 1 }
-    END { exit !found }
-  ' "$DOCKERFILE" || fail "$version_variable is not declared after FROM"
-done
-# A bare `docker build .` must leave the optional CLIs out, like the launcher does.
-for tool_arg in TOOL_GH TOOL_GLAB TOOL_KUBERNETES TOOL_TALOS; do
-  assert_contains "$DOCKERFILE" "ARG $tool_arg=0"
-done
 
 # = is in COMP_WORDBREAKS, so readline replaces only the text after it: a candidate
 # that repeats --opt= ends up typed twice.
