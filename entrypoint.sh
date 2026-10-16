@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Take over the handed-off gh token, trust the private CA, reconcile the
+# Take over the handed-off secrets, trust the private CA, reconcile the
 # capsule-managed pieces of /home/dev, then start the agent.
 #
 # /home/dev is bind-mounted from a persistent host session home, so anything
@@ -8,12 +8,7 @@
 # safe way to remove it when the integration is deactivated.
 set -e
 
-# First, so the token file is gone even if a later step fails.
-if [[ -n "${AGENT_CAPSULE_GH_TOKEN_FILE:-}" && -f "$AGENT_CAPSULE_GH_TOKEN_FILE" ]]; then
-  GH_TOKEN="$(<"$AGENT_CAPSULE_GH_TOKEN_FILE")"
-  export GH_TOKEN
-  rm -f "$AGENT_CAPSULE_GH_TOKEN_FILE"
-fi
+# First, so the key files are gone even if a later step fails. The gh token is one of them.
 if [[ -n "${AGENT_CAPSULE_KEYS_DIR:-}" ]]; then
   for key_file in "$AGENT_CAPSULE_KEYS_DIR"/*; do
     [[ -f "$key_file" ]] || continue

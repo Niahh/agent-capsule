@@ -73,6 +73,8 @@ Shared state and mounts:
   SELinux support.
 - `AGENT_CAPSULE_CA_CERTS=`: PEM file of private CAs that `ca` trusts inside the
   capsule. See [Private CA](integrations.md#private-ca).
+- `AGENT_CAPSULE_GH_USER=`: the host `gh` account whose token `github` hands over; empty
+  means `gh`'s active account. See [Profiles](profiles.md).
 - `AGENT_CAPSULE_GITLAB_HOST=gitlab.com`: the GitLab instance `--with gitlab` reaches.
 
 ## Tool versions and upgrades

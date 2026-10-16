@@ -110,6 +110,10 @@ mkdir -p "$GH_FAKE_BIN"
 printf '#!%s\n' "$BASH_BIN" > "$GH_FAKE_BIN/gh"
 cat >> "$GH_FAKE_BIN/gh" <<'GH'
 printf '%s\n' "$*" >> "$GH_LOG"
+# Like the real gh, an account it holds no login for has no token.
+if [[ "${1:-} ${2:-}" == "auth token" && " $* " == *" --user "* && " $* " != *" --user ${FAKE_GH_USER:-} "* ]]; then
+  exit 1
+fi
 if [[ "${1:-} ${2:-}" == "auth token" && -n "${FAKE_GH_TOKEN:-}" ]]; then
   printf '%s\n' "$FAKE_GH_TOKEN"
   exit 0
@@ -738,24 +742,25 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_offtoken \
   run_capsule --shell --session gh-off "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GH=0'
 [[ ! -s "$GH_LOG" ]] || fail "host gh was called without --with github"
-assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
 assert_not_contains "$PODMAN_LOG" 'GIT_CONFIG_'
 assert_not_contains "$PODMAN_LOG" 'GH_TOKEN'
 
-# The token reaches the capsule in a file under the runtime dir, never on the
-# podman command line: podman keeps that in the container config on disk.
+# The token reaches the capsule as GH_TOKEN in the keys dir under the runtime dir,
+# never on the podman command line: podman keeps that in the container config on disk.
 new_case github-token-handoff
 PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_secret123 \
   AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-on "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GH=1'
 assert_not_contains "$PODMAN_LOG" 'gho_secret123'
 assert_not_contains "$OUTPUT" 'plain text'
-assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token'
-gh_token_dir="$(mount_source /run/agent-capsule/gh)"
-[[ "$gh_token_dir" == "$XDG_DIR/"* ]] || fail "token dir is outside the runtime dir: $gh_token_dir"
-[[ "$(<"$gh_token_dir/token")" == gho_secret123 ]] || fail "token file does not hold the host token"
-[[ "$(file_mode "$gh_token_dir")" == 700 ]] || fail "token dir is not private"
-[[ "$(file_mode "$gh_token_dir/token")" == 600 ]] || fail "token file is not private"
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys'
+keys_dir="$(mount_source /run/agent-capsule/keys)"
+[[ "$keys_dir" == "$XDG_DIR/"* ]] || fail "keys dir is outside the runtime dir: $keys_dir"
+[[ "$(<"$keys_dir/GH_TOKEN")" == gho_secret123 ]] || fail "the token file does not hold the host token"
+[[ "$(file_mode "$keys_dir")" == 700 ]] || fail "keys dir is not private"
+[[ "$(file_mode "$keys_dir/GH_TOKEN")" == 600 ]] || fail "token file is not private"
+assert_contains "$OUTPUT" '>> GitHub  : host gh login (kept in memory); git uses HTTPS'
 
 # Inside the capsule, git reaches GitHub over HTTPS with gh's credentials, whatever
 # form the remote takes.
@@ -776,7 +781,26 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN='' \
   AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-logged-out "$ROOT_DIR"
 assert_contains "$OUTPUT" 'gh auth login'
 assert_contains "$PODMAN_LOG" 'CALL=run'
-assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
+
+# AGENT_CAPSULE_GH_USER picks the host account, so a profile can hand over its own.
+new_case github-account
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_alice FAKE_GH_USER=alice AGENT_CAPSULE_GH_USER=alice \
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-account "$ROOT_DIR"
+assert_contains "$GH_LOG" 'auth token --hostname github.com --user alice'
+[[ "$(<"$(mount_source /run/agent-capsule/keys)/GH_TOKEN")" == gho_alice ]] || fail "alice's token was not handed over"
+assert_contains "$OUTPUT" '>> GitHub  : host gh login for alice'
+# Unset, gh answers for its active account.
+: > "$GH_LOG"
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_active \
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-account "$ROOT_DIR"
+assert_not_contains "$GH_LOG" '--user'
+assert_contains "$GH_LOG" 'auth token --hostname github.com'
+# An account the host gh holds no login for hands nothing over, and says how to log in.
+PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_alice FAKE_GH_USER=alice AGENT_CAPSULE_GH_USER=bob \
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-account "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> GitHub  : no gh login for bob on the host.'
+assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/keys'
 
 # A host gh without a keyring keeps its token in plain text, which defeats the point.
 new_case github-plain-text-token
@@ -787,10 +811,10 @@ PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_plain GH_CONFIG_DIR="$CASE_DIR/gh-co
 assert_contains "$OUTPUT" 'plain text'
 assert_not_contains "$OUTPUT" 'gho_plain'
 
-# Handoff dirs of finished launches are removed, never a live one's. gh and key dirs
-# outlive a launch only when it died before its entrypoint ran; glab and CA dirs last
-# the whole session, because glab and TLS clients read them until it ends.
-for kind_and_file in gh:token keys:ANTHROPIC_API_KEY glab:config.yml ca:extra.pem; do
+# Handoff dirs of finished launches are removed, never a live one's. A keys dir outlives
+# a launch only when it died before its entrypoint ran; glab and CA dirs last the whole
+# session, because glab and TLS clients read them until it ends.
+for kind_and_file in keys:GH_TOKEN glab:config.yml ca:extra.pem; do
   kind="${kind_and_file%%:*}"
   file="${kind_and_file#*:}"
   new_case "handoff-sweep-$kind"
@@ -801,15 +825,6 @@ for kind_and_file in gh:token keys:ANTHROPIC_API_KEY glab:config.yml ca:extra.pe
   [[ ! -e "$runtime_root/$kind-999999999" ]] || fail "a finished launch's $kind dir survived"
   [[ -e "$runtime_root/$kind-$$/$file" ]] || fail "a live launch's $kind dir was removed"
 done
-
-# The entrypoint moves the token into GH_TOKEN and deletes the file before the
-# command starts.
-new_case entrypoint-gh-token
-printf 'gho_entry' > "$CASE_DIR/token"
-# shellcheck disable=SC2016
-AGENT_CAPSULE_GH_TOKEN_FILE="$CASE_DIR/token" "$BASH_BIN" "$ROOT_DIR/entrypoint.sh" \
-  "$BASH_BIN" -c 'printf "%s" "$GH_TOKEN"; [[ ! -e "$AGENT_CAPSULE_GH_TOKEN_FILE" ]]' > "$OUTPUT"
-[[ "$(<"$OUTPUT")" == gho_entry ]] || fail "entrypoint did not export GH_TOKEN"
 
 # Without a private CA the capsule gets no CA mount and no CA variable.
 new_case ca-off
@@ -1747,6 +1762,36 @@ run_capsule --shell --session first-home "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 CAPSULE_HOME="$other_capsule_home" run_capsule --shell --session second-home "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
+
+# A profile is another AGENT_CAPSULE_HOME. Two of them on one project keep their login,
+# sessions and project memory apart, and still share the image.
+new_case profiles-side-by-side
+main_home="$CAPSULE_HOME"
+work_home="$CASE_DIR/work-capsule"
+mkdir -p "$work_home/auth-home/claude/.claude"
+printf 'work-token\n' > "$work_home/auth-home/claude/.claude/.credentials.json"
+ANTHROPIC_API_KEY=main-key run_capsule --shell "$ROOT_DIR"
+cp "$PODMAN_LOG" "$CASE_DIR/main.log"
+main_keys="$(mount_source /run/agent-capsule/keys)"
+CAPSULE_HOME="$work_home" ANTHROPIC_API_KEY=work-key run_capsule --shell "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+for state in homes/ project-memory/ auth-home/claude/.claude/.credentials.json; do
+  assert_contains "$PODMAN_LOG" "ARG=$work_home/$state"
+done
+assert_not_contains "$PODMAN_LOG" "ARG=$main_home/"
+assert_not_contains "$CASE_DIR/main.log" "ARG=$work_home/"
+[[ "$(mount_source /run/agent-capsule/keys)" != "$main_keys" ]] || fail "both profiles used one keys dir"
+main_name="$(awk '$0 == "ARG=--name" { getline; print }' "$CASE_DIR/main.log")"
+work_name="$(awk '$0 == "ARG=--name" { getline; print }' "$PODMAN_LOG")"
+[[ -n "$main_name" && "$main_name" != "$work_name" ]] || fail "both profiles used container name $main_name"
+
+# A profile can point its rules back at the main folder's file.
+new_case profile-shared-rules
+main_home="$CAPSULE_HOME"
+run_capsule --shell --session rules-main "$ROOT_DIR"
+CAPSULE_HOME="$CASE_DIR/work-capsule" AGENT_CAPSULE_SHARED_RULES="$main_home/CLAUDE.md" \
+  run_capsule --shell --session rules-work "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "ARG=$main_home/CLAUDE.md:/home/dev/.claude/CLAUDE.md:ro"
 
 # Floating distro tags keep both toolchains on their latest upstream release.
 assert_contains "$SCRIPT" "NODE_TAG=\"\${AGENT_CAPSULE_NODE_TAG:-trixie-slim}\""

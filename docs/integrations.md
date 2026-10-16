@@ -120,9 +120,10 @@ export AGENT_CAPSULE_TOOLS=gh
 agent-capsule --with github .
 ```
 
-- The launcher reads the token with `gh auth token` and passes it through a file in
-  `$XDG_RUNTIME_DIR`, which is in memory. The entrypoint moves it into `GH_TOKEN` and
-  deletes the file before the agent starts. If the container never starts, the next
+- The launcher reads the token with `gh auth token`, for the account
+  `AGENT_CAPSULE_GH_USER` names or else `gh`'s active one. It passes the token like the
+  API keys, as a file in `$XDG_RUNTIME_DIR`, which is in memory. The entrypoint moves it
+  into `GH_TOKEN` and deletes the file before the agent starts. If the container never starts, the next
   launch deletes it. Without `$XDG_RUNTIME_DIR`, as on macOS, the file is in `$TMPDIR`
   instead, which is on disk.
 - It is not passed with `-e`, because podman stores those values in the container

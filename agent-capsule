@@ -185,6 +185,9 @@ VAULT_DEST="${AGENT_CAPSULE_VAULT_DEST:-/vault}"
 # PEM file of the private CAs that --ca makes the capsule trust. Set alone, it mounts nothing.
 CA_CERTS="${AGENT_CAPSULE_CA_CERTS:-}"
 
+# The host gh account whose token --with github hands over; empty means gh's active one.
+GH_USER="${AGENT_CAPSULE_GH_USER:-}"
+
 # The one GitLab instance --with gitlab reaches: its glab config binds one token to one host.
 GITLAB_INSTANCE="${AGENT_CAPSULE_GITLAB_HOST:-gitlab.com}"
 
@@ -1768,10 +1771,10 @@ fi
 # ----------------------------------------------------------------------------
 # In-memory handoff
 # ----------------------------------------------------------------------------
-# gh token and API key dirs of launches that died before their entrypoint ran, and the
-# glab and CA dirs of finished sessions. exec hands the launcher's PID to podman, so a
-# live session still holds the PID in its dir's name.
-for stale_dir in "$LOCK_ROOT"/gh-* "$LOCK_ROOT"/keys-* "$LOCK_ROOT"/glab-* "$LOCK_ROOT"/ca-*; do
+# Key dirs of launches that died before their entrypoint ran, and the glab and CA dirs
+# of finished sessions. exec hands the launcher's PID to podman, so a live session
+# still holds the PID in its dir's name.
+for stale_dir in "$LOCK_ROOT"/keys-* "$LOCK_ROOT"/glab-* "$LOCK_ROOT"/ca-*; do
   [[ -d "$stale_dir" ]] || continue
   stale_pid="${stale_dir##*-}"
   [[ "$stale_pid" =~ ^[0-9]+$ ]] || continue
@@ -1785,6 +1788,19 @@ handoff_dir() { # name
   rm -rf "$HANDOFF_DIR"
   mkdir -m 700 "$HANDOFF_DIR"
   add_mount "$HANDOFF_DIR" "/run/agent-capsule/$1"
+}
+
+# Secrets cross over as one file each in the keys dir, which the entrypoint moves into
+# the environment and deletes. Never -e: podman writes those values into the container
+# config on disk.
+KEYS_DIR=""
+handoff_key() { # name value
+  if [[ -z "$KEYS_DIR" ]]; then
+    handoff_dir keys
+    KEYS_DIR="$HANDOFF_DIR"
+    ENV_ARGS+=(-e AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys)
+  fi
+  (umask 077 && printf '%s' "$2" > "$KEYS_DIR/$1")
 }
 
 # ----------------------------------------------------------------------------
@@ -1811,26 +1827,24 @@ forge_over_https() { # host helper
 # ----------------------------------------------------------------------------
 # GitHub token handoff
 # ----------------------------------------------------------------------------
-# The token crosses over in a file in the runtime dir, which the entrypoint reads into
-# GH_TOKEN and deletes. Never -e: podman writes those values into the container config
-# on disk.
-GH_TOKEN_DIR=""
+# The token crosses over as GH_TOKEN in the keys dir.
+GH_TOKEN_HANDED=0
 
 if has_extra github; then
   gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
   gh_token=""
+  gh_account=(--hostname github.com)
+  [[ -z "$GH_USER" ]] || gh_account+=(--user "$GH_USER")
   if ! command -v gh >/dev/null 2>&1; then
     echo ">> GitHub  : gh is not installed on the host, so gh in the capsule is logged out" >&2
-  elif ! gh_token="$(gh auth token --hostname github.com 2>/dev/null)" || [[ -z "$gh_token" ]]; then
-    echo ">> GitHub  : no gh login on the host. Run there: gh auth login --scopes workflow" >&2
+  elif ! gh_token="$(gh auth token "${gh_account[@]}" 2>/dev/null)" || [[ -z "$gh_token" ]]; then
+    echo ">> GitHub  : no gh login${GH_USER:+ for $GH_USER} on the host. Run there: gh auth login --scopes workflow" >&2
   else
     if grep -q 'oauth_token:' "$gh_hosts_file" 2>/dev/null; then
       echo ">> GitHub  : warning: the host gh keeps its token in plain text in $gh_hosts_file" >&2
     fi
-    handoff_dir gh
-    GH_TOKEN_DIR="$HANDOFF_DIR"
-    (umask 077 && printf '%s' "$gh_token" > "$GH_TOKEN_DIR/token")
-    ENV_ARGS+=(-e AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token)
+    handoff_key GH_TOKEN "$gh_token"
+    GH_TOKEN_HANDED=1
   fi
   unset gh_token
 
@@ -1886,17 +1900,8 @@ fi
 # ----------------------------------------------------------------------------
 # API key handoff
 # ----------------------------------------------------------------------------
-# One file per key, read into the environment and deleted by the entrypoint. Never -e:
-# podman writes those values into the container config on disk.
-KEYS_DIR=""
 for key in "${AGENT_SECRET_ENV[@]}"; do
-  [[ -n "${!key:-}" ]] || continue
-  if [[ -z "$KEYS_DIR" ]]; then
-    handoff_dir keys
-    KEYS_DIR="$HANDOFF_DIR"
-    ENV_ARGS+=(-e AGENT_CAPSULE_KEYS_DIR=/run/agent-capsule/keys)
-  fi
-  (umask 077 && printf '%s' "${!key}" > "$KEYS_DIR/$key")
+  [[ -z "${!key:-}" ]] || handoff_key "$key" "${!key}"
 done
 
 # ----------------------------------------------------------------------------
@@ -1959,8 +1964,8 @@ echo ">> Auth    : $AUTH_HOME_DIR"
 if [[ "$SHARED_CRED_MOUNTED" == "1" ]]; then
   echo ">> Creds   : $AUTH_CRED_FILE -> $CONTAINER_CRED_PATH (shared, read-write)"
 fi
-if [[ -n "$GH_TOKEN_DIR" ]]; then
-  echo ">> GitHub  : host gh login ($HANDOFF_WHERE); git uses HTTPS"
+if [[ "$GH_TOKEN_HANDED" == "1" ]]; then
+  echo ">> GitHub  : host gh login${GH_USER:+ for $GH_USER} ($HANDOFF_WHERE); git uses HTTPS"
 fi
 if [[ -n "$GLAB_DIR" ]]; then
   echo ">> GitLab  : host glab login for $GITLAB_INSTANCE ($HANDOFF_WHERE); git uses HTTPS"
