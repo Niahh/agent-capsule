@@ -250,11 +250,12 @@ new_case() { # name
   PODMAN_LOG="$CASE_DIR/podman.log"
   XDG_DIR="$CASE_DIR/xdg"
   PODMAN_IMAGE_STATE="$CASE_DIR/podman-images"
+  VAULT_DIR="$CASE_DIR/vault"
   OUTPUT="$CASE_DIR/output"
   GH_LOG="$CASE_DIR/gh.log"
   GLAB_LOG="$CASE_DIR/glab.log"
   export GH_LOG GLAB_LOG
-  mkdir -p "$CAPSULE_HOME" "$HOST_HOME"
+  mkdir -p "$CAPSULE_HOME" "$HOST_HOME" "$VAULT_DIR"
   : > "$PODMAN_LOG"
   : > "$GH_LOG"
   : > "$GLAB_LOG"
@@ -363,41 +364,48 @@ new_case rules-default-private
 run_capsule --shell --session rules-default "$ROOT_DIR"
 [[ "$(file_mode "$CAPSULE_HOME/CLAUDE.md")" == "600" ]] || fail "default rules mode is not private"
 
-new_case opencode-config-and-vault
-vault_dir="$CASE_DIR/vault"
-config_dir="$CAPSULE_HOME/homes/opencode-state/.config/opencode"
-mkdir -p "$vault_dir"
-run_capsule --agent opencode --shell --session opencode-state \
-  --with superpowers,mcpvault --vault="$vault_dir" "$ROOT_DIR"
+# OpenCode gets superpowers and the vault's MCP server through inline configuration.
 opencode_mcp='"mcp":{"obsidian":{"type":"local","command":["mcpvault","/vault"]}}'
+new_case opencode-runtime-config
+run_capsule --agent opencode --shell --session opencode-state --with superpowers --vault="$VAULT_DIR" "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" \
   "OPENCODE_CONFIG_CONTENT={\"plugin\":[\"/opt/superpowers/source\"],$opencode_mcp}"
-
-run_capsule --agent opencode --shell --session opencode-state \
-  --with superpowers,mcpvault --no-vault "$ROOT_DIR"
+run_capsule --agent opencode --shell --session opencode-state --with superpowers,vault --no-vault "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT={"plugin":["/opt/superpowers/source"]}'
 assert_not_contains "$PODMAN_LOG" 'obsidian'
-
-user_config="$config_dir/opencode.json"
-mkdir -p "$config_dir"
-printf '%s\n' '{"theme":"user-owned"}' > "$user_config"
-run_capsule --agent opencode --shell --session opencode-state \
-  --with mcpvault --vault="$vault_dir" "$ROOT_DIR"
-[[ "$(<"$user_config")" == '{"theme":"user-owned"}' ]] || fail "user OpenCode config changed"
-assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}"
-
 run_capsule --agent opencode --shell --session opencode-state --with none "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
+
+# The inline configuration leaves the user's own OpenCode files alone.
+new_case opencode-user-config-kept
+user_config="$CAPSULE_HOME/homes/opencode-state/.config/opencode/opencode.json"
+mkdir -p "${user_config%/*}"
+printf '%s\n' '{"theme":"user-owned"}' > "$user_config"
+run_capsule --agent opencode --shell --session opencode-state --vault="$VAULT_DIR" "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}"
+[[ "$(<"$user_config")" == '{"theme":"user-owned"}' ]] || fail "user OpenCode config changed"
+run_capsule --agent opencode --shell --session opencode-state --with none "$ROOT_DIR"
 [[ "$(<"$user_config")" == '{"theme":"user-owned"}' ]] || fail "user OpenCode config changed"
 
-# Vault flags are last-one-wins, in both directions.
-run_capsule --agent opencode --shell --session opencode-state \
-  --with mcpvault --no-vault --vault="$vault_dir" "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}"
+# --vault and --no-vault are last-one-wins, in both directions.
+new_case vault-shortcuts-last-wins
+run_capsule --shell --session vault-shortcuts --no-vault --vault="$VAULT_DIR" "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" "ARG=$VAULT_DIR:/vault"
+run_capsule --shell --session vault-shortcuts --vault="$VAULT_DIR" --no-vault "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" ':/vault'
 
-run_capsule --agent opencode --shell --session opencode-state \
-  --with mcpvault --vault="$vault_dir" --no-vault "$ROOT_DIR"
-assert_not_contains "$PODMAN_LOG" 'obsidian'
+# The shortcut flags edit the selection, never replace it.
+new_case vault-shortcut-keeps-list
+AGENT_CAPSULE_WITH=superpowers run_capsule --shell --session shortcut-keeps --vault="$VAULT_DIR" "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> Extras  : superpowers, vault'
+AGENT_CAPSULE_TOOLS=gh AGENT_CAPSULE_WITH=superpowers \
+  run_capsule --shell --session shortcut-keeps --with github --vault="$VAULT_DIR" "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> Extras  : github, vault'
+AGENT_CAPSULE_WITH=vault,worklog AGENT_CAPSULE_VAULT="$VAULT_DIR" \
+  run_capsule --shell --session shortcut-keeps --no-vault "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> Extras  : none'
+assert_contains "$OUTPUT" '>> Worklog : disabled for this run (--no-vault)'
+assert_not_contains "$PODMAN_LOG" ':/vault'
 
 new_case help-and-version
 run_capsule --help
@@ -858,6 +866,25 @@ for bad_ca in "$CASE_DIR/missing.pem" "$CASE_DIR/key-only.pem"; do
   assert_not_contains "$PODMAN_LOG" 'CALL='
 done
 
+# ca in the list does what --ca does, and --ca adds to the exported list.
+new_case ca-in-with
+printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n' > "$CASE_DIR/corp.pem"
+AGENT_CAPSULE_WITH=ca AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" run_capsule --shell --session ca-in-with "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca'
+AGENT_CAPSULE_WITH=superpowers AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" \
+  run_capsule --ca --shell --session ca-in-with "$ROOT_DIR"
+assert_contains "$OUTPUT" '>> Extras  : ca, superpowers'
+AGENT_CAPSULE_WITH=ca run_capsule_fails --shell --session ca-in-with "$ROOT_DIR"
+assert_contains "$OUTPUT" 'ca needs AGENT_CAPSULE_CA_CERTS'
+
+# A login may need the CA to reach its server, but never the vault.
+new_case auth-login-keeps-ca
+printf -- '-----BEGIN CERTIFICATE-----\nMIIBcapsuleRootOne\n-----END CERTIFICATE-----\n' > "$CASE_DIR/corp.pem"
+AGENT_CAPSULE_WITH=vault AGENT_CAPSULE_VAULT="$VAULT_DIR" AGENT_CAPSULE_CA_CERTS="$CASE_DIR/corp.pem" \
+  run_capsule --auth-login --ca --shell
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_CA_DIR=/run/agent-capsule/ca'
+assert_not_contains "$PODMAN_LOG" ':/vault'
+
 # The entrypoint adds the CA to what the capsule already trusts. git and Node read
 # neither SSL_CERT_FILE nor each other's variable, so each gets its own.
 new_case entrypoint-ca-trust
@@ -1040,16 +1067,40 @@ AGENT_CAPSULE_SHARE_AUTH=0 run_capsule --shell --session unshared-auth "$ROOT_DI
 assert_not_contains "$PODMAN_LOG" '.credentials.json'
 [[ ! -e "$CAPSULE_HOME/homes/unshared-auth/.claude.json" ]] || fail "unshared auth was copied"
 
-# mcpvault reaches each agent its own way: a config file for claude, -c for codex.
-new_case mcpvault-per-agent
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-run_capsule --with mcpvault --vault="$vault_dir" --session mcp-claude "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --mcp-config /home/dev/.mcp-servers.json
-assert_contains "$CAPSULE_HOME/homes/mcp-claude/.mcp-servers.json" '"args": ["/vault"]'
-run_capsule --agent codex --with mcpvault --vault="$vault_dir" --session mcp-codex "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.command="mcpvault"'
-assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.args=["/vault"]'
+# The vault brings its MCP server, which reaches each agent its own way: a config file
+# for claude, -c overrides for codex, inline configuration for opencode.
+new_case vault-per-agent
+for agent in claude codex opencode; do
+  AGENT_CAPSULE_WITH=vault AGENT_CAPSULE_VAULT="$VAULT_DIR" \
+    run_capsule --agent "$agent" --session "vault-$agent" "$ROOT_DIR"
+  assert_contains "$PODMAN_LOG" "ARG=$VAULT_DIR:/vault"
+  case "$agent" in
+    claude)
+      assert_arg_after "$PODMAN_LOG" --mcp-config /home/dev/.mcp-servers.json
+      assert_contains "$CAPSULE_HOME/homes/vault-claude/.mcp-servers.json" '"args": ["/vault"]'
+      ;;
+    codex)
+      assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.command="mcpvault"'
+      assert_arg_after "$PODMAN_LOG" -c 'mcp_servers.obsidian.args=["/vault"]'
+      ;;
+    opencode) assert_contains "$PODMAN_LOG" "OPENCODE_CONFIG_CONTENT={$opencode_mcp}" ;;
+  esac
+done
+
+# Without the vault, nothing is mounted and no MCP server is registered.
+new_case vault-off
+AGENT_CAPSULE_VAULT="$VAULT_DIR" run_capsule --session vault-off "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" ':/vault'
+assert_not_contains "$PODMAN_LOG" '--mcp-config'
+
+# mcpvault left --with: the vault brings it. The variable that mounted the vault in 0.3
+# is no longer read, and says so.
+new_case mcpvault-and-mount-vault-gone
+run_capsule_fails --with mcpvault --shell --session mcpvault-gone "$ROOT_DIR"
+assert_contains "$OUTPUT" 'Unknown extra tool: mcpvault'
+AGENT_CAPSULE_MOUNT_VAULT=1 AGENT_CAPSULE_VAULT="$VAULT_DIR" run_capsule --shell --session mount-vault "$ROOT_DIR"
+assert_contains "$OUTPUT" 'AGENT_CAPSULE_MOUNT_VAULT is no longer read; add vault to AGENT_CAPSULE_WITH.'
+assert_not_contains "$PODMAN_LOG" ':/vault'
 
 new_case claude-plugin-dirs
 run_capsule --agent claude --with superpowers,anydoc \
@@ -1116,22 +1167,21 @@ run_capsule --shell --session file-mount --mount "$mount_file:/etc/tool.conf:ro"
 assert_contains "$PODMAN_LOG" "ARG=$mount_file:/etc/tool.conf:ro"
 
 new_case vault-unconfigured
-run_capsule_fails --shell --session missing-vault --vault "$ROOT_DIR"
-assert_contains "$OUTPUT" 'No vault configured. Use --vault=PATH or set AGENT_CAPSULE_VAULT.'
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
+for vault_args in --vault '--with vault'; do
+  # shellcheck disable=SC2086
+  run_capsule_fails --shell --session missing-vault $vault_args "$ROOT_DIR"
+  assert_contains "$OUTPUT" '--with vault needs a vault: set AGENT_CAPSULE_VAULT, or use --vault=PATH.'
+  assert_not_contains "$PODMAN_LOG" 'CALL=run'
+done
 
 new_case vault-configured
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-AGENT_CAPSULE_VAULT="$vault_dir" \
+AGENT_CAPSULE_VAULT="$VAULT_DIR" \
   run_capsule --shell --session configured-vault --vault "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" "ARG=$vault_dir:/vault"
+assert_contains "$PODMAN_LOG" "ARG=$VAULT_DIR:/vault"
 
 new_case vault-destination-invalid
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
 AGENT_CAPSULE_VAULT_DEST=relative \
-  run_capsule_fails --shell --session invalid-vault-destination --vault="$vault_dir" "$ROOT_DIR"
+  run_capsule_fails --shell --session invalid-vault-destination --vault="$VAULT_DIR" "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Invalid vault destination: relative'
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
@@ -1170,9 +1220,7 @@ copy_build_context
 assert_edit_rebuilds "$CASE_DIR/entrypoint.sh" --shell --session entrypoint-hash "$ROOT_DIR"
 
 new_case worklog-procedure-default
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-on "$ROOT_DIR"
+run_capsule --with worklog --vault="$VAULT_DIR" --session worklog-on "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_VAULT_DEST=/vault'
 assert_contains "$OUTPUT" '>> Worklog : built-in procedure'
@@ -1180,86 +1228,68 @@ assert_not_contains "$PODMAN_LOG" '/etc/agent-capsule/log-work.md'
 [[ ! -e "$CAPSULE_HOME/log-work.md" ]] || fail "the default procedure file was created"
 
 printf 'steps\n' > "$CAPSULE_HOME/log-work.md"
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-on "$ROOT_DIR"
+run_capsule --with worklog --vault="$VAULT_DIR" --session worklog-on "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/log-work.md:/etc/agent-capsule/log-work.md:ro"
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WORKLOG_PROCEDURE=/etc/agent-capsule/log-work.md'
 assert_contains "$OUTPUT" ">> Worklog : $CAPSULE_HOME/log-work.md -> /etc/agent-capsule/log-work.md"
 
 new_case worklog-procedure-explicit
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
 printf 'mine\n' > "$CASE_DIR/mine.md"
 AGENT_CAPSULE_WORKLOG_PROCEDURE="$CASE_DIR/mine.md" \
-  run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-explicit "$ROOT_DIR"
+  run_capsule --with worklog --vault="$VAULT_DIR" --session worklog-explicit "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" "ARG=$CASE_DIR/mine.md:/etc/agent-capsule/log-work.md:ro"
 assert_contains "$OUTPUT" ">> Worklog : $CASE_DIR/mine.md -> /etc/agent-capsule/log-work.md"
 
 new_case worklog-procedure-missing
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
 AGENT_CAPSULE_WORKLOG_PROCEDURE="$CASE_DIR/missing.md" \
-  run_capsule_fails --with mcpvault,worklog --vault="$vault_dir" --session worklog-missing "$ROOT_DIR"
+  run_capsule_fails --with worklog --vault="$VAULT_DIR" --session worklog-missing "$ROOT_DIR"
 assert_contains "$OUTPUT" "File not found: $CASE_DIR/missing.md"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
 # A symlinked default is a user-managed file, not a missing one.
 new_case worklog-procedure-symlink
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir" "$CASE_DIR/notes"
+mkdir -p "$CASE_DIR/notes"
 printf 'linked\n' > "$CASE_DIR/notes/log-work.md"
 ln -s "$CASE_DIR/notes/log-work.md" "$CAPSULE_HOME/log-work.md"
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR"
+run_capsule --with worklog --vault="$VAULT_DIR" --session worklog-link "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" "ARG=$CAPSULE_HOME/log-work.md:/etc/agent-capsule/log-work.md:ro"
 assert_contains "$OUTPUT" ">> Worklog : $CAPSULE_HOME/log-work.md -> /etc/agent-capsule/log-work.md"
 # A broken one fails loudly instead of falling back to the built-in procedure.
 rm "$CASE_DIR/notes/log-work.md"
-run_capsule_fails --with mcpvault,worklog --vault="$vault_dir" --session worklog-link "$ROOT_DIR"
+run_capsule_fails --with worklog --vault="$VAULT_DIR" --session worklog-link "$ROOT_DIR"
 assert_contains "$OUTPUT" "File not found: $CAPSULE_HOME/log-work.md"
 assert_not_contains "$PODMAN_LOG" 'CALL=run'
 
-new_case worklog-needs-mcpvault
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-run_capsule_fails --with worklog --vault="$vault_dir" --session worklog-no-mcp "$ROOT_DIR"
-assert_contains "$OUTPUT" '--with worklog needs mcpvault.'
-assert_contains "$OUTPUT" 'Add mcpvault to --with or AGENT_CAPSULE_WITH.'
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
-
-new_case worklog-with-replaces-mcpvault
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-AGENT_CAPSULE_WITH=mcpvault \
-  run_capsule_fails --with worklog --vault="$vault_dir" --session worklog-flag-only "$ROOT_DIR"
-assert_contains "$OUTPUT" '--with worklog needs mcpvault.'
-assert_contains "$OUTPUT" 'Add mcpvault to --with or AGENT_CAPSULE_WITH.'
-assert_not_contains "$PODMAN_LOG" 'CALL=run'
+# worklog logs through the vault's MCP tools. A command-line --with replaces the
+# exported list, so an exported vault does not count.
+new_case worklog-needs-vault
+for exported in '' vault; do
+  AGENT_CAPSULE_WITH="$exported" AGENT_CAPSULE_VAULT="$VAULT_DIR" \
+    run_capsule_fails --with worklog --session worklog-needs-vault "$ROOT_DIR"
+  assert_contains "$OUTPUT" '--with worklog needs the vault: add vault to --with, or use --vault.'
+  assert_not_contains "$PODMAN_LOG" 'CALL=run'
+done
 
 new_case worklog-no-vault
-run_capsule --with mcpvault,worklog --no-vault --session worklog-no-vault "$ROOT_DIR"
+run_capsule --with vault,worklog --no-vault --session worklog-no-vault "$ROOT_DIR"
 assert_contains "$OUTPUT" '>> Worklog : disabled for this run (--no-vault)'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
 assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
 
 new_case worklog-codex-rejected
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-run_capsule_fails --agent codex --with mcpvault,worklog --vault="$vault_dir" --session worklog-codex "$ROOT_DIR"
+run_capsule_fails --agent codex --with worklog --vault="$VAULT_DIR" --session worklog-codex "$ROOT_DIR"
 assert_contains "$OUTPUT" "Extra 'worklog' is not available with --agent codex"
 
 new_case worklog-codex-dropped
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-AGENT_CAPSULE_WITH=mcpvault,worklog \
-  run_capsule --agent codex --vault="$vault_dir" --shell --session worklog-drop "$ROOT_DIR"
+AGENT_CAPSULE_WITH=vault,worklog \
+  run_capsule --agent codex --vault="$VAULT_DIR" --shell --session worklog-drop "$ROOT_DIR"
 assert_contains "$OUTPUT" ">> Extras  : dropping 'worklog' (unsupported by agent codex)"
 
 # The plugin ships in the image, so editing it has to invalidate the image.
 new_case worklog-in-bundle-hash
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
 copy_build_context
 assert_edit_rebuilds "$CASE_DIR/plugins/worklog/procedure.md" \
-  --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
+  --with worklog --vault="$VAULT_DIR" --shell --session worklog-hash "$ROOT_DIR"
 
 # Every image copies the plugin, so editing it rebuilds a run without worklog too.
 printf '\n' >> "$CASE_DIR/plugins/worklog/procedure.md"
@@ -1293,23 +1323,21 @@ plugin_mode="$(file_mode "$CAPSULE_HOME/build/context/plugins/worklog/hooks/work
 
 # The project is the vault itself, inside it, or a sibling whose name only starts like the vault's.
 new_case worklog-in-vault
-vault_dir="$CASE_DIR/notes"
-mkdir -p "$vault_dir/sub" "$CASE_DIR/notes2"
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir"
+notes_dir="$CASE_DIR/notes"
+mkdir -p "$notes_dir/sub" "$CASE_DIR/notes2"
+run_capsule --with worklog --vault="$notes_dir" --session worklog-in-vault "$notes_dir"
 assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
 assert_not_contains "$PODMAN_LOG" 'AGENT_CAPSULE_VAULT_DEST'
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$vault_dir/sub"
+run_capsule --with worklog --vault="$notes_dir" --session worklog-in-vault "$notes_dir/sub"
 assert_contains "$OUTPUT" '>> Worklog : disabled for this run (the project is inside the vault)'
 assert_not_contains "$PODMAN_LOG" 'ARG=/opt/worklog/plugin'
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-in-vault "$CASE_DIR/notes2"
+run_capsule --with worklog --vault="$notes_dir" --session worklog-in-vault "$CASE_DIR/notes2"
 assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
 
 # A shell does not load the plugin, so the banner says how to.
 new_case worklog-shell-hint
-vault_dir="$CASE_DIR/vault"
-mkdir -p "$vault_dir"
-run_capsule --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-shell "$ROOT_DIR"
+run_capsule --with worklog --vault="$VAULT_DIR" --shell --session worklog-shell "$ROOT_DIR"
 assert_contains "$OUTPUT" '(start claude with: --plugin-dir /opt/worklog/plugin)'
 
 new_case forced-build
@@ -1524,7 +1552,7 @@ run_capsule --agent list
   fail "--agent list is not one agent per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --with list
-expected_extras="$(printf '%s\n' anydoc explain-diff github gitlab mcpvault superpowers worklog)"
+expected_extras="$(printf '%s\n' anydoc ca explain-diff github gitlab superpowers vault worklog)"
 [[ "$(cat "$OUTPUT")" == "$expected_extras" ]] ||
   fail "--with list is not one integration per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
@@ -1749,14 +1777,14 @@ done
 # = is in COMP_WORDBREAKS, so readline replaces only the text after it: a candidate
 # that repeats --opt= ends up typed twice.
 new_case completion-after-equals
-mkdir -p "$CAPSULE_HOME/homes/work" "$CASE_DIR/vaultdir"
+mkdir -p "$CAPSULE_HOME/homes/work" "$CASE_DIR/notesdir"
 : > "$CASE_DIR/mountfile"
 [[ "$(complete_line 'agent-capsule --agent=co')" == codex ]] || fail "--agent= completion repeats the flag"
 [[ "$(complete_line 'agent-capsule --session=wo')" == work ]] || fail "--session= completion repeats the flag"
 [[ "$(complete_line 'agent-capsule --with=an')" == anydoc ]] || fail "--with= completion repeats the flag"
 [[ "$(complete_line 'agent-capsule --with=anydoc,ex')" == anydoc,explain-diff ]] ||
   fail "--with= list completion repeats the flag"
-[[ "$(complete_line "agent-capsule --vault=$CASE_DIR/vault")" == "$CASE_DIR/vaultdir" ]] ||
+[[ "$(complete_line "agent-capsule --vault=$CASE_DIR/notes")" == "$CASE_DIR/notesdir" ]] ||
   fail "--vault= completion repeats the flag"
 [[ "$(complete_line "agent-capsule --mount=$CASE_DIR/mountf")" == "$CASE_DIR/mountfile" ]] ||
   fail "--mount= completion repeats the flag"

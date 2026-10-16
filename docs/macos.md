@@ -11,7 +11,7 @@ podman machine init
 podman machine start
 ```
 
-`--with github`, `--with gitlab` and `--ca` also mount a directory under `$TMPDIR`,
+`github`, `gitlab` and `ca` also mount a directory under `$TMPDIR`,
 which macOS keeps in `/var/folders`, outside `$HOME`.
 
 If `agent-capsule` was installed via Nix (nix-darwin, `nix profile install`,
