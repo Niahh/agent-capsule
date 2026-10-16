@@ -1391,6 +1391,43 @@ if [[ "$SHARED_MEMORY_ENABLED" == "1" ]]; then
   mkdir -p "$HOME_DIR/$(dirname "$AGENT_MEMORY_REL")"
 fi
 
+# Your own skills, for every agent, and Claude plugins, read from the state dir. Each skill
+# gets its own mount, so skills made inside the session and the agent's own stay visible.
+# The mount points are made host side, as for the rules file, to keep their ownership.
+USER_SKILLS=()
+USER_PLUGINS=()
+user_named() { # kind dir
+  local name="${2%/}"
+
+  name="${name##*/}"
+  if [[ ! "$name" =~ ^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,119}$ ]]; then
+    echo ">> $1 : skipping '$name': use letters, digits, dots, underscores or hyphens" >&2
+    return 1
+  fi
+  printf '%s' "$name"
+}
+if [[ "$AUTH_LOGIN" != "1" ]]; then
+  for user_dir in "$STATE_DIR/skills"/*/; do
+    [[ -f "${user_dir}SKILL.md" ]] || continue
+    name="$(user_named "Skills " "$user_dir")" || continue
+    target="$HOME_DIR/$AGENT_SKILLS_REL/$name"
+    # A link there is a bundled skill of that name, which the mount would land on.
+    if [[ -L "$target" || ( -e "$target" && ! -d "$target" ) ]]; then
+      echo "Your skill $name has the name of a bundled skill: rename $STATE_DIR/skills/$name." >&2
+      exit 1
+    fi
+    mkdir -p "$target"
+    USER_SKILLS+=("$name")
+  done
+  if [[ "$AGENT" == "claude" ]]; then
+    for user_dir in "$STATE_DIR/plugins/claude"/*/; do
+      [[ -f "${user_dir}.claude-plugin/plugin.json" ]] || continue
+      name="$(user_named "Plugins" "$user_dir")" || continue
+      USER_PLUGINS+=("$name")
+    done
+  fi
+fi
+
 # Rewritten on every run: the vault destination can change between invocations.
 if has_extra vault && [[ "$AGENT_MCP_MODE" == "flag" ]]; then
   cat > "$HOME_DIR/$MCP_CONFIG_BASENAME" <<MCPCONFIG
@@ -1567,6 +1604,9 @@ if [[ "$AGENT" == "claude" ]]; then
   if [[ "$WORKLOG_ENABLED" == "1" ]]; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/worklog/plugin)
   fi
+  for name in "${USER_PLUGINS[@]}"; do
+    INTEGRATION_ARGS+=(--plugin-dir "/opt/agent-capsule/user-plugins/$name")
+  done
 fi
 
 # OpenCode merges inline configuration over its normal global and project
@@ -1736,6 +1776,13 @@ fi
 if [[ -n "$WORKLOG_PROCEDURE_SRC" ]]; then
   add_mount "$WORKLOG_PROCEDURE_SRC" /etc/agent-capsule/log-work.md ro
 fi
+
+for name in "${USER_SKILLS[@]}"; do
+  add_mount "$STATE_DIR/skills/$name" "/home/dev/$AGENT_SKILLS_REL/$name" ro
+done
+for name in "${USER_PLUGINS[@]}"; do
+  add_mount "$STATE_DIR/plugins/claude/$name" "/opt/agent-capsule/user-plugins/$name" ro
+done
 
 # ----------------------------------------------------------------------------
 # Shared per-project memory mount
@@ -2045,6 +2092,20 @@ if [[ "$WORKLOG_ENABLED" == "1" ]]; then
     worklog_line="$worklog_line (start claude with: --plugin-dir /opt/worklog/plugin)"
   fi
   echo "$worklog_line"
+fi
+
+if [[ "${#USER_SKILLS[@]}" -gt 0 ]]; then
+  user_list="$(printf '%s, ' "${USER_SKILLS[@]}")"
+  echo ">> Skills  : ${user_list%, }"
+fi
+if [[ "${#USER_PLUGINS[@]}" -gt 0 ]]; then
+  user_list="$(printf '%s, ' "${USER_PLUGINS[@]}")"
+  plugins_line=">> Plugins : ${user_list%, }"
+  if [[ "$SHELL_MODE" == "1" ]]; then
+    plugin_flags="$(printf -- '--plugin-dir /opt/agent-capsule/user-plugins/%s ' "${USER_PLUGINS[@]}")"
+    plugins_line+=" (start claude with: ${plugin_flags% })"
+  fi
+  echo "$plugins_line"
 fi
 
 [[ "$AUTH_LOGIN" == "1" ]] && echo ">> Mode    : auth login"

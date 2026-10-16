@@ -160,7 +160,7 @@ including image name, base tags, resource limits, paths, and volume options.
 - [Configuration](docs/configuration.md): persistent defaults, every environment variable, tool versions, state
   layout and pruning.
 - [Integrations](docs/integrations.md): Superpowers, explain-diff, anydoc, the Obsidian vault, the work
-  log, Kubernetes and Talos, GitHub, GitLab, private CAs.
+  log, Kubernetes and Talos, GitHub, GitLab, private CAs, your own skills and plugins.
 - [Agents](docs/agents.md): logins, API keys, and how Codex and opencode differ from Claude Code.
 - [Profiles](docs/profiles.md): a second login for the same agent, side by side.
 - [Shell completion](docs/shell-completion.md): bash and zsh setup.

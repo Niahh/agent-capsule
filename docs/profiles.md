@@ -37,8 +37,9 @@ agent-capsule ~/code/core     # terminal 2: the usual login, same project, at th
 ```
 
 - Each profile keeps apart its login (`auth-home/`), its sessions (`homes/`), its project
-  memory, and its default worklog procedure (`log-work.md`). Project memory stays apart on
-  purpose: memory written under one account must not reach another organisation's.
+  memory, its default worklog procedure (`log-work.md`), and its own skills and plugins
+  (`skills/`, `plugins/claude/`). Project memory stays apart on purpose: memory written
+  under one account must not reach another organisation's.
 - Shared: the images, and the rules file when the function points
   `AGENT_CAPSULE_SHARED_RULES` back at it. To share the worklog procedure as well, set
   `AGENT_CAPSULE_WORKLOG_PROCEDURE` in the function, or symlink the file.

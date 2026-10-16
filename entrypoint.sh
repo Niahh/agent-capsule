@@ -46,6 +46,7 @@ if [[ -n "$skills_dir" ]]; then
         mkdir -p "$skills_dir"
         if [[ (-e "$skill" || -L "$skill") && ! -e "$marker" ]]; then
           echo "$name already exists and is not capsule-managed: $skill" >&2
+          echo "If it is one of your own skills (~/.agent-capsule/skills), rename it." >&2
           exit 1
         fi
         ln -sfn "$source" "$skill"
