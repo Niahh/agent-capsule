@@ -25,4 +25,4 @@ with shellcheck and hadolint, and `nix flake check` runs every check above.
 ## Documentation
 
 Keep the short `--help` summary aligned with the option parser. Document detailed
-behavior in the README and update it with every user-visible change.
+behavior in the README or the `docs/` files, and update them with every user-visible change.
