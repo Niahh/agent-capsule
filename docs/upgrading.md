@@ -2,6 +2,24 @@
 
 ## Upgrading from 0.3
 
+0.4 splits what the image holds from what a run turns on: the CLIs you list in
+`AGENT_CAPSULE_TOOLS` are built in, and `--with` only switches integrations, so it never
+rebuilds the image. A typical profile goes from
+
+```sh
+export AGENT_CAPSULE_WITH=superpowers,mcpvault,worklog,github,kubernetes
+export AGENT_CAPSULE_MOUNT_VAULT=1
+export AGENT_CAPSULE_VAULT="$HOME/Notes"
+```
+
+to
+
+```sh
+export AGENT_CAPSULE_TOOLS=gh,kubernetes
+export AGENT_CAPSULE_WITH=superpowers,vault,worklog,github
+export AGENT_CAPSULE_VAULT="$HOME/Notes"
+```
+
 - `kubernetes` and `talos` are tools now, not integrations. Move them from
   `AGENT_CAPSULE_WITH` to `AGENT_CAPSULE_TOOLS`; in `--with` they fail and say so.
 - `github` and `gitlab` need their CLI in the image: add `gh` or `glab` to
@@ -14,6 +32,10 @@
   run, and now add to the list instead of replacing it.
 - anydoc works with every agent: its skill is linked like explain-diff's instead of
   being loaded as a Claude plugin. `AGENT_CAPSULE_SKILLS_VERSION` is no longer read.
+- `--with` errors say "integration" instead of "extra tool": `Unknown integration: NAME`.
+- New, nothing to change: your own skills and Claude plugins under `~/.agent-capsule/`
+  ([Integrations](integrations.md#your-own-skills-and-plugins)), and `AGENT_CAPSULE_GH_USER`
+  for [profiles](profiles.md).
 
 ## Upgrading from 0.2
 

@@ -130,7 +130,7 @@ Integrations are turned on per run with `--with`, or by default with
 - `--shell`: start Bash instead of the agent.
 - `--offline`: disable container networking.
 - `--keep-id`: use the host UID and GID inside the container.
-- `--with TOOL[,TOOL]`: activate integrations; `list` prints them and `none` clears
+- `--with NAME[,NAME]`: turn integrations on for this run; `list` prints them and `none` clears
   the selection.
 - `-m, --mount SRC[:DEST][:ro]`: add a file or directory bind mount; repeat as needed.
 - `--ca`: add `ca` to this run's integrations.
