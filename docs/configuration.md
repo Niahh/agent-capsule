@@ -3,9 +3,10 @@
 ## Persistent defaults
 
 Most settings are `AGENT_CAPSULE_*` environment variables. To stop retyping the
-integrations you always want, export them from `~/.bashrc` or `~/.zshrc`:
+tools and integrations you always want, export them from `~/.bashrc` or `~/.zshrc`:
 
 ```sh
+export AGENT_CAPSULE_TOOLS=gh,kubernetes
 export AGENT_CAPSULE_WITH=superpowers,mcpvault
 export AGENT_CAPSULE_MOUNT_VAULT=1
 export AGENT_CAPSULE_VAULT="$HOME/Documents/Obsidian/MyVault"
@@ -25,7 +26,10 @@ Selection and image lifecycle:
 
 - `AGENT_CAPSULE_AGENT=claude`: default agent (`claude`, `codex`, or `opencode`).
 - `AGENT_CAPSULE_WITH=`: comma-separated default integrations.
-- `AGENT_CAPSULE_IMAGE=agent-capsule-dev`: image name or full tagged reference.
+- `AGENT_CAPSULE_TOOLS=`: comma-separated tools built into the image: `gh`, `glab`,
+  `kubernetes`, `talos`. A change rebuilds the image once.
+- `AGENT_CAPSULE_IMAGE=agent-capsule-dev`: image name, tagged with the agent's name; a
+  full tagged reference is one image that every agent shares.
 - `AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=7`: days between full refreshes; `0` disables
   refreshes based on age.
 - `AGENT_CAPSULE_PRUNE=1`: prune superseded capsule images after a build.

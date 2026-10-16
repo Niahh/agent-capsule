@@ -30,14 +30,15 @@
 #   --version              print the launcher version
 #   -h, --help             show this help
 #
-# Integrations:
-#   superpowers, explain-diff, mcpvault, anydoc, worklog, kubernetes, talos, github,
-#   gitlab
+# Integrations, turned on per run with --with or AGENT_CAPSULE_WITH:
+#   superpowers, explain-diff, mcpvault, anydoc, worklog, github, gitlab
 #   mcpvault requires --vault, and worklog requires mcpvault.
 #   anydoc and worklog are available only with claude.
-#   kubernetes installs kubectl and helm. talos installs talosctl.
-#   github installs gh and lends it the host's gh login.
-#   gitlab installs glab and lends it the host's glab login for AGENT_CAPSULE_GITLAB_HOST.
+#   github lends gh the host's gh login, and needs the gh tool.
+#   gitlab lends glab the host's glab login for AGENT_CAPSULE_GITLAB_HOST, and needs the glab tool.
+#
+# Tools, built into the image from AGENT_CAPSULE_TOOLS:
+#   gh, glab, kubernetes (kubectl and helm), talos (talosctl)
 #
 # Documentation: https://github.com/Niahh/agent-capsule
 #
@@ -148,7 +149,11 @@ selected_version() {
 
 # Bundled integrations that --with can activate (none by default). The order is
 # canonical so status output does not depend on how the user spelled the list.
-KNOWN_EXTRAS=(anydoc explain-diff github gitlab kubernetes mcpvault superpowers talos worklog)
+KNOWN_EXTRAS=(anydoc explain-diff github gitlab mcpvault superpowers worklog)
+
+# CLIs built into the image, chosen once per user rather than per run: a change to
+# the list rebuilds the image, and --with never does.
+KNOWN_TOOLS=(gh glab kubernetes talos)
 
 BUILD_DIR="$STATE_DIR/build"
 AUTH_ROOT_DIR="$STATE_DIR/auth-home"
@@ -264,6 +269,16 @@ require_cmd() {
     echo "$1 is not installed or not on PATH." >&2
     exit 1
   }
+}
+
+# EXTRAS is the canonical comma list of the integrations this run selected.
+has_extra() { # name
+  [[ ",$EXTRAS," == *",$1,"* ]]
+}
+
+# TOOLS is the canonical comma list of the tools built into the image.
+has_tool() { # name
+  [[ ",$TOOLS," == *",$1,"* ]]
 }
 
 ensure_minimal_gitconfig() {
@@ -1031,6 +1046,12 @@ for req in "${REQUESTED_EXTRAS[@]}"; do
       for extra in "${KNOWN_EXTRAS[@]}"; do
         [[ "$req" == "$extra" ]] && known=1 && break
       done
+      for tool in "${KNOWN_TOOLS[@]}"; do
+        if [[ "$req" == "$tool" ]]; then
+          echo "$req is a tool: add it to AGENT_CAPSULE_TOOLS, not --with." >&2
+          exit 1
+        fi
+      done
       [[ "$known" == "1" ]] || {
         echo "Unknown extra tool: $req (known: ${KNOWN_EXTRAS[*]})" >&2
         exit 1
@@ -1076,18 +1097,48 @@ for extra in "${KNOWN_EXTRAS[@]}"; do
   done
 done
 
+# The tool list is read like --with: case folded, comma separated, canonical order.
+TOOLS=""
+REQUESTED_TOOLS=()
+read -r -a REQUESTED_TOOLS <<<"$(printf '%s' "${AGENT_CAPSULE_TOOLS:-}" | tr 'A-Z,' 'a-z ')"
+for req in "${REQUESTED_TOOLS[@]}"; do
+  known=0
+  for tool in "${KNOWN_TOOLS[@]}"; do
+    [[ "$req" == "$tool" ]] && known=1 && break
+  done
+  [[ "$known" == "1" ]] || {
+    echo "Unknown tool in AGENT_CAPSULE_TOOLS: $req (known: ${KNOWN_TOOLS[*]})" >&2
+    exit 1
+  }
+done
+for tool in "${KNOWN_TOOLS[@]}"; do
+  for req in "${REQUESTED_TOOLS[@]}"; do
+    [[ "$req" == "$tool" ]] && TOOLS="${TOOLS:+$TOOLS,}$tool" && break
+  done
+done
+
+# A forge integration lends its CLI the host login, so that CLI must be in the image.
+for forge_and_tool in github:gh gitlab:glab; do
+  forge="${forge_and_tool%%:*}"
+  tool="${forge_and_tool#*:}"
+  if has_extra "$forge" && ! has_tool "$tool"; then
+    echo "--with $forge needs $tool in the image: add $tool to AGENT_CAPSULE_TOOLS." >&2
+    exit 1
+  fi
+done
+
 # The host ends up in git config keys and URLs.
-if [[ ",$EXTRAS," == *,gitlab,* && ! "$GITLAB_INSTANCE" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+if has_extra gitlab && [[ ! "$GITLAB_INSTANCE" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
   echo "Invalid AGENT_CAPSULE_GITLAB_HOST: $GITLAB_INSTANCE (a bare hostname, without scheme or port)." >&2
   exit 1
 fi
 
-# One tag for every selection: the io.agent-capsule.bundle label decides whether
-# what it points at matches what this run asked for.
+# One tag per agent, so switching agents rebuilds nothing. The io.agent-capsule.bundle
+# label says whether the image still matches; a tagged AGENT_CAPSULE_IMAGE is shared.
 if [[ "${IMAGE_NAME##*/}" == *:* ]]; then
   IMAGE_REF="$IMAGE_NAME"
 else
-  IMAGE_REF="$IMAGE_NAME:latest"
+  IMAGE_REF="$IMAGE_NAME:$AGENT"
 fi
 
 # Resolve physically (-P): a repo reached via a symlink and via its real path
@@ -1227,7 +1278,7 @@ CONTAINER_SUFFIX="${SESSION_NAME:0:48}"
 MCPVAULT_ENABLED=0
 
 # --no-vault keeps a configured integration overridable for one run.
-if [[ ",$EXTRAS," == *,mcpvault,* ]]; then
+if has_extra mcpvault; then
   if [[ "$NO_VAULT" == "1" ]]; then
     echo ">> MCP     : mcpvault disabled for this run (--no-vault)" >&2
   elif [[ "$MOUNT_VAULT" != "1" ]]; then
@@ -1246,7 +1297,7 @@ fi
 WORKLOG_ENABLED=0
 WORKLOG_PROCEDURE_SRC=""
 
-if [[ ",$EXTRAS," == *,worklog,* ]]; then
+if has_extra worklog; then
   if [[ "$NO_VAULT" == "1" ]]; then
     echo ">> Worklog : disabled for this run (--no-vault)" >&2
   elif [[ "$MCPVAULT_ENABLED" != "1" ]]; then
@@ -1369,18 +1420,16 @@ WORKLOG_PLUGIN_SRC="$(dirname "$DOCKERFILE_SRC")/plugins/worklog"
   echo "Container plugin not found: $WORKLOG_PLUGIN_SRC" >&2
   exit 1
 }
-WORKLOG_HASH=""
-if [[ ",$EXTRAS," == *,worklog,* ]]; then
-  WORKLOG_HASH="$(sha256_dir "$WORKLOG_PLUGIN_SRC")"
-fi
+# The image copies the plugin whether or not this run selects it.
+WORKLOG_HASH="$(sha256_dir "$WORKLOG_PLUGIN_SRC")"
 
 # ----------------------------------------------------------------------------
 # Build image if needed
 # ----------------------------------------------------------------------------
-# The image contains only the selected agent and integrations, so both belong
-# in the hash: changing either has to invalidate the image.
+# The image holds the selected agent and the user's tools, so both belong in the
+# hash. --with is not in it: it never changes what is installed.
 HASH="$(printf '%s\n' \
-  "$NODE_TAG" "$GO_TAG" "$AGENT" "$EXTRAS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
+  "$NODE_TAG" "$GO_TAG" "$AGENT" "$TOOLS" "$CLAUDE_CODE_VERSION" "$CODEX_VERSION" \
   "$OPENCODE_VERSION" "$ANYDOC_VERSION" "$MCPVAULT_VERSION" "$SKILLS_VERSION" \
   "$SUPERPOWERS_VERSION" "$GOLANGCI_LINT_VERSION" "$KUBECTL_VERSION" "$HELM_VERSION" \
   "$TALOSCTL_VERSION" "$GH_VERSION" "$GLAB_VERSION" "$DOCKERFILE_HASH" "$ENTRYPOINT_HASH" \
@@ -1398,38 +1447,32 @@ chmod 700 "$LOCK_ROOT"
 acquire_build_lock "$LOCK_ROOT/image.lock"
 
 # The refresh label records the last pull plus no-cache build. Image creation
-# time cannot represent that: cached selection builds create a new image without
+# time cannot represent that: a cached build after a tool list change makes a new image without
 # refreshing upstream tools, and Podman exposes .Created as an ISO 8601 string.
 image_labels='{{ index .Labels "io.agent-capsule.bundle" }} {{ index .Labels "io.agent-capsule.refreshed-at" }}'
-image_labels+=' {{ index .Labels "io.agent-capsule.selection" }}'
+image_labels+=' {{ index .Labels "io.agent-capsule.agent" }}'
 IMAGE_STATE="$(podman image inspect --format "$image_labels" "$IMAGE_REF" 2>/dev/null || true)"
-read -r IMAGE_BUNDLE_HASH IMAGE_REFRESHED_AT IMAGE_SELECTION _ <<<"$IMAGE_STATE" || true
-
-NEEDS_BUILD=0
-REFRESH_REASON=""
-if [[ "$FORCE_BUILD" == "1" ]]; then
-  NEEDS_BUILD=1
-  REFRESH_REASON=forced
-elif [[ "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
-  NEEDS_BUILD=1
-fi
+read -r IMAGE_BUNDLE_HASH IMAGE_REFRESHED_AT IMAGE_AGENT _ <<<"$IMAGE_STATE" || true
 
 # Missing or legacy metadata gets one full refresh even when age checks are
 # disabled. The resulting label makes later AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=0
 # launches stable.
-if [[ ! "$IMAGE_REFRESHED_AT" =~ ^[0-9]+$ ]]; then
+REFRESH_REASON=""
+if [[ "$FORCE_BUILD" == "1" ]]; then
+  REFRESH_REASON=forced
+elif [[ ! "$IMAGE_REFRESHED_AT" =~ ^[0-9]+$ ]]; then
   REFRESH_REASON=metadata
 elif refresh_is_stale "$IMAGE_REFRESHED_AT"; then
   REFRESH_REASON=stale
 fi
 
-if [[ -n "$REFRESH_REASON" ]]; then
+NEEDS_BUILD=0
+if [[ -n "$REFRESH_REASON" || "$IMAGE_BUNDLE_HASH" != "$HASH" ]]; then
   NEEDS_BUILD=1
 fi
 
-# A login only needs the agent CLI, and rebuilding without the integrations would make
-# the next normal run rebuild them. Any image of this agent will do; refreshes wait.
-if [[ "$AUTH_LOGIN" == "1" && "$FORCE_BUILD" != "1" && "$IMAGE_SELECTION" == "$AGENT":* ]]; then
+# A login only needs the agent CLI, so any image of this agent will do; refreshes wait.
+if [[ "$AUTH_LOGIN" == "1" && "$FORCE_BUILD" != "1" && "$IMAGE_AGENT" == "$AGENT" ]]; then
   NEEDS_BUILD=0
 fi
 
@@ -1447,16 +1490,16 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
   cp -R "$WORKLOG_PLUGIN_SRC" "$BUILD_CONTEXT_DIR/plugins/worklog"
   chmod -R u+w,a+rX "$BUILD_CONTEXT_DIR/plugins"
   BUILD_SELECTION_ARGS=(--build-arg "AGENT=$AGENT")
-  for extra in "${KNOWN_EXTRAS[@]}"; do
-    build_arg="WITH_$(printf '%s' "$extra" | tr 'a-z-' 'A-Z_')"
-    if [[ ",$EXTRAS," == *",$extra,"* ]]; then
+  for tool in "${KNOWN_TOOLS[@]}"; do
+    build_arg="TOOL_$(printf '%s' "$tool" | tr 'a-z-' 'A-Z_')"
+    if has_tool "$tool"; then
       BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=1")
     else
       BUILD_SELECTION_ARGS+=(--build-arg "$build_arg=0")
     fi
   done
 
-  build_note="$AGENT, ${EXTRAS:-no integrations}"
+  build_note="$AGENT, tools: ${TOOLS:-none}"
   BUILD_REFRESH_ARGS=()
   REFRESHED_AT="$IMAGE_REFRESHED_AT"
   # An unpinned install produces the same RUN string every time, so a refresh
@@ -1488,12 +1531,13 @@ if [[ "$NEEDS_BUILD" == "1" ]]; then
     "${BUILD_SELECTION_ARGS[@]}" \
     --label "io.agent-capsule.bundle=$HASH" \
     --label "io.agent-capsule.refreshed-at=$REFRESHED_AT" \
-    --label "io.agent-capsule.selection=$AGENT:${EXTRAS:-none}" \
+    --label "io.agent-capsule.agent=$AGENT" \
+    --label "io.agent-capsule.tools=${TOOLS:-none}" \
     -t "$IMAGE_REF" "$BUILD_CONTEXT_DIR"
   prune_superseded_images
 fi
 # Run this image, not the tag: once the lock is released, a launch with another
-# selection can move the tag before podman run starts.
+# tool list can move the tag before podman run starts.
 IMAGE_ID="$(podman image inspect --format '{{.Id}}' "$IMAGE_REF")"
 release_build_lock
 
@@ -1517,10 +1561,10 @@ fi
 
 INTEGRATION_ARGS=()
 if [[ "$AGENT" == "claude" ]]; then
-  if [[ ",$EXTRAS," == *,superpowers,* ]]; then
+  if has_extra superpowers; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/superpowers/source)
   fi
-  if [[ ",$EXTRAS," == *,anydoc,* ]]; then
+  if has_extra anydoc; then
     INTEGRATION_ARGS+=(--plugin-dir /opt/anydoc/plugin)
   fi
   if [[ "$WORKLOG_ENABLED" == "1" ]]; then
@@ -1534,7 +1578,7 @@ fi
 OPENCODE_RUNTIME_CONFIG=""
 if [[ "$AGENT" == "opencode" ]]; then
   OPENCODE_CONFIG_ITEMS=()
-  if [[ ",$EXTRAS," == *,superpowers,* ]]; then
+  if has_extra superpowers; then
     OPENCODE_CONFIG_ITEMS+=('"plugin":["/opt/superpowers/source"]')
   fi
   if [[ "$MCPVAULT_ENABLED" == "1" ]]; then
@@ -1778,7 +1822,7 @@ forge_over_https() { # host helper
 # on disk.
 GH_TOKEN_DIR=""
 
-if [[ ",$EXTRAS," == *,github,* ]]; then
+if has_extra github; then
   gh_hosts_file="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
   gh_token=""
   if ! command -v gh >/dev/null 2>&1; then
@@ -1808,7 +1852,7 @@ fi
 # capsule would rotate the host's refresh token and log the host out.
 GLAB_DIR=""
 
-if [[ ",$EXTRAS," == *,gitlab,* ]]; then
+if has_extra gitlab; then
   glab_config_file="${GLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/glab-cli}/config.yml"
   glab_login="glab auth login --hostname $GITLAB_INSTANCE"
   glab_token=""
@@ -1946,6 +1990,7 @@ if [[ -n "$EXTRAS" ]]; then
 else
   echo ">> Extras  : none"
 fi
+echo ">> Tools   : ${TOOLS:-none}"
 echo ">> Image   : $IMAGE_REF"
 
 if [[ "$SHARED_RULES_ENABLED" == "1" ]]; then

@@ -40,7 +40,7 @@ printf 'CALL=%s\n' "${1:-}" >> "$PODMAN_LOG"
 previous=""
 bundle_hash=""
 refreshed_at=""
-selection=""
+agent=""
 image_ref=""
 for arg in "$@"; do
   printf 'ARG=%s\n' "$arg" >> "$PODMAN_LOG"
@@ -50,8 +50,8 @@ for arg in "$@"; do
   if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.refreshed-at=* ]]; then
     refreshed_at="${arg#*=}"
   fi
-  if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.selection=* ]]; then
-    selection="${arg#*=}"
+  if [[ "$previous" == "--label" && "$arg" == io.agent-capsule.agent=* ]]; then
+    agent="${arg#*=}"
   fi
   if [[ "$previous" == "-t" ]]; then
     image_ref="$arg"
@@ -68,8 +68,8 @@ if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
     exit 0
   fi
   awk -F '\t' -v image="$image_ref" '
-    $1 == image { hash = $2; refreshed = $3; selection = $4 }
-    END { if (hash != "") print hash " " refreshed " " selection }
+    $1 == image { hash = $2; refreshed = $3; agent = $4 }
+    END { if (hash != "") print hash " " refreshed " " agent }
   ' "$PODMAN_IMAGE_STATE"
   exit 0
 fi
@@ -96,7 +96,7 @@ fi
 if [[ "${1:-}" == "build" && -n "$image_ref" && -n "$bundle_hash" ]]; then
   sleep "${PODMAN_BUILD_DELAY:-0}"
   printf '%s\t%s\t%s\t%s\n' "$image_ref" "$bundle_hash" \
-    "${PODMAN_BUILD_EPOCH:-$refreshed_at}" "$selection" >> "$PODMAN_IMAGE_STATE"
+    "${PODMAN_BUILD_EPOCH:-$refreshed_at}" "$agent" >> "$PODMAN_IMAGE_STATE"
 fi
 
 exit 0
@@ -406,15 +406,13 @@ assert_contains "$OUTPUT" '--versions'
 assert_contains "$OUTPUT" '--shared-rules PATH'
 assert_contains "$OUTPUT" '--prune-sessions[=DAYS]'
 assert_contains "$OUTPUT" 'explain-diff'
+assert_contains "$OUTPUT" 'worklog'
+assert_contains "$OUTPUT" 'AGENT_CAPSULE_TOOLS'
 assert_contains "$OUTPUT" 'kubernetes'
 assert_contains "$OUTPUT" 'talos'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --version
 assert_contains "$OUTPUT" "agent-capsule $LAUNCHER_VERSION"
-
-new_case help-lists-worklog
-run_capsule --help
-assert_contains "$OUTPUT" 'worklog'
 
 # A config file left over from 0.2 is inert: never read, never an error.
 new_case leftover-0.2-config
@@ -485,14 +483,28 @@ assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
 assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
 assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.refreshed-at='
 
-# Selection and freshness are independent. A stale image must refresh even when
-# the requested agent also changes its bundle hash.
-new_case stale-image-new-agent
-PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-selection "$ROOT_DIR"
-run_capsule --agent codex --shell --session stale-selection-codex "$ROOT_DIR"
+# The tool list and freshness are independent. A stale image must refresh even when
+# a new tool list also changes its bundle hash.
+new_case stale-image-new-tools
+PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session stale-tools "$ROOT_DIR"
+AGENT_CAPSULE_TOOLS=gh run_capsule --shell --session stale-tools "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_contains "$PODMAN_LOG" 'ARG=--pull=always'
 assert_contains "$PODMAN_LOG" 'ARG=--no-cache'
+
+# Each agent has its own tag, so switching back and forth rebuilds nothing.
+new_case image-per-agent
+run_capsule --agent claude --shell --session tag-claude "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" -t agent-capsule-dev:claude
+run_capsule --agent codex --shell --session tag-codex "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" -t agent-capsule-dev:codex
+run_capsule --agent claude --shell --session tag-claude "$ROOT_DIR"
+assert_not_contains "$PODMAN_LOG" 'CALL=build'
+# A tagged AGENT_CAPSULE_IMAGE is one image that every agent shares.
+for agent in claude codex; do
+  AGENT_CAPSULE_IMAGE=foo:bar run_capsule --agent "$agent" --shell --session "tag-custom-$agent" "$ROOT_DIR"
+  assert_arg_after "$PODMAN_LOG" -t foo:bar
+done
 
 new_case image-age-disabled
 PODMAN_BUILD_EPOCH=1000000000 run_capsule --shell --session age-disabled "$ROOT_DIR"
@@ -606,87 +618,117 @@ assert_not_contains "$PODMAN_LOG" 'OPENCODE_CONFIG_CONTENT='
 assert_not_contains "$PODMAN_LOG" '/opt/superpowers/source'
 assert_contains "$OUTPUT" '>> Extras  : none'
 
-# --auth-login only needs the agent CLI, so any image of that agent will do: rebuilding
-# without the integrations would only make the next normal run rebuild them.
+# --auth-login only needs the agent CLI, so any image of that agent will do, even one
+# built with other tools or due a refresh: a rebuild would only cost the next run one.
 new_case auth-login-reuses-image
-run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
+PODMAN_BUILD_EPOCH=1000000000 AGENT_CAPSULE_TOOLS=gh run_capsule --shell --session auth-reuse "$ROOT_DIR"
 run_capsule --auth-login --shell
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" -e 'AGENT_CAPSULE_WITH='
-run_capsule --with superpowers --shell --session auth-reuse "$ROOT_DIR"
-assert_not_contains "$PODMAN_LOG" 'CALL=build'
+# Another agent's image will not do.
 run_capsule --agent codex --auth-login --shell
 assert_contains "$PODMAN_LOG" 'CALL=build'
 
-# One tag, rebuilt whenever the selection changes: the image carries only the
-# agent and integrations this run asked for.
-new_case image-selection
-# A day old, so a rebuild that reset the refresh time would show.
-PODMAN_BUILD_EPOCH="$(($(date +%s) - 86400))" \
-  run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
+# The image holds the agent and the user's tools. --with only changes the run,
+# so a run with other integrations reuses the image.
+new_case with-never-rebuilds
+run_capsule --shell --with superpowers --session with-a "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
-assert_arg_after "$PODMAN_LOG" --build-arg 'AGENT=claude'
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
-
-run_capsule --agent claude --shell --session selection-claude "$ROOT_DIR"
+run_capsule --shell --with explain-diff,anydoc --session with-b "$ROOT_DIR"
 assert_not_contains "$PODMAN_LOG" 'CALL=build'
-selection_refreshed_at="$(awk -F '\t' 'END { print $3 }' "$PODMAN_IMAGE_STATE")"
-[[ -n "$selection_refreshed_at" ]] || fail "the stub recorded no refresh time"
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WITH=anydoc,explain-diff'
+assert_not_contains "$PODMAN_LOG" 'WITH_'
+
+# Tools reach the build as TOOL_* args, read like --with: case folded, deduplicated,
+# in a fixed order. Without the variable, none is built in.
+new_case tools-build-args
+run_capsule --shell --session tools-none "$ROOT_DIR"
+for tool_arg in TOOL_GH=0 TOOL_GLAB=0 TOOL_KUBERNETES=0 TOOL_TALOS=0; do
+  assert_arg_after "$PODMAN_LOG" --build-arg "$tool_arg"
+done
+assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.tools=none'
+assert_contains "$OUTPUT" '>> Tools   : none'
+AGENT_CAPSULE_TOOLS=Talos,gh,talos run_capsule --shell --session tools-some "$ROOT_DIR"
+for tool_arg in TOOL_GH=1 TOOL_GLAB=0 TOOL_KUBERNETES=0 TOOL_TALOS=1; do
+  assert_arg_after "$PODMAN_LOG" --build-arg "$tool_arg"
+done
+assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.tools=gh,talos'
+assert_contains "$OUTPUT" '>> Tools   : gh,talos'
+
+# A tool list change rebuilds from cache, so the last refresh survives it.
+new_case tools-change-rebuilds
+# A day old, so a rebuild that reset the refresh time would show.
+PODMAN_BUILD_EPOCH="$(($(date +%s) - 86400))" run_capsule --shell --session tools-change "$ROOT_DIR"
+refreshed_at="$(awk -F '\t' 'END { print $3 }' "$PODMAN_IMAGE_STATE")"
+[[ -n "$refreshed_at" ]] || fail "the stub recorded no refresh time"
+AGENT_CAPSULE_TOOLS=kubernetes run_capsule --shell --session tools-change "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_KUBERNETES=1'
+assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
+assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.refreshed-at=$refreshed_at"
 
 # Switching the agent changes what is installed, so it must rebuild.
-run_capsule --agent codex --shell --with superpowers \
-  --session selection-codex "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'ARG=agent-capsule-dev:latest'
-assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_AGENT=codex'
-assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_WITH=superpowers'
+new_case agent-change-rebuilds
+run_capsule --agent claude --shell --session agent-claude "$ROOT_DIR"
+run_capsule --agent codex --shell --session agent-codex "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'AGENT=codex'
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=1'
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_ANYDOC=0'
-assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.selection=codex:superpowers'
-assert_not_contains "$PODMAN_LOG" 'ARG=--no-cache'
+assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.agent=codex'
+assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_AGENT=codex'
 
-# A recent refresh survives a cached selection rebuild instead of being reset.
-assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.refreshed-at=$selection_refreshed_at"
-
-# Changing only the integrations rebuilds too.
-run_capsule --agent codex --shell --with none --session selection-codex "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_SUPERPOWERS=0'
-assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.selection=codex:none'
-
-AGENT_CAPSULE_IMAGE=preexisting:image \
-  run_capsule --agent codex --shell --session custom-image "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
-assert_contains "$PODMAN_LOG" 'ARG=preexisting:image'
-
-AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 \
-  run_capsule --agent codex --shell --session universal-version-change "$ROOT_DIR"
+# A pin of any agent's CLI is part of the hash, whichever agent runs.
+new_case version-change-rebuilds
+run_capsule --agent codex --shell --session version-change "$ROOT_DIR"
+AGENT_CAPSULE_CLAUDE_CODE_VERSION=9.8.7 run_capsule --agent codex --shell --session version-change "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'CALL=build'
 assert_arg_after "$PODMAN_LOG" --build-arg 'CLAUDE_CODE_VERSION=9.8.7'
 
-# The cluster CLIs are opt-in and work with every agent.
-new_case cluster-clis
-run_capsule --shell --session cluster-default "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=0'
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=0'
-for agent in claude codex opencode; do
-  run_capsule --agent "$agent" --with talos,kubernetes --shell \
-    --session "cluster-$agent" "$ROOT_DIR"
-  assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=1'
-  assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=1'
-  assert_contains "$PODMAN_LOG" "ARG=io.agent-capsule.selection=$agent:kubernetes,talos"
+new_case custom-image
+AGENT_CAPSULE_IMAGE=preexisting:image run_capsule --agent codex --shell --session custom-image "$ROOT_DIR"
+assert_contains "$PODMAN_LOG" 'CALL=build'
+assert_contains "$PODMAN_LOG" 'ARG=preexisting:image'
+
+# kubernetes and talos are tools now, and every tool name in --with says where it goes.
+new_case tool-name-in-with
+for tool in kubernetes talos gh glab; do
+  run_capsule_fails --with "$tool" --shell --session tool-in-with "$ROOT_DIR"
+  assert_contains "$OUTPUT" "$tool is a tool: add it to AGENT_CAPSULE_TOOLS, not --with."
+  assert_not_contains "$PODMAN_LOG" 'CALL='
 done
-run_capsule --with talos --shell --session cluster-talos-only "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_KUBERNETES=0'
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_TALOS=1'
+
+new_case unknown-tool
+AGENT_CAPSULE_TOOLS=gh,terraform run_capsule_fails --shell --session unknown-tool "$ROOT_DIR"
+assert_contains "$OUTPUT" 'Unknown tool in AGENT_CAPSULE_TOOLS: terraform (known: gh glab kubernetes talos)'
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# A forge integration lends its CLI the host login, so the CLI must be a tool, from
+# the command line or from the environment.
+new_case forge-needs-tool
+for forge_and_tool in github:gh gitlab:glab; do
+  forge="${forge_and_tool%%:*}"
+  tool="${forge_and_tool#*:}"
+  run_capsule_fails --with "$forge" --shell --session forge-needs-tool "$ROOT_DIR"
+  assert_contains "$OUTPUT" "--with $forge needs $tool in the image: add $tool to AGENT_CAPSULE_TOOLS."
+  AGENT_CAPSULE_WITH="$forge" run_capsule_fails --shell --session forge-needs-tool "$ROOT_DIR"
+  assert_contains "$OUTPUT" "--with $forge needs $tool in the image"
+  assert_not_contains "$PODMAN_LOG" 'CALL='
+done
+
+# The cluster CLIs work with every agent.
+new_case cluster-tools
+for agent in claude codex opencode; do
+  AGENT_CAPSULE_TOOLS=talos,kubernetes run_capsule --agent "$agent" --shell --session "cluster-$agent" "$ROOT_DIR"
+  assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_KUBERNETES=1'
+  assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_TALOS=1'
+  assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.tools=kubernetes,talos'
+done
 
 # Without github the host gh is never asked, and the capsule gets no token, no
 # token mount and no git rewrite.
 new_case github-off
 PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_offtoken \
   run_capsule --shell --session gh-off "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITHUB=0'
+assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GH=0'
 [[ ! -s "$GH_LOG" ]] || fail "host gh was called without --with github"
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
 assert_not_contains "$PODMAN_LOG" 'GIT_CONFIG_'
@@ -696,8 +738,8 @@ assert_not_contains "$PODMAN_LOG" 'GH_TOKEN'
 # podman command line: podman keeps that in the container config on disk.
 new_case github-token-handoff
 PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_secret123 \
-  run_capsule --with github --shell --session gh-on "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITHUB=1'
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-on "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GH=1'
 assert_not_contains "$PODMAN_LOG" 'gho_secret123'
 assert_not_contains "$OUTPUT" 'plain text'
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_GH_TOKEN_FILE=/run/agent-capsule/gh/token'
@@ -723,7 +765,7 @@ credential="$(printf 'protocol=https\nhost=github.com\npath=o/r\n\n' |
 # A host without a gh login still starts the capsule, and says how to log in.
 new_case github-logged-out
 PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN='' \
-  run_capsule --with github --shell --session gh-logged-out "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-logged-out "$ROOT_DIR"
 assert_contains "$OUTPUT" 'gh auth login'
 assert_contains "$PODMAN_LOG" 'CALL=run'
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/gh'
@@ -733,7 +775,7 @@ new_case github-plain-text-token
 mkdir -p "$CASE_DIR/gh-config"
 printf 'github.com:\n    oauth_token: gho_plain\n' > "$CASE_DIR/gh-config/hosts.yml"
 PATH="$GH_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_plain GH_CONFIG_DIR="$CASE_DIR/gh-config" \
-  run_capsule --with github --shell --session gh-plain "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=gh run_capsule --with github --shell --session gh-plain "$ROOT_DIR"
 assert_contains "$OUTPUT" 'plain text'
 assert_not_contains "$OUTPUT" 'gho_plain'
 
@@ -841,7 +883,7 @@ env -u SSL_CERT_FILE -u GIT_SSL_CAINFO -u NODE_EXTRA_CA_CERTS \
 new_case gitlab-off
 PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-offtoken \
   run_capsule --shell --session glab-off "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITLAB=0'
+assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GLAB=0'
 [[ ! -s "$GLAB_LOG" ]] || fail "host glab was called without --with gitlab"
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
 assert_not_contains "$PODMAN_LOG" 'GITLAB_'
@@ -855,8 +897,8 @@ mkdir -p "$CASE_DIR/glab-config"
 printf 'hosts:\n    gitlab.com:\n        token: ""\n        use_keyring: "true"\n' \
   > "$CASE_DIR/glab-config/config.yml"
 PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-secret123 GLAB_CONFIG_DIR="$CASE_DIR/glab-config" \
-  run_capsule --with gitlab --shell --session glab-on "$ROOT_DIR"
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_GITLAB=1'
+  AGENT_CAPSULE_TOOLS=glab run_capsule --with gitlab --shell --session glab-on "$ROOT_DIR"
+assert_arg_after "$PODMAN_LOG" --build-arg 'TOOL_GLAB=1'
 assert_not_contains "$PODMAN_LOG" 'glpat-secret123'
 assert_not_contains "$OUTPUT" 'plain text'
 assert_contains "$PODMAN_LOG" 'ARG=GLAB_CONFIG_DIR=/run/agent-capsule/glab'
@@ -875,7 +917,7 @@ expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token:
 new_case gitlab-self-managed
 PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_HOST=gitlab.corp.example FAKE_GLAB_TOKEN=glpat-corp \
   AGENT_CAPSULE_GITLAB_HOST=gitlab.corp.example \
-  run_capsule --with gitlab --shell --session glab-corp "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=glab run_capsule --with gitlab --shell --session glab-corp "$ROOT_DIR"
 assert_contains "$PODMAN_LOG" 'ARG=GITLAB_HOST=gitlab.corp.example'
 glab_dir="$(mount_source /run/agent-capsule/glab)"
 expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.corp.example:' "        token: 'glpat-corp'")"
@@ -895,7 +937,7 @@ credential="$(printf 'protocol=https\nhost=gitlab.corp.example\npath=g/r\n\n' |
 # With both forges, each keeps its own rewrite and credential helper.
 new_case both-forges
 PATH="$GH_FAKE_BIN:$GLAB_FAKE_BIN:$PATH" FAKE_GH_TOKEN=gho_both FAKE_GLAB_TOKEN=glpat-both \
-  run_capsule --with github,gitlab --shell --session forges "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=gh,glab run_capsule --with github,gitlab --shell --session forges "$ROOT_DIR"
 mapfile -t git_env < <(sed -n 's/^ARG=\(GIT_CONFIG_.*\)$/\1/p' "$PODMAN_LOG")
 for host_and_token in github.com=gho_both gitlab.com=glpat-both; do
   host="${host_and_token%%=*}"
@@ -912,7 +954,7 @@ done
 # A host without a glab login for the instance still starts the capsule, and says how to log in.
 new_case gitlab-logged-out
 PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN='' \
-  run_capsule --with gitlab --shell --session glab-logged-out "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=glab run_capsule --with gitlab --shell --session glab-logged-out "$ROOT_DIR"
 assert_contains "$OUTPUT" 'glab auth login --hostname gitlab.com'
 assert_contains "$PODMAN_LOG" 'CALL=run'
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
@@ -921,7 +963,7 @@ assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
 # the host out, so only a personal access token crosses over.
 new_case gitlab-oauth-refused
 PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=oauth-access-token FAKE_GLAB_OAUTH=true \
-  run_capsule --with gitlab --shell --session glab-oauth "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=glab run_capsule --with gitlab --shell --session glab-oauth "$ROOT_DIR"
 assert_contains "$OUTPUT" 'personal access token'
 assert_contains "$PODMAN_LOG" 'CALL=run'
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
@@ -931,7 +973,7 @@ new_case gitlab-plain-text-token
 mkdir -p "$CASE_DIR/glab-config"
 printf 'hosts:\n    gitlab.com:\n        token: glpat-plain\n' > "$CASE_DIR/glab-config/config.yml"
 PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-plain GLAB_CONFIG_DIR="$CASE_DIR/glab-config" \
-  run_capsule --with gitlab --shell --session glab-plain "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=glab run_capsule --with gitlab --shell --session glab-plain "$ROOT_DIR"
 assert_contains "$OUTPUT" 'plain text'
 assert_not_contains "$OUTPUT" 'glpat-plain'
 
@@ -940,7 +982,7 @@ new_case gitlab-bad-host
 for bad_host in https://gitlab.corp.example gitlab.corp.example:8443 gitlab.corp.example/sub \
   -gitlab.corp.example; do
   PATH="$GLAB_FAKE_BIN:$PATH" AGENT_CAPSULE_GITLAB_HOST="$bad_host" \
-    run_capsule_fails --with gitlab --shell --session glab-bad-host "$ROOT_DIR"
+    AGENT_CAPSULE_TOOLS=glab run_capsule_fails --with gitlab --shell --session glab-bad-host "$ROOT_DIR"
   assert_contains "$OUTPUT" "$bad_host"
   assert_not_contains "$PODMAN_LOG" 'CALL='
 done
@@ -954,16 +996,18 @@ assert_contains "$PODMAN_LOG" 'CALL=run'
 new_case gitlab-host-env-token
 for env_token in GITLAB_TOKEN GITLAB_ACCESS_TOKEN OAUTH_TOKEN; do
   (export "$env_token=glpat-from-env" &&
-    PATH="$GLAB_FAKE_BIN:$PATH" run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR")
+    PATH="$GLAB_FAKE_BIN:$PATH" AGENT_CAPSULE_TOOLS=glab \
+      run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR")
   assert_contains "$OUTPUT" 'glab auth login --hostname gitlab.com'
   assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
 done
 GITLAB_TOKEN=glpat-from-env GLAB_IS_OAUTH2=false FAKE_GLAB_OAUTH=true PATH="$GLAB_FAKE_BIN:$PATH" \
-  FAKE_GLAB_TOKEN=oauth-stored run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
+  FAKE_GLAB_TOKEN=oauth-stored AGENT_CAPSULE_TOOLS=glab \
+  run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
 assert_contains "$OUTPUT" 'personal access token'
 assert_not_contains "$PODMAN_LOG" '/run/agent-capsule/glab'
 GITLAB_TOKEN=glpat-from-env PATH="$GLAB_FAKE_BIN:$PATH" FAKE_GLAB_TOKEN=glpat-stored \
-  run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
+  AGENT_CAPSULE_TOOLS=glab run_capsule --with gitlab --shell --session glab-env-token "$ROOT_DIR"
 glab_dir="$(mount_source /run/agent-capsule/glab)"
 expected_glab_config="$(printf '%s\n' 'hosts:' '    gitlab.com:' "        token: 'glpat-stored'")"
 [[ "$(<"$glab_dir/config.yml")" == "$expected_glab_config" ]] ||
@@ -1131,7 +1175,6 @@ mkdir -p "$vault_dir"
 run_capsule --with mcpvault,worklog --vault="$vault_dir" --session worklog-on "$ROOT_DIR"
 assert_arg_after "$PODMAN_LOG" --plugin-dir /opt/worklog/plugin
 assert_contains "$PODMAN_LOG" 'ARG=AGENT_CAPSULE_VAULT_DEST=/vault'
-assert_arg_after "$PODMAN_LOG" --build-arg 'WITH_WORKLOG=1'
 assert_contains "$OUTPUT" '>> Worklog : built-in procedure'
 assert_not_contains "$PODMAN_LOG" '/etc/agent-capsule/log-work.md'
 [[ ! -e "$CAPSULE_HOME/log-work.md" ]] || fail "the default procedure file was created"
@@ -1218,14 +1261,11 @@ copy_build_context
 assert_edit_rebuilds "$CASE_DIR/plugins/worklog/procedure.md" \
   --with mcpvault,worklog --vault="$vault_dir" --shell --session worklog-hash "$ROOT_DIR"
 
-# Unselected, the plugin is inert, so editing it rebuilds nothing.
-AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
-  run_capsule --with none --shell --session worklog-unselected "$ROOT_DIR"
-assert_contains "$PODMAN_LOG" 'CALL=build'
+# Every image copies the plugin, so editing it rebuilds a run without worklog too.
 printf '\n' >> "$CASE_DIR/plugins/worklog/procedure.md"
 AGENT_CAPSULE_DOCKERFILE="$CASE_DIR/Dockerfile" \
   run_capsule --with none --shell --session worklog-unselected "$ROOT_DIR"
-assert_not_contains "$PODMAN_LOG" 'CALL=build'
+assert_contains "$PODMAN_LOG" 'CALL=build'
 
 # Nix store sources are read-only, and a copy of them must still be replaceable.
 new_case build-context-read-only
@@ -1376,7 +1416,7 @@ new_case shasum-fallback
 portable_bin="$CASE_DIR/portable-bin"
 mkdir -p "$portable_bin"
 command -v shasum >/dev/null || fail "this case needs shasum, the fallback it checks"
-for tool in bash awk tr mkdir chmod touch cp cat date dirname basename shasum rm sleep; do
+for tool in bash awk tr mkdir chmod touch cp cat date dirname basename shasum rm sleep find sort; do
   ln -s "$(command -v "$tool")" "$portable_bin/$tool"
 done
 capsule_env
@@ -1484,8 +1524,7 @@ run_capsule --agent list
   fail "--agent list is not one agent per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --with list
-expected_extras="$(printf '%s\n' anydoc explain-diff github gitlab kubernetes mcpvault superpowers talos \
-  worklog)"
+expected_extras="$(printf '%s\n' anydoc explain-diff github gitlab mcpvault superpowers worklog)"
 [[ "$(cat "$OUTPUT")" == "$expected_extras" ]] ||
   fail "--with list is not one integration per line"
 assert_not_contains "$PODMAN_LOG" 'CALL='
@@ -1703,10 +1742,9 @@ for version_variable in KUBECTL_VERSION HELM_VERSION TALOSCTL_VERSION GH_VERSION
   ' "$DOCKERFILE" || fail "$version_variable is not declared after FROM"
 done
 # A bare `docker build .` must leave the optional CLIs out, like the launcher does.
-assert_contains "$DOCKERFILE" 'ARG WITH_KUBERNETES=0'
-assert_contains "$DOCKERFILE" 'ARG WITH_TALOS=0'
-assert_contains "$DOCKERFILE" 'ARG WITH_GITHUB=0'
-assert_contains "$DOCKERFILE" 'ARG WITH_GITLAB=0'
+for tool_arg in TOOL_GH TOOL_GLAB TOOL_KUBERNETES TOOL_TALOS; do
+  assert_contains "$DOCKERFILE" "ARG $tool_arg=0"
+done
 
 # = is in COMP_WORDBREAKS, so readline replaces only the text after it: a candidate
 # that repeats --opt= ends up typed twice.
