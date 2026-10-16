@@ -65,7 +65,7 @@ _agent_capsule_comma_list() {
 
 _agent_capsule() {
   local cur prev words cword line
-  local flags agent word index
+  local flags flag agent word index
 
   if declare -F _init_completion >/dev/null; then
     # Keep = and : attached: --vault=PATH and SRC:DEST:ro are single words here.
@@ -97,11 +97,17 @@ _agent_capsule() {
     esac
   done
 
-  case "$prev" in
+  # = is in COMP_WORDBREAKS, so readline replaces only the text after it: --opt=VALUE
+  # completes the bare VALUE, as --opt VALUE does.
+  flag="$prev"
+  if [[ "$cur" == --*=* ]]; then
+    flag="${cur%%=*}"
+    cur="${cur#*=}"
+  fi
+
+  case "$flag" in
     --agent)
-      mapfile -t COMPREPLY < <(
-        compgen -W "$(agent-capsule --agent list 2>/dev/null) list" -- "$cur"
-      )
+      mapfile -t COMPREPLY < <(compgen -W "$(agent-capsule --agent list 2>/dev/null) list" -- "$cur")
       return 0
       ;;
     --session)
@@ -116,43 +122,17 @@ _agent_capsule() {
       _agent_capsule_comma_list "$cur" "$(_agent_capsule_extras "$agent")"
       return 0
       ;;
+    --prune-caches | --prune-sessions)
+      # DAYS after =, nothing to offer; a flag may still follow.
+      [[ "$cur" == -* ]] || return 0
+      ;;
   esac
 
-  # = is in COMP_WORDBREAKS, so readline replaces only the text after it: offer bare values.
-  case "$cur" in
-    --agent=*)
-      mapfile -t COMPREPLY < <(
-        compgen -W "$(agent-capsule --agent list 2>/dev/null) list" -- "${cur#--agent=}"
-      )
-      return 0
-      ;;
-    --session=*)
-      mapfile -t COMPREPLY < <(
-        compgen -W "$(_agent_capsule_sessions)" -- "${cur#--session=}"
-      )
-      return 0
-      ;;
-    --with=*)
-      _agent_capsule_comma_list "${cur#--with=}" "$(_agent_capsule_extras "$agent")"
-      return 0
-      ;;
-    --vault=*)
-      mapfile -t COMPREPLY < <(compgen -d -- "${cur#--vault=}")
-      return 0
-      ;;
-    --shared-rules=* | --mount=*)
-      mapfile -t COMPREPLY < <(compgen -f -- "${cur#*=}")
-      return 0
-      ;;
-    -*)
-      flags="--agent --session --auth-login --shell --offline --keep-id --with"
-      flags+=" --mount --ca --vault --no-vault --shared-rules --shared-rules-rw"
-      flags+=" --no-shared-rules --shared-memory-ro --no-shared-memory --build"
-      flags+=" --prune-caches --prune-sessions --yes --versions --version --help"
-      mapfile -t COMPREPLY < <(compgen -W "$flags" -- "$cur")
-      return 0
-      ;;
-  esac
+  if [[ "$cur" == -* ]]; then
+    flags="$(agent-capsule --help 2>/dev/null | grep -oE -- '--[a-z][a-z-]*' | sort -u)"
+    mapfile -t COMPREPLY < <(compgen -W "$flags" -- "$cur")
+    return 0
+  fi
 
   # A bare --vault takes no value of its own, so the word after it is the project.
   mapfile -t COMPREPLY < <(compgen -d -- "$cur")

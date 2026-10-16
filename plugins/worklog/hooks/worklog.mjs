@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Claude Code hook: after a turn that changed files, asks the session to log its work in the Obsidian vault.
-// "snapshot" runs on UserPromptSubmit, "check" on Stop, "procedure" prints the procedure for /log-work.
+// "snapshot" runs on UserPromptSubmit, "check" on Stop, "procedure" prints the procedure for /worklog:log-work.
 import { execFileSync } from 'node:child_process';
 import {
   copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync,
@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 const vault = process.env.AGENT_CAPSULE_VAULT_DEST || '/vault';
 const stateDir = join(homedir(), '.claude', 'worklog');
 const objectsRoot = join(homedir(), '.cache', 'worklog');
-const noise = [
+const excludes = [
   '**/*.lock', '**/go.sum', '**/package-lock.json', '**/pnpm-lock.yaml', '**/vendor/**', '**/*.pb.go',
   '**/zz_generated*',
 ].map((glob) => `:(exclude,glob)${glob}`);
@@ -42,9 +42,9 @@ function git(dir, args, env = {}) {
 
 // A throwaway index also captures untracked files and leaves the real index alone. Seeding it from the real one
 // spares git from rehashing unchanged files.
-function snapshot(top, objects) {
+function snapshot(top, store) {
   const dir = mkdtempSync(join(tmpdir(), 'worklog-'));
-  const env = { ...objects, GIT_INDEX_FILE: join(dir, 'index') };
+  const env = { GIT_OBJECT_DIRECTORY: store, GIT_INDEX_FILE: join(dir, 'index') };
   try {
     const index = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
     if (existsSync(index)) copyFileSync(index, env.GIT_INDEX_FILE);
@@ -68,11 +68,21 @@ function head(top) {
   }
 }
 
-function reason(top, numstat, headMoved) {
+function pruneIdleSessions() {
+  const mtime = (path) => statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+  for (const name of new Set([...readdirSync(stateDir), ...readdirSync(objectsRoot)])) {
+    const paths = [join(stateDir, name), join(objectsRoot, name)];
+    if (paths.some((path) => mtime(path) > Date.now() - idleMs)) continue;
+    for (const path of paths) rmSync(path, { recursive: true, force: true });
+  }
+}
+
+function blockReason(top, numstat, headMoved) {
   const rows = numstat.split('\n').map((row) => row.split('\t'));
   const listed = rows.slice(0, maxListed).map(([added, deleted, path]) =>
     added === '-' ? `- ${path} (binary)` : `- ${path} (+${added} -${deleted})`);
   if (rows.length > maxListed) listed.push(`- and ${rows.length - maxListed} more`);
+  // date(1) knows the ISO week year and number (%G-W%V); JavaScript dates do not.
   const today = execFileSync('date', ['+%A %F, ISO week %G-W%V'], { encoding: 'utf8' }).trim();
   return [
     `Stop hook: automatic work log. Today is ${today}.`,
@@ -123,7 +133,6 @@ const save = (state) => {
 // Snapshots write to a private object store that reads the repository's as an alternate, so the repository never
 // collects copies of the worktree.
 const alternate = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
-const objects = (store) => ({ GIT_OBJECT_DIRECTORY: store });
 const sessionObjects = join(objectsRoot, sessionId);
 const newStore = () => {
   mkdirSync(sessionObjects, { recursive: true });
@@ -138,17 +147,12 @@ if (mode === 'snapshot') {
   // A fresh store keeps the saved baseline readable if this snapshot fails.
   const store = newStore();
   const skip = String(input.prompt ?? '').includes('#no-doc');
-  save({ top, store, head: head(top), tree: snapshot(top, objects(store)), skip });
+  save({ top, store, head: head(top), tree: snapshot(top, store), skip });
   // A prompt replaces the baseline, so the objects of earlier snapshots are garbage.
   for (const name of readdirSync(sessionObjects)) {
     if (join(sessionObjects, name) !== store) rmSync(join(sessionObjects, name), { recursive: true, force: true });
   }
-  const mtime = (path) => statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0;
-  for (const name of new Set([...readdirSync(stateDir), ...readdirSync(objectsRoot)])) {
-    const paths = [join(stateDir, name), join(objectsRoot, name)];
-    if (paths.some((path) => mtime(path) > Date.now() - idleMs)) continue;
-    for (const path of paths) rmSync(path, { recursive: true, force: true });
-  }
+  pruneIdleSessions();
 } else {
   let base = null;
   try {
@@ -160,15 +164,16 @@ if (mode === 'snapshot') {
   // per snapshot, or whose store was pruned, cannot be read and only gets replaced.
   const usable = base?.top === top && Boolean(base.store) && existsSync(base.store);
   const store = usable ? base.store : newStore();
-  const tree = snapshot(top, objects(store));
+  const tree = snapshot(top, store);
   const commit = head(top);
   // A turn can start without a prompt, when a background task ends: rebaseline so it does not see this work again.
   save({ top, store, head: commit, tree, skip: false });
   if (!input.stop_hook_active && usable && !base.skip) {
-    const diff = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...noise];
-    const numstat = git(top, diff, objects(store));
+    const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--numstat', base.tree, tree, '--', '.', ...excludes];
+    const numstat = git(top, diffArgs, { GIT_OBJECT_DIRECTORY: store });
     if (numstat) {
-      process.stdout.write(JSON.stringify({ decision: 'block', reason: reason(top, numstat, base.head !== commit) }));
+      const reason = blockReason(top, numstat, base.head !== commit);
+      process.stdout.write(JSON.stringify({ decision: 'block', reason }));
     }
   }
 }

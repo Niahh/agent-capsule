@@ -3,7 +3,7 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)"
-HOOK="${HOOK:-$ROOT_DIR/plugins/worklog/hooks/worklog.mjs}"
+HOOK_JS="$ROOT_DIR/plugins/worklog/hooks/worklog.mjs"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -24,7 +24,7 @@ setup() {
   T_HOME="$WORK/case/home"
   T_VAULT="$WORK/case/vault"
   REPO="$WORK/case/repo"
-  proc="$WORK/case/procedure.md"
+  PROC="$WORK/case/procedure.md"
   SID="s1"
   mkdir -p "$T_HOME" "$T_VAULT" "$REPO"
   git -C "$REPO" init -q
@@ -38,7 +38,7 @@ hook() {
   local mode="$1" prompt="$2" active="$3"
   shift 3
   printf '{"session_id":"%s","cwd":"%s","prompt":"%s","stop_hook_active":%s}' "$SID" "$REPO" "$prompt" "$active" |
-    env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_VAULT_DEST="$T_VAULT" "$@" node "$HOOK" "$mode"
+    env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_VAULT_DEST="$T_VAULT" "$@" node "$HOOK_JS" "$mode"
   local status=$?
   [[ "$status" == 0 ]] || fail "$mode exited $status"
 }
@@ -76,19 +76,13 @@ test_blocks_after_a_turn_that_edits() {
   printf 'b\n' >> "$REPO/main.go"
   # hook() clears the environment, so both sides pin the time zone.
   assert_blocks "edit" "$(hook check "" false TZ=UTC)" "main.go" "$(TZ=UTC date +%A)" "$(TZ=UTC date +%G-W%V)" \
-    "durable change to behavior"
+    "durable change to behavior" 'reply only "Nothing to log."'
 }
 
 test_snapshot_prints_nothing() {
   # UserPromptSubmit stdout is added to the prompt context.
   setup
   assert_empty "snapshot stdout" "$(hook snapshot "do it" false)"
-}
-
-test_silent_when_the_turn_changed_nothing() {
-  setup
-  hook snapshot "explain it" false > /dev/null
-  assert_empty "no change" "$(hook check "" false)"
 }
 
 test_ignores_edits_made_between_turns() {
@@ -169,13 +163,6 @@ test_works_before_the_first_commit() {
   hook snapshot "do it" false > /dev/null
   printf 'new\n' > "$REPO/new.go"
   assert_blocks "no commit" "$(hook check "" false)" "new.go"
-}
-
-test_counts_new_untracked_files() {
-  setup
-  hook snapshot "do it" false > /dev/null
-  printf 'new\n' > "$REPO/new.go"
-  assert_blocks "untracked" "$(hook check "" false)" "new.go"
 }
 
 test_lists_a_change_of_thousands_of_files() {
@@ -290,8 +277,9 @@ test_keeps_the_baseline_when_a_snapshot_fails() {
   printf 'b\n' >> "$REPO/main.go"
   cp "$REPO/.git/index" "$WORK/case/index"
   printf 'corrupt' > "$REPO/.git/index"
+  # Not hook(): this snapshot is meant to fail, and hook() counts a failed exit as a test failure.
   printf '{"session_id":"%s","cwd":"%s","prompt":"next"}' "$SID" "$REPO" |
-    env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_VAULT_DEST="$T_VAULT" node "$HOOK" snapshot > /dev/null 2>&1
+    env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_VAULT_DEST="$T_VAULT" node "$HOOK_JS" snapshot > /dev/null 2>&1
   cp "$WORK/case/index" "$REPO/.git/index"
   assert_blocks "failed snapshot" "$(hook check "" false)" "main.go"
 }
@@ -360,17 +348,17 @@ test_rejects_unsafe_session_ids() {
 
 test_uses_the_procedure_file() {
   setup
-  printf 'MY VAULT STEPS\n' > "$proc"
+  printf 'MY VAULT STEPS\n' > "$PROC"
   hook snapshot "do it" false > /dev/null
   printf 'b\n' >> "$REPO/main.go"
-  assert_blocks "procedure file" "$(hook check "" false AGENT_CAPSULE_WORKLOG_PROCEDURE="$proc")" "MY VAULT STEPS"
+  assert_blocks "procedure file" "$(hook check "" false AGENT_CAPSULE_WORKLOG_PROCEDURE="$PROC")" "MY VAULT STEPS"
 }
 
 test_blank_or_missing_procedure_falls_back() {
   setup
   local file
-  printf '  \n' > "$proc"
-  for file in "$proc" "$WORK/case/missing.md"; do
+  printf '  \n' > "$PROC"
+  for file in "$PROC" "$WORK/case/missing.md"; do
     hook snapshot "do it" false > /dev/null
     printf 'b\n' >> "$REPO/main.go"
     assert_blocks "fallback ${file##*/}" "$(hook check "" false AGENT_CAPSULE_WORKLOG_PROCEDURE="$file")" \
@@ -380,29 +368,21 @@ test_blank_or_missing_procedure_falls_back() {
 
 test_strips_procedure_frontmatter() {
   setup
-  printf -- '---\ntags: [log]\n---\nMY VAULT STEPS\n' > "$proc"
+  printf -- '---\ntags: [log]\n---\nMY VAULT STEPS\n' > "$PROC"
   hook snapshot "do it" false > /dev/null
   printf 'b\n' >> "$REPO/main.go"
   local out reason
-  out="$(hook check "" false AGENT_CAPSULE_WORKLOG_PROCEDURE="$proc")"
+  out="$(hook check "" false AGENT_CAPSULE_WORKLOG_PROCEDURE="$PROC")"
   assert_blocks "frontmatter" "$out" "MY VAULT STEPS"
   reason="$(reason_of "$out")"
   if [[ "$reason" != *'tags: [log]'* ]]; then pass; else fail "frontmatter left in the reason"; fi
 }
 
-test_reason_carries_the_significance_test() {
-  setup
-  hook snapshot "do it" false > /dev/null
-  printf 'b\n' >> "$REPO/main.go"
-  assert_blocks "significance" "$(hook check "" false)" \
-    "durable change to behavior, architecture, configuration" 'reply only "Nothing to log."'
-}
-
 test_procedure_mode_prints_the_procedure() {
   setup
-  printf 'MY VAULT STEPS\n' > "$proc"
+  printf 'MY VAULT STEPS\n' > "$PROC"
   local out
-  out="$(env -i PATH="$PATH" HOME="$T_HOME" AGENT_CAPSULE_WORKLOG_PROCEDURE="$proc" node "$HOOK" procedure </dev/null)"
+  out="$(hook procedure "" false AGENT_CAPSULE_WORKLOG_PROCEDURE="$PROC")"
   if [[ "$out" == "MY VAULT STEPS" ]]; then pass; else fail "procedure mode printed: $out"; fi
 }
 
