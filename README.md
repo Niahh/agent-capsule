@@ -115,7 +115,7 @@ Integrations are turned on per run with `--with`, or by default with
 |---|---|---|---|
 | `superpowers` | Superpowers development skills | all | [Superpowers](docs/integrations.md#superpowers) |
 | `explain-diff` | explains a change as interactive HTML | all | [explain-diff](docs/integrations.md#explain-diff) |
-| `anydoc` | converts documents to Markdown | claude | [Agents](docs/agents.md) |
+| `anydoc` | converts documents to Markdown | all | [anydoc](docs/integrations.md#anydoc) |
 | `vault` | mounts the Obsidian vault, served over MCP | all | [Vault](docs/integrations.md#obsidian-vault-over-mcp) |
 | `worklog` | logs work in the vault; needs `vault` | claude | [Work log](docs/integrations.md#work-log-in-obsidian) |
 | `github` | lends gh the host's login, git over HTTPS; needs `gh` | all | [GitHub](docs/integrations.md#github) |
@@ -159,8 +159,8 @@ including image name, base tags, resource limits, paths, and volume options.
 
 - [Configuration](docs/configuration.md): persistent defaults, every environment variable, tool versions, state
   layout and pruning.
-- [Integrations](docs/integrations.md): Superpowers, explain-diff, the Obsidian vault, the work log, Kubernetes and
-  Talos, GitHub, GitLab, private CAs.
+- [Integrations](docs/integrations.md): Superpowers, explain-diff, anydoc, the Obsidian vault, the work
+  log, Kubernetes and Talos, GitHub, GitLab, private CAs.
 - [Agents](docs/agents.md): logins, API keys, and how Codex and opencode differ from Claude Code.
 - [Shell completion](docs/shell-completion.md): bash and zsh setup.
 - [macOS](docs/macos.md): the Podman machine volumes.

@@ -24,12 +24,8 @@ _agent_capsule_extras() {
   local extra
 
   while IFS= read -r extra; do
-    # anydoc and worklog are Claude Code plugins; the launcher rejects them for other agents.
-    if [[ "$extra" == "anydoc" || "$extra" == "worklog" ]]; then
-      if [[ -n "$selected_agent" && "$selected_agent" != "claude" ]]; then
-        continue
-      fi
-    fi
+    # worklog is a Claude Code plugin; the launcher rejects it for other agents.
+    [[ "$extra" == worklog && -n "$selected_agent" && "$selected_agent" != claude ]] && continue
     printf '%s\n' "$extra"
   done < <(agent-capsule --with list 2>/dev/null)
   printf '%s\n' none list
