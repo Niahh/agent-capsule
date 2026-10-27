@@ -109,6 +109,25 @@ The cluster must be reachable from the container, so these commands fail under
 `--offline`. A kubeconfig that calls an exec credential plugin also needs that plugin
 inside the image.
 
+## Task, jq, yq, Hurl and sops
+
+The `task` tool installs [Task](https://taskfile.dev), `jq` installs jq, `yq` installs
+[mikefarah's yq](https://github.com/mikefarah/yq), `hurl` installs [Hurl](https://hurl.dev) with
+hurlfmt, and `sops` installs [sops](https://github.com/getsops/sops) with
+[age](https://github.com/FiloSottile/age).
+List them in `AGENT_CAPSULE_TOOLS`; the next launch rebuilds the image once.
+
+sops finds no age key in the capsule until you mount one where it
+[looks for it](https://getsops.io/docs/usage/identities/age/):
+
+```sh
+export AGENT_CAPSULE_TOOLS=task,jq,yq,sops
+agent-capsule -m ~/.config/sops/age/keys.txt:/home/dev/.config/sops/age/keys.txt:ro .
+```
+
+The agent can then decrypt every file encrypted to that key, so mount it only in the
+sessions that need it.
+
 ## GitHub
 
 `--with github` lends `gh` the host's `gh` login, so it needs the `gh` tool in the image.

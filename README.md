@@ -105,8 +105,13 @@ the list rebuilds the image once.
 |---|---|---|
 | `gh` | the GitHub CLI | [GitHub](docs/integrations.md#github) |
 | `glab` | the GitLab CLI | [GitLab](docs/integrations.md#gitlab) |
+| `hurl` | Hurl and hurlfmt | [Task and sops](docs/integrations.md#task-jq-yq-hurl-and-sops) |
+| `jq` | jq | [Task and sops](docs/integrations.md#task-jq-yq-hurl-and-sops) |
 | `kubernetes` | kubectl and helm | [Clusters](docs/integrations.md#kubernetes-and-talos) |
+| `sops` | sops and age | [Task and sops](docs/integrations.md#task-jq-yq-hurl-and-sops) |
 | `talos` | talosctl | [Clusters](docs/integrations.md#kubernetes-and-talos) |
+| `task` | Task, the Taskfile runner | [Task and sops](docs/integrations.md#task-jq-yq-hurl-and-sops) |
+| `yq` | yq | [Task and sops](docs/integrations.md#task-jq-yq-hurl-and-sops) |
 
 Integrations are turned on per run with `--with`, or by default with
 `AGENT_CAPSULE_WITH`. They never rebuild the image.
@@ -160,7 +165,7 @@ including image name, base tags, resource limits, paths, and volume options.
 - [Configuration](docs/configuration.md): persistent defaults, every environment variable, tool versions, state
   layout and pruning.
 - [Integrations](docs/integrations.md): Superpowers, explain-diff, anydoc, the Obsidian vault, the work
-  log, Kubernetes and Talos, GitHub, GitLab, private CAs, your own skills and plugins.
+  log, Kubernetes and Talos, Task and sops, GitHub, GitLab, private CAs, your own skills and plugins.
 - [Agents](docs/agents.md): logins, API keys, and how Codex and opencode differ from Claude Code.
 - [Profiles](docs/profiles.md): a second login for the same agent, side by side.
 - [Shell completion](docs/shell-completion.md): bash and zsh setup.

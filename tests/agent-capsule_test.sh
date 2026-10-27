@@ -475,6 +475,7 @@ assert_contains "$OUTPUT" 'worklog'
 assert_contains "$OUTPUT" 'AGENT_CAPSULE_TOOLS'
 assert_contains "$OUTPUT" 'kubernetes'
 assert_contains "$OUTPUT" 'talos'
+assert_contains "$OUTPUT" 'sops (sops and age)'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 run_capsule --version
 assert_contains "$OUTPUT" "agent-capsule $LAUNCHER_VERSION"
@@ -499,7 +500,8 @@ new_case versions-output
 run_capsule --versions
 expected_versions="$(printf '%s\n' "agent-capsule $LAUNCHER_VERSION" 'claude-code latest' 'codex latest' \
   'opencode latest' 'anydoc latest' 'mcpvault latest' 'superpowers latest' 'golangci-lint latest' \
-  'kubectl latest' 'helm latest' 'talosctl latest' 'gh latest' 'glab latest')"
+  'kubectl latest' 'helm latest' 'talosctl latest' 'gh latest' 'glab latest' 'yq latest' 'task latest' \
+  'sops latest' 'hurl latest')"
 [[ "$(<"$OUTPUT")" == "$expected_versions" ]] || fail "unpinned --versions changed: $(<"$OUTPUT")"
 pin_env=()
 expected_versions="agent-capsule $LAUNCHER_VERSION"
@@ -554,7 +556,7 @@ assert_contains "$SCRIPT" "GO_TAG=\"\${AGENT_CAPSULE_GO_TAG:-trixie}\""
 assert_contains "$DOCKERFILE" 'ARG NODE_TAG=trixie-slim'
 assert_contains "$DOCKERFILE" 'ARG GO_TAG=trixie'
 # A bare `docker build .` must leave the optional CLIs out, like the launcher does.
-for tool_arg in TOOL_GH TOOL_GLAB TOOL_KUBERNETES TOOL_TALOS; do
+for tool_arg in TOOL_GH TOOL_GLAB TOOL_HURL TOOL_JQ TOOL_KUBERNETES TOOL_SOPS TOOL_TALOS TOOL_TASK TOOL_YQ; do
   assert_contains "$DOCKERFILE" "ARG $tool_arg=0"
 done
 
@@ -641,6 +643,12 @@ assert_not_contains "$PODMAN_LOG" 'CALL='
 new_case tag-pin-needs-v
 AGENT_CAPSULE_KUBECTL_VERSION=1.37.1 run_capsule_fails --shell "$ROOT_DIR"
 assert_contains "$OUTPUT" 'Invalid pinned tagged version: 1.37.1'
+assert_not_contains "$PODMAN_LOG" 'CALL='
+
+# Hurl tags carry no leading v, so a v in its pin would name a missing release.
+new_case hurl-pin-without-v
+AGENT_CAPSULE_HURL_VERSION=v8.1.0 run_capsule_fails --shell "$ROOT_DIR"
+assert_contains "$OUTPUT" 'Invalid pinned package version: v8.1.0'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # A session from the environment is an ambient default; only an
@@ -736,17 +744,24 @@ assert_not_contains "$PODMAN_LOG" 'WITH_'
 # in a fixed order. Without the variable, none is built in.
 new_case tools-build-args
 run_capsule --shell --session tools-none "$ROOT_DIR"
-for tool_arg in TOOL_GH=0 TOOL_GLAB=0 TOOL_KUBERNETES=0 TOOL_TALOS=0; do
+for tool_arg in TOOL_GH=0 TOOL_GLAB=0 TOOL_HURL=0 TOOL_JQ=0 TOOL_KUBERNETES=0 TOOL_SOPS=0 TOOL_TALOS=0 \
+  TOOL_TASK=0 TOOL_YQ=0; do
   assert_arg_after "$PODMAN_LOG" --build-arg "$tool_arg"
 done
 assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.tools=none'
 assert_contains "$OUTPUT" '>> Tools   : none'
 AGENT_CAPSULE_TOOLS=Talos,gh,talos run_capsule --shell --session tools-some "$ROOT_DIR"
-for tool_arg in TOOL_GH=1 TOOL_GLAB=0 TOOL_KUBERNETES=0 TOOL_TALOS=1; do
+for tool_arg in TOOL_GH=1 TOOL_GLAB=0 TOOL_HURL=0 TOOL_JQ=0 TOOL_KUBERNETES=0 TOOL_SOPS=0 TOOL_TALOS=1 \
+  TOOL_TASK=0 TOOL_YQ=0; do
   assert_arg_after "$PODMAN_LOG" --build-arg "$tool_arg"
 done
 assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.tools=gh,talos'
 assert_contains "$OUTPUT" '>> Tools   : gh,talos'
+AGENT_CAPSULE_TOOLS=yq,task,hurl,sops,jq run_capsule --shell --session tools-runbook "$ROOT_DIR"
+for tool_arg in TOOL_HURL=1 TOOL_JQ=1 TOOL_SOPS=1 TOOL_TASK=1 TOOL_YQ=1; do
+  assert_arg_after "$PODMAN_LOG" --build-arg "$tool_arg"
+done
+assert_contains "$PODMAN_LOG" 'ARG=io.agent-capsule.tools=hurl,jq,sops,task,yq'
 
 # A tool list change rebuilds from cache, so the last refresh survives it.
 new_case tools-change-rebuilds
@@ -783,7 +798,7 @@ assert_contains "$PODMAN_LOG" 'ARG=preexisting:image'
 
 # kubernetes and talos are tools now, and every tool name in --with says where it goes.
 new_case tool-name-in-with
-for tool in kubernetes talos gh glab; do
+for tool in gh glab hurl jq kubernetes sops talos task yq; do
   run_capsule_fails --with "$tool" --shell --session tool-in-with "$ROOT_DIR"
   assert_contains "$OUTPUT" "$tool is a tool: add it to AGENT_CAPSULE_TOOLS, not --with."
   assert_not_contains "$PODMAN_LOG" 'CALL='
@@ -791,7 +806,8 @@ done
 
 new_case unknown-tool
 AGENT_CAPSULE_TOOLS=gh,terraform run_capsule_fails --shell --session unknown-tool "$ROOT_DIR"
-assert_contains "$OUTPUT" 'Unknown tool in AGENT_CAPSULE_TOOLS: terraform (known: gh glab kubernetes talos)'
+assert_contains "$OUTPUT" \
+  'Unknown tool in AGENT_CAPSULE_TOOLS: terraform (known: gh glab hurl jq kubernetes sops talos task yq)'
 assert_not_contains "$PODMAN_LOG" 'CALL='
 
 # A forge integration lends its CLI the host login, so the CLI must be a tool, from

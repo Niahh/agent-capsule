@@ -57,6 +57,11 @@ jobs:
             --build-arg TOOL_GLAB=1 \
             --build-arg TOOL_KUBERNETES=1 \
             --build-arg TOOL_TALOS=1 \
+            --build-arg TOOL_JQ=1 \
+            --build-arg TOOL_YQ=1 \
+            --build-arg TOOL_TASK=1 \
+            --build-arg TOOL_SOPS=1 \
+            --build-arg TOOL_HURL=1 \
             .
       - name: Only the selected agent is installed
         run: |
@@ -89,6 +94,19 @@ jobs:
         run: |
           docker run --rm agent-capsule:test glab version
           docker run --rm agent-capsule:test glab config get telemetry | grep -qx false
+      - name: jq, yq, task, sops and age are installed
+        run: |
+          docker run --rm agent-capsule:test jq --version
+          docker run --rm agent-capsule:test yq --version
+          docker run --rm agent-capsule:test task --version
+          docker run --rm agent-capsule:test sops --version --disable-version-check
+          docker run --rm agent-capsule:test age --version
+          docker run --rm agent-capsule:test age-keygen --version
+      # hurl links against Debian's libcurl and libxml2, so running it checks apt installed them.
+      - name: hurl is installed
+        run: |
+          docker run --rm agent-capsule:test hurl --version
+          docker run --rm agent-capsule:test hurlfmt --version
       # Mounted the way the launcher does it, and as a non-root user like --keep-id.
       - name: curl, git, and Node trust a mounted private CA
         run: |
@@ -198,7 +216,7 @@ jobs:
         run: |
           # Otherwise a broken image would pass every absence check below.
           docker run --rm agent-capsule:default true
-          for tool in kubectl helm talosctl gh glab; do
+          for tool in kubectl helm talosctl gh glab jq yq task sops age hurl; do
             if docker run --rm agent-capsule:default bash -c "command -v $tool"; then
               echo "$tool is present in the default image" >&2
               exit 1

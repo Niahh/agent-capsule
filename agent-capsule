@@ -39,7 +39,8 @@
 #   gitlab lends glab the host's glab login for AGENT_CAPSULE_GITLAB_HOST, and needs the glab tool.
 #
 # Tools, built into the image from AGENT_CAPSULE_TOOLS:
-#   gh, glab, kubernetes (kubectl and helm), talos (talosctl)
+#   gh, glab, hurl (hurl and hurlfmt), jq, kubernetes (kubectl and helm), sops (sops and age),
+#   talos (talosctl), task, yq
 #
 # Documentation: https://github.com/Niahh/agent-capsule
 #
@@ -120,7 +121,8 @@ NODE_TAG="${AGENT_CAPSULE_NODE_TAG:-trixie-slim}"
 GO_TAG="${AGENT_CAPSULE_GO_TAG:-trixie}"
 # The tools a pin can fix, in --versions order: name, variable and kind. The variable
 # is read from AGENT_CAPSULE_<VARIABLE> and passed as the build arg <VARIABLE>. npm
-# packages pin a semver, the others a Git tag with its leading v. Empty means latest.
+# packages and hurl, whose tags carry no v, pin a semver; the others a Git tag with its
+# leading v. Empty means latest.
 PINS=(
   "claude-code CLAUDE_CODE_VERSION semver"
   "codex CODEX_VERSION semver"
@@ -134,6 +136,10 @@ PINS=(
   "talosctl TALOSCTL_VERSION tag"
   "gh GH_VERSION tag"
   "glab GLAB_VERSION tag"
+  "yq YQ_VERSION tag"
+  "task TASK_VERSION tag"
+  "sops SOPS_VERSION tag"
+  "hurl HURL_VERSION semver"
 )
 declare -A PIN
 for row in "${PINS[@]}"; do
@@ -164,7 +170,7 @@ KNOWN_EXTRAS=(anydoc ca explain-diff github gitlab superpowers vault worklog)
 
 # CLIs built into the image, chosen once per user rather than per run: a change to
 # the list rebuilds the image, and --with never does.
-KNOWN_TOOLS=(gh glab kubernetes talos)
+KNOWN_TOOLS=(gh glab hurl jq kubernetes sops talos task yq)
 
 BUILD_DIR="$STATE_DIR/build"
 AUTH_ROOT_DIR="$STATE_DIR/auth-home"

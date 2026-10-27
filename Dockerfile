@@ -167,6 +167,99 @@ RUN if [ "$TOOL_GLAB" = 1 ]; then \
       && rm /tmp/glab.tar.gz; \
     fi
 
+# Debian's package, which apt verifies. Upstream tags look like jq-1.8.2, which the pin format rejects.
+ARG TOOL_JQ=0
+RUN if [ "$TOOL_JQ" = 1 ]; then \
+      apt-get update && apt-get install -y --no-install-recommends jq \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Each checksums line holds every hash of a file, in the column order checksums_hashes_order gives.
+ARG TOOL_YQ=0
+ARG YQ_VERSION=""
+RUN if [ "$TOOL_YQ" = 1 ]; then \
+      yq_release=https://github.com/mikefarah/yq/releases \
+      && yq_version="${YQ_VERSION:-latest}" \
+      && if [ "$yq_version" = latest ]; then \
+        yq_version="$(curl -sSfL -o /dev/null -w '%{url_effective}' "$yq_release/latest")" \
+        && yq_version="${yq_version##*/}"; \
+      fi \
+      && yq_file="yq_linux_$(dpkg --print-architecture)" \
+      && yq_url="$yq_release/download/$yq_version" \
+      && curl -sSfL "$yq_url/$yq_file" -o /usr/local/bin/yq \
+      && curl -sSfL "$yq_url/checksums_hashes_order" -o /tmp/yq_hashes_order \
+      && curl -sSfL "$yq_url/checksums" -o /tmp/yq_checksums \
+      && printf '%s  /usr/local/bin/yq\n' \
+        "$(awk -v file="$yq_file" 'NR == FNR { if ($0 == "SHA-256") col = FNR + 1; next } $1 == file { print $col }' \
+          /tmp/yq_hashes_order /tmp/yq_checksums)" \
+        | sha256sum -c - \
+      && chmod 0755 /usr/local/bin/yq \
+      && rm /tmp/yq_hashes_order /tmp/yq_checksums; \
+    fi
+
+# Checked against the release's own sums, like gh.
+ARG TOOL_TASK=0
+ARG TASK_VERSION=""
+RUN if [ "$TOOL_TASK" = 1 ]; then \
+      task_release=https://github.com/go-task/task/releases \
+      && task_version="${TASK_VERSION:-latest}" \
+      && if [ "$task_version" = latest ]; then \
+        task_version="$(curl -sSfL -o /dev/null -w '%{url_effective}' "$task_release/latest")" \
+        && task_version="${task_version##*/}"; \
+      fi \
+      && task_name="task_linux_$(dpkg --print-architecture).tar.gz" \
+      && task_url="$task_release/download/$task_version" \
+      && curl -sSfL "$task_url/$task_name" -o /tmp/task.tar.gz \
+      && printf '%s  /tmp/task.tar.gz\n' \
+        "$(curl -sSfL "$task_url/task_checksums.txt" | awk -v file="$task_name" '$2 == file {print $1}')" \
+        | sha256sum -c - \
+      && tar -xzf /tmp/task.tar.gz -C /usr/local/bin --no-same-owner task \
+      && rm /tmp/task.tar.gz; \
+    fi
+
+# sops is checked like gh. age publishes Sigsum proofs rather than SHA-256 sums, so it
+# comes from Debian, which apt verifies.
+ARG TOOL_SOPS=0
+ARG SOPS_VERSION=""
+RUN if [ "$TOOL_SOPS" = 1 ]; then \
+      apt-get update && apt-get install -y --no-install-recommends age \
+      && rm -rf /var/lib/apt/lists/* \
+      && sops_release=https://github.com/getsops/sops/releases \
+      && sops_version="${SOPS_VERSION:-latest}" \
+      && if [ "$sops_version" = latest ]; then \
+        sops_version="$(curl -sSfL -o /dev/null -w '%{url_effective}' "$sops_release/latest")" \
+        && sops_version="${sops_version##*/}"; \
+      fi \
+      && sops_file="sops-$sops_version.linux.$(dpkg --print-architecture)" \
+      && sops_url="$sops_release/download/$sops_version" \
+      && curl -sSfL "$sops_url/$sops_file" -o /usr/local/bin/sops \
+      && printf '%s  /usr/local/bin/sops\n' \
+        "$(curl -sSfL "$sops_url/sops-$sops_version.checksums.txt" \
+          | awk -v file="$sops_file" '$2 == file {print $1}')" \
+        | sha256sum -c - \
+      && chmod 0755 /usr/local/bin/sops; \
+    fi
+
+# Upstream's .deb, checked against its .sha256, so apt pulls in the libcurl and libxml2
+# that hurl links against. Hurl tags carry no leading v.
+ARG TOOL_HURL=0
+ARG HURL_VERSION=""
+RUN if [ "$TOOL_HURL" = 1 ]; then \
+      hurl_release=https://github.com/Orange-OpenSource/hurl/releases \
+      && hurl_version="${HURL_VERSION:-latest}" \
+      && if [ "$hurl_version" = latest ]; then \
+        hurl_version="$(curl -sSfL -o /dev/null -w '%{url_effective}' "$hurl_release/latest")" \
+        && hurl_version="${hurl_version##*/}"; \
+      fi \
+      && hurl_file="hurl_${hurl_version}_$(dpkg --print-architecture).deb" \
+      && hurl_url="$hurl_release/download/$hurl_version" \
+      && curl -sSfL "$hurl_url/$hurl_file" -o /tmp/hurl.deb \
+      && printf '%s  /tmp/hurl.deb\n' "$(curl -sSfL "$hurl_url/$hurl_file.sha256")" \
+        | sha256sum -c - \
+      && apt-get update && apt-get install -y --no-install-recommends /tmp/hurl.deb \
+      && rm -rf /var/lib/apt/lists/* /tmp/hurl.deb; \
+    fi
+
 # One CLI, not three: a run uses exactly one agent and each package is large.
 # Last, so switching agents reuses every layer above.
 # The default mirrors the launcher's, so a bare `docker build .` still produces a usable image.
