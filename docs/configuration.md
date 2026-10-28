@@ -26,8 +26,8 @@ Selection and image lifecycle:
 
 - `AGENT_CAPSULE_AGENT=claude`: default agent (`claude`, `codex`, or `opencode`).
 - `AGENT_CAPSULE_WITH=`: comma-separated default integrations.
-- `AGENT_CAPSULE_TOOLS=`: comma-separated tools built into the image: `gh`, `glab`,
-  `kubernetes`, `talos`. A change rebuilds the image once.
+- `AGENT_CAPSULE_TOOLS=`: comma-separated tools built into the image: `gh`, `glab`, `hurl`, `jq`,
+  `kubernetes`, `sops`, `talos`, `task`, `yq`. A change rebuilds the image once.
 - `AGENT_CAPSULE_IMAGE=agent-capsule-dev`: image name, tagged with the agent's name; a
   full tagged reference is one image that every agent shares.
 - `AGENT_CAPSULE_MAX_IMAGE_AGE_DAYS=7`: days between full refreshes; `0` disables
@@ -119,10 +119,15 @@ AGENT_CAPSULE_HELM_VERSION
 AGENT_CAPSULE_TALOSCTL_VERSION
 AGENT_CAPSULE_GH_VERSION
 AGENT_CAPSULE_GLAB_VERSION
+AGENT_CAPSULE_YQ_VERSION
+AGENT_CAPSULE_TASK_VERSION
+AGENT_CAPSULE_SOPS_VERSION
+AGENT_CAPSULE_HURL_VERSION
 ```
 
-Superpowers, golangci-lint, kubectl, Helm, talosctl, gh, and glab use Git tags, including
-the leading `v`.
+Superpowers, golangci-lint, kubectl, Helm, talosctl, gh, glab, yq, Task, and sops use Git tags,
+including the leading `v`. jq and age are the base image's Debian packages and cannot be pinned.
+Hurl tags carry no `v`, so its pin is a plain version such as `8.1.0`.
 `agent-capsule --versions` prints `latest` for everything unpinned.
 The default base tags are the floating `node:trixie-slim` and `golang:trixie` tags.
 Set `AGENT_CAPSULE_NODE_TAG` or `AGENT_CAPSULE_GO_TAG` to override them.
